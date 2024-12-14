@@ -160,7 +160,10 @@ class HookedTransformer(HookedRootModule):
                 if "phi" in self.cfg.tokenizer_name.lower():
                     use_fast = False
                 huggingface_token = os.environ.get("HF_TOKEN", "")
-                add_bos_token = False if self.cfg.original_architecture == "OlmoForCausalLM" else True
+                add_bos_token = self.cfg.original_architecture not in [
+                    "OlmoForCausalLM",
+                    "OlmoeForCausalLM",
+                ]
                 self.set_tokenizer(
                     AutoTokenizer.from_pretrained(
                         self.cfg.tokenizer_name,
@@ -734,7 +737,10 @@ class HookedTransformer(HookedRootModule):
         # tokenizers like LlamaTokenizer are different when bos token is automatically/manually
         # prepended, and add_bos_token cannot be dynamically controlled after initialization
         # (https://github.com/huggingface/transformers/issues/25886).
-        if self.cfg.original_architecture != "OlmoForCausalLM":
+        if self.cfg.original_architecture not in [
+            "OlmoForCausalLM",
+            "OlmoeForCausalLM",
+        ]:
             tokenizer_with_bos = utils.get_tokenizer_with_bos(tokenizer)
         else:
             tokenizer_with_bos = tokenizer
