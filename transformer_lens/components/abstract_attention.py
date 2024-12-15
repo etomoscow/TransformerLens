@@ -17,7 +17,6 @@ from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCacheEntry
 from transformer_lens.utilities.attention import complex_attn_linear, simple_attn_linear
 from transformer_lens.utils import get_offset_position_ids
-from transformer_lens.components.rms_norm import RMSNorm
 
 if is_bitsandbytes_available():
     import bitsandbytes as bnb
