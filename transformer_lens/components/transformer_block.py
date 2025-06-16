@@ -155,12 +155,12 @@ class TransformerBlock(nn.Module):
 
         if self.cfg.original_architecture == "Olmo2ForCausalLM":
             attn_out = self.attn(
-            query_input=query_input,
-            key_input=key_input,
-            value_input=value_input,
-            past_kv_cache_entry=past_kv_cache_entry,
-            attention_mask=attention_mask,
-        )
+                query_input=query_input,
+                key_input=key_input,
+                value_input=value_input,
+                past_kv_cache_entry=past_kv_cache_entry,
+                attention_mask=attention_mask,
+            )
         else:
             attn_out = (
                 # hook the residual stream states that are used to calculate the
