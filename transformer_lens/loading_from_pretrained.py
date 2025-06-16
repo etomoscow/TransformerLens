@@ -18,7 +18,6 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     BertForPreTraining,
-    PretrainedConfig,
     T5ForConditionalGeneration,
 )
 
@@ -280,7 +279,7 @@ OFFICIAL_MODEL_NAMES = [
     "allenai/OLMoE-1B-7B-0924",
     "allenai/OLMoE-1B-7B-0924-SFT",
     "allenai/OLMoE-1B-7B-0924-Instruct",
-    "allenai/OLMo-2-1124-7B"
+    "allenai/OLMo-2-1124-7B",
 ]
 """Official model names for models on HuggingFace."""
 

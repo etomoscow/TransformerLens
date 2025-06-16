@@ -155,12 +155,12 @@ class TransformerBlock(nn.Module):
 
         if self.cfg.original_architecture == "Olmo2ForCausalLM":
             attn_out = self.attn(
-            query_input=query_input,
-            key_input=key_input,
-            value_input=value_input,
-            past_kv_cache_entry=past_kv_cache_entry,
-            attention_mask=attention_mask,
-        )
+                query_input=query_input,
+                key_input=key_input,
+                value_input=value_input,
+                past_kv_cache_entry=past_kv_cache_entry,
+                attention_mask=attention_mask,
+            )
         else:
             attn_out = (
                 # hook the residual stream states that are used to calculate the
@@ -185,7 +185,6 @@ class TransformerBlock(nn.Module):
         if self.cfg.original_architecture == "Olmo2ForCausalLM":
             attn_out = self.ln1(attn_out)
 
-
         if resid_pre.device != attn_out.device:
             resid_pre = resid_pre.to(attn_out.device)
 
@@ -195,7 +194,7 @@ class TransformerBlock(nn.Module):
                 resid_mid if not self.cfg.use_hook_mlp_in else self.hook_mlp_in(resid_mid.clone())
             )
             if self.cfg.original_architecture == "Olmo2ForCausalLM":
-                mlp_out = self.apply_mlp(mlp_in) 
+                mlp_out = self.apply_mlp(mlp_in)
                 mlp_out = self.ln2(mlp_out)
             else:
                 normalized_resid_mid = self.ln2(mlp_in)
