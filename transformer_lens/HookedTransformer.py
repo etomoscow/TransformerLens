@@ -1841,7 +1841,7 @@ class HookedTransformer(HookedRootModule):
         """
         if self.cfg.original_architecture == "Olmo2ForCausalLM":
             print("Not centering embedding weights for Olmo2ForCausalLM")
-            pass # should not because input of attn of 1st layer is not normed
+            pass  # should not because input of attn of 1st layer is not normed
         else:
             state_dict["embed.W_E"] = state_dict["embed.W_E"] - state_dict["embed.W_E"].mean(
                 -1, keepdim=True
