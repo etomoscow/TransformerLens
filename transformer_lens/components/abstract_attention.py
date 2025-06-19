@@ -282,9 +282,10 @@ class AbstractAttention(ABC, nn.Module):
                 )
 
             # Take the last query_ctx positions so it also works with past_kv_cache
-            attn_scores += self.alibi[
-                :, -query_ctx:, :key_ctx
-            ]  # [batch, head_index, query_pos, key_pos]
+            if self.alibi is not None:  # Add None check
+                attn_scores += self.alibi[
+                    :, -query_ctx:, :key_ctx
+                ]  # [batch, head_index, query_pos, key_pos]
         elif self.cfg.positional_embedding_type == "relative_positional_bias":
             if position_bias is None:
                 if self.has_relative_attention_bias:
@@ -298,7 +299,8 @@ class AbstractAttention(ABC, nn.Module):
                         device=attn_scores.device,
                     )
 
-            attn_scores += position_bias
+            if position_bias is not None:  # Add None check
+                attn_scores += position_bias
         if self.cfg.attention_dir == "causal":
             # If causal attention, we mask it to only attend backwards. If bidirectional, we don't mask.
             attn_scores = self.apply_causal_mask(
