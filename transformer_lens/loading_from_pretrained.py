@@ -294,7 +294,10 @@ OFFICIAL_MODEL_NAMES = [
     "allenai/OLMoE-1B-7B-0924",
     "allenai/OLMoE-1B-7B-0924-SFT",
     "allenai/OLMoE-1B-7B-0924-Instruct",
+    "allenai/OLMo-2-0425-1B",
+    "allenai/OLMo-2-0425-1B-SFT",
     "allenai/OLMo-2-1124-7B",
+    "allenai/OLMo-2-1124-7B-SFT",
 ]
 """Official model names for models on HuggingFace."""
 
@@ -1996,7 +1999,25 @@ def convert_hf_model_config(model_name: str, **kwargs: Any):
             "positional_embedding_type": "rotary",
             "gated_mlp": True,
         }
-    elif official_model_name == "allenai/OLMo-2-1124-7B":
+    elif official_model_name.startswith("allenai/OLMo-2-0425-1B"):
+        cfg_dict = {
+            "d_model": 2048,
+            "d_head": 128,
+            "n_heads": 16,
+            "d_mlp": 8192,
+            "n_layers": 16,
+            "n_ctx": 4096,
+            "eps": 1e-06,
+            "d_vocab": 100352,
+            "act_fn": "silu",
+            "initializer_range": 0.02,
+            "normalization_type": "RMS",
+            "rotary_base": 500000.0,
+            "attn_types": ["global"] * 16,
+            "positional_embedding_type": "rotary",
+            "gated_mlp": True,
+        }
+    elif official_model_name.startswith("allenai/OLMo-2-1124-7B"):
         cfg_dict = {
             "d_model": 4096,
             "d_head": 128,
