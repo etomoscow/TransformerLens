@@ -2029,7 +2029,7 @@ def convert_hf_model_config(model_name: str, **kwargs: Any):
             "d_vocab": 100352,
             "act_fn": "silu",
             "initializer_range": 0.02,
-            "normalization_type": "RMSPre",
+            "normalization_type": "RMS",
             "rotary_base": 500000.0,
             "attn_types": ["global"] * 32,
             "positional_embedding_type": "rotary",
