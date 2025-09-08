@@ -284,13 +284,14 @@ class TransformerBridge(nn.Module):
             if hook_name in self._hook_registry:
                 self.hooks_to_cache[hook_name] = self._hook_registry[hook_name]
 
-        self._add_aliases_to_hooks(self.hooks_to_cache)
-
     def set_hooks_to_cache(
         self, hook_names: Optional[List[str]] = None, include_all: bool = False
     ) -> None:
         """Set the hooks to cache."""
         hooks_to_cache = {}
+
+        if self.compatibility_mode:
+            aliases = collect_aliases_recursive(self)
 
         if include_all:
             self.hooks_to_cache = self.hook_dict
@@ -300,6 +301,8 @@ class TransformerBridge(nn.Module):
             for hook_name in hook_names:
                 if hook_name in self._hook_registry:
                     hooks_to_cache[hook_name] = self._hook_registry[hook_name]
+                elif self.compatibility_mode and hook_name in aliases:
+                    hooks_to_cache[hook_name] = self._hook_registry[aliases[hook_name]]
                 else:
                     raise ValueError(
                         f"Hook {hook_name} does not exist. If you are using a hook name used with the old HookedTransformer, make sure to enable compatibility mode."
@@ -308,7 +311,6 @@ class TransformerBridge(nn.Module):
             raise ValueError("hook_names must be provided if include_all is False")
 
         self.hooks_to_cache = hooks_to_cache
-        self._add_aliases_to_hooks(self.hooks_to_cache)
 
     def __getattr__(self, name: str) -> Any:
         """Provide a clear error message for missing attributes."""
