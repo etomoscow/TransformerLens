@@ -10,7 +10,16 @@ import pytest
 import torch
 
 from transformer_lens.ActivationCache import ActivationCache
+from transformer_lens.conversion_utils.conversion_steps.rearrange_hook_conversion import (
+    RearrangeHookConversion,
+)
 from transformer_lens.model_bridge import TransformerBridge
+from transformer_lens.model_bridge.generalized_components.attention import (
+    AttentionBridge,
+)
+from transformer_lens.model_bridge.generalized_components.joint_qkv_attention import (
+    JointQKVAttentionBridge,
+)
 
 
 def test_model_initialization():
@@ -65,6 +74,37 @@ def test_text_generation():
 
     assert isinstance(output, str), "Output should be a string"
     assert len(output) > len(prompt), "Generated text should be longer than the prompt"
+
+
+def test_generate_with_kv_cache():
+    """Test that generate works with use_past_kv_cache parameter."""
+    model_name = "gpt2"  # Use a smaller model for testing
+    bridge = TransformerBridge.boot_transformers(model_name)
+
+    if bridge.tokenizer.pad_token is None:
+        bridge.tokenizer.pad_token = bridge.tokenizer.eos_token
+
+    prompt = "The quick brown fox jumps over the lazy dog"
+
+    # Test with KV cache enabled
+    output_with_cache = bridge.generate(prompt, max_new_tokens=5, use_past_kv_cache=True)
+
+    # Test with KV cache disabled
+    output_without_cache = bridge.generate(prompt, max_new_tokens=5, use_past_kv_cache=False)
+
+    # Both should produce valid outputs
+    assert isinstance(output_with_cache, str), "Output with KV cache should be a string"
+    assert isinstance(output_without_cache, str), "Output without KV cache should be a string"
+    assert len(output_with_cache) > len(
+        prompt
+    ), "Generated text with KV cache should be longer than the prompt"
+    assert len(output_without_cache) > len(
+        prompt
+    ), "Generated text without KV cache should be longer than the prompt"
+
+    # The outputs might be different due to sampling, but both should be valid
+    assert len(output_with_cache) > 0, "Output with KV cache should not be empty"
+    assert len(output_without_cache) > 0, "Output without KV cache should not be empty"
 
 
 def test_hooks():
@@ -158,69 +198,52 @@ def test_component_access():
 
 def test_joint_qkv_custom_conversion_rule():
     """Test that custom QKV conversion rules can be passed to QKVBridge."""
-    from transformer_lens.conversion_utils.conversion_steps.rearrange_hook_conversion import (
-        RearrangeHookConversion,
-    )
-    from transformer_lens.model_bridge.generalized_components.qkv_bridge import (
-        QKVBridge,
-    )
 
     model_name = "gpt2"  # Use a smaller model for testing
     bridge = TransformerBridge.boot_transformers(model_name)
 
     # Create a custom QKV conversion rule
-    custom_qkv_conversion = RearrangeHookConversion(
+    custom_qkv_conversion_rule = RearrangeHookConversion(
         "batch seq (num_attention_heads d_head) -> batch seq num_attention_heads d_head",
         num_attention_heads=12,  # GPT-2 small has 12 heads
     )
 
-    custom_qkv_separation = RearrangeHookConversion(
-        "batch seq (three d_model) -> three batch seq d_model",
-        three=3,
-    )
-
     # This should not raise an error
-    test_bridge = QKVBridge(
-        name="test_qkv_bridge",
+    test_bridge = JointQKVAttentionBridge(
+        name="test_joint_qkv_attention_bridge",
         config=bridge.cfg,
+        split_qkv_matrix=lambda x: (x, x, x),  # Dummy function for test
         submodules={},
-        qkv_conversion_rule=custom_qkv_conversion,
-        qkv_separation_rule=custom_qkv_separation,
+        qkv_conversion_rule=custom_qkv_conversion_rule,
     )
 
     # Verify the custom conversion rule was set on Q, K, V components
     assert (
-        test_bridge.q_hook_in.hook_conversion is custom_qkv_conversion
+        test_bridge.q.hook_in.hook_conversion is custom_qkv_conversion_rule
     ), "Custom QKV conversion rule should be set on hook_in of Q"
     assert (
-        test_bridge.k_hook_in.hook_conversion is custom_qkv_conversion
+        test_bridge.k.hook_in.hook_conversion is custom_qkv_conversion_rule
     ), "Custom QKV conversion rule should be set on hook_in of K"
     assert (
-        test_bridge.v_hook_in.hook_conversion is custom_qkv_conversion
+        test_bridge.v.hook_in.hook_conversion is custom_qkv_conversion_rule
     ), "Custom QKV conversion rule should be set on hook_in of V"
     assert (
-        test_bridge.q_hook_out.hook_conversion is custom_qkv_conversion
+        test_bridge.q.hook_out.hook_conversion is custom_qkv_conversion_rule
     ), "Custom QKV conversion rule should be set on hook_out of Q"
     assert (
-        test_bridge.k_hook_out.hook_conversion is custom_qkv_conversion
+        test_bridge.k.hook_out.hook_conversion is custom_qkv_conversion_rule
     ), "Custom QKV conversion rule should be set on hook_out of K"
     assert (
-        test_bridge.v_hook_out.hook_conversion is custom_qkv_conversion
+        test_bridge.v.hook_out.hook_conversion is custom_qkv_conversion_rule
     ), "Custom QKV conversion rule should be set on hook_out of V"
 
     assert (
-        test_bridge.qkv_conversion_rule is custom_qkv_conversion
+        test_bridge.qkv_conversion_rule is custom_qkv_conversion_rule
     ), "Custom QKV conversion rule should be set"
-    assert (
-        test_bridge.qkv_separation_rule is custom_qkv_separation
-    ), "Custom QKV separation rule should be set"
 
 
 def test_attention_pattern_hook_shape_custom_conversion():
     """Test that custom pattern conversion rules can be passed to attention components."""
-    from transformer_lens.conversion_utils.conversion_steps.rearrange_hook_conversion import (
-        RearrangeHookConversion,
-    )
 
     model_name = "gpt2"  # Use a smaller model for testing
     bridge = TransformerBridge.boot_transformers(model_name)
@@ -236,9 +259,6 @@ def test_attention_pattern_hook_shape_custom_conversion():
     # Verify that the attention bridge accepts the custom conversion parameter
     # We can't easily test this with the existing bridge without recreating it,
     # but we can at least verify the parameter is accepted without error
-    from transformer_lens.model_bridge.generalized_components.attention import (
-        AttentionBridge,
-    )
 
     # This should not raise an error
     test_bridge = AttentionBridge(
