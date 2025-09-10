@@ -137,13 +137,18 @@ class TransformerBridge(nn.Module):
         self._scan_existing_hooks(self, "")
 
         # Add bridge aliases if compatibility mode is enabled
-        if self.compatibility_mode and self.hook_aliases:
+        if self.compatibility_mode:
             self._add_aliases_to_hooks(self._hook_registry)
 
         self._hook_registry_initialized = True
 
     def _add_aliases_to_hooks(self, hooks: Dict[str, HookPoint]) -> None:
         """Add aliases to hooks in place."""
+
+        # If no aliases, do nothing
+        if not self.hook_aliases:
+            return
+
         for alias_name, target in self.hook_aliases.items():
             # Use the existing alias system to resolve the target hook
             # Convert to Dict[str, str] for resolve_alias if target_name is a list
@@ -233,17 +238,7 @@ class TransformerBridge(nn.Module):
 
         # Add aliases if compatibility mode is enabled
         if self.compatibility_mode:
-            for alias_name, target in self.hook_aliases.items():
-                # Handle both string and list target names
-                if isinstance(target, list):
-                    # For list targets, find the first one that exists in hooks
-                    for single_target in target:
-                        if single_target in hooks:
-                            hooks[alias_name] = hooks[single_target]
-                            break
-                else:
-                    if target in hooks:
-                        hooks[alias_name] = hooks[target]
+            self._add_aliases_to_hooks(hooks)
 
         return hooks
 
@@ -261,7 +256,7 @@ class TransformerBridge(nn.Module):
         self._hook_registry_initialized = False
 
     def _initialize_hooks_to_cache(self) -> None:
-        """Initialize the hooks to cache."""
+        """Initialize the hooks to cache when running the model with cache."""
         self.hooks_to_cache = {}
 
         default_cached_hooks_names = [
@@ -321,7 +316,15 @@ class TransformerBridge(nn.Module):
     def set_hooks_to_cache(
         self, hook_names: Optional[List[str]] = None, include_all: bool = False
     ) -> None:
-        """Set the hooks to cache."""
+        """Set the hooks to cache when running the model with cache.
+
+        You can specify hook names that were only available in the old HookedTransformer,
+        but in this case you need to make sure to enable compatibility mode.
+
+        Args:
+            hook_names (Optional[List[str]]): List of hook names to cache
+            include_all (bool): Whether to cache all hooks
+        """
         hooks_to_cache = {}
 
         if self.compatibility_mode:
@@ -1264,7 +1267,7 @@ class TransformerBridge(nn.Module):
 
                     # Add hook to the output of the last layer to be processed
                     block_hook_name = f"blocks.{last_layer_to_process}.hook_out"
-                    hook_dict = self._hook_registry
+                    hook_dict = self.hook_dict
                     if block_hook_name in hook_dict:
                         hook_dict[block_hook_name].add_hook(stop_hook)
                         hooks.append((hook_dict[block_hook_name], block_hook_name))
@@ -1405,7 +1408,7 @@ class TransformerBridge(nn.Module):
 
                 # Add hook to the output of the last layer to be processed
                 block_hook_name = f"blocks.{last_layer_to_process}.hook_out"
-                hook_dict = self._hook_registry
+                hook_dict = self.hook_dict
                 if block_hook_name in hook_dict:
                     add_hook_to_point(hook_dict[block_hook_name], stop_hook, block_hook_name)
 
@@ -1435,7 +1438,7 @@ class TransformerBridge(nn.Module):
 
                 if isinstance(hook_name_or_filter, str):
                     # Direct hook name - check for aliases first
-                    hook_dict = self._hook_registry
+                    hook_dict = self.hook_dict
                     actual_hook_name = hook_name_or_filter
 
                     # If this is an alias, resolve it to the actual hook name
@@ -1446,7 +1449,7 @@ class TransformerBridge(nn.Module):
                         add_hook_to_point(hook_dict[actual_hook_name], hook_fn, actual_hook_name)
                 else:
                     # Filter function
-                    hook_dict = self._hook_registry
+                    hook_dict = self.hook_dict
                     for name, hook_point in hook_dict.items():
                         if hook_name_or_filter(name):
                             add_hook_to_point(hook_point, hook_fn, name)
