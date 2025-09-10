@@ -391,18 +391,18 @@ class AttentionBridge(GeneralizedComponent):
             return self.hook_out(output)
         elif isinstance(output, tuple) and len(output) > 0:
             # Apply hook_out to the first element (typically hidden states)
-            processed_output = list(output)
+            processed_tuple = list(output)
             if isinstance(output[0], torch.Tensor):
-                processed_output[0] = self.hook_out(output[0])
-            return tuple(processed_output)
+                processed_tuple[0] = self.hook_out(output[0])
+            return tuple(processed_tuple)
         elif isinstance(output, dict):
             # Apply hook_out to the main hidden states in dictionary
-            processed_output = output.copy()
+            processed_dict = output.copy()
             for key in ["last_hidden_state", "hidden_states"]:
-                if key in processed_output and isinstance(processed_output[key], torch.Tensor):
-                    processed_output[key] = self.hook_out(processed_output[key])
+                if key in processed_dict and isinstance(processed_dict[key], torch.Tensor):
+                    processed_dict[key] = self.hook_out(processed_dict[key])
                     break  # Only apply to the first found key
-            return processed_output
+            return processed_dict
         else:
             return output
 
