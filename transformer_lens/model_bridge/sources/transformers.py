@@ -211,12 +211,11 @@ def boot(
     adapter = ArchitectureAdapterFactory.select_architecture_adapter(bridge_config)
 
     # No device specified by user, use the best available device for the current system
-    if device == None:
+    if device is None:
         device = get_device()
 
     # Add device information to the config
-    if device is not None:
-        adapter.cfg.device = str(device)
+    adapter.cfg.device = str(device)
 
     # Load the model from HuggingFace using the original config
     hf_model = AutoModelForCausalLM.from_pretrained(
