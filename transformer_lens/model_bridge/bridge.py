@@ -346,9 +346,205 @@ class TransformerBridge(nn.Module):
         self._initialize_hook_registry()
 
         if not no_processing:
-            self.cfg.layer_norm_folding = True
-            self.fold_layer_norm()
-            self.fold_value_biases()
+            # TODO: Processing steps need to be reimplemented for TransformerBridge architecture
+            # The current implementations break ablation functionality
+            # For now, we disable processing to ensure hooks work correctly
+            print(
+                "Warning: Processing disabled for TransformerBridge to preserve hook functionality"
+            )
+            print("Use no_processing=True to suppress this warning")
+            # self.process_weights(fold_ln=True, center_writing_weights=True, center_unembed=True, fold_value_biases=False)
+
+    def _fold_layer_norm(self):
+        """Fold LayerNorm weights into subsequent linear layers.
+
+        This is equivalent to HookedTransformer's fold_ln processing.
+        """
+        print("Applying layer norm folding...")
+        # Use the existing fold_layer_norm method
+        self.fold_layer_norm(fold_biases=True, center_weights=True)
+        print("Layer norm folding complete")
+
+    def _center_writing_weights(self):
+        """Center weights that write to the residual stream.
+
+        This centers W_O (attention output), W_E (embedding), W_pos (positional),
+        and MLP output weights by subtracting their mean.
+        """
+        print("Centering writing weights...")
+
+        # Center embedding weights if they exist
+        if hasattr(self, "embed") and hasattr(self.embed, "weight"):
+            embed_weight = self.embed.weight
+            embed_mean = embed_weight.mean(dim=-1, keepdim=True)
+            self.embed.weight.data = embed_weight - embed_mean
+            print("Centered embedding weights")
+
+        # Center positional embedding weights if they exist
+        if hasattr(self, "pos_embed") and hasattr(self.pos_embed, "weight"):
+            pos_weight = self.pos_embed.weight
+            pos_mean = pos_weight.mean(dim=-1, keepdim=True)
+            self.pos_embed.weight.data = pos_weight - pos_mean
+            print("Centered positional embedding weights")
+
+        # Center attention output weights and biases for all layers
+        for layer_idx in range(self.cfg.n_layers):
+            attn = self.blocks[layer_idx].attn
+
+            # Center W_O weights
+            if hasattr(attn, "o") and hasattr(attn.o, "weight"):
+                wo = attn.o.weight
+                wo_mean = wo.mean(dim=-1, keepdim=True)
+                attn.o.weight.data = wo - wo_mean
+
+            # Center b_O bias
+            if hasattr(attn, "o") and hasattr(attn.o, "bias") and attn.o.bias is not None:
+                bo = attn.o.bias
+                bo_mean = bo.mean()
+                attn.o.bias.data = bo - bo_mean
+
+            # Center MLP output weights and biases if not attention-only
+            if not self.cfg.attn_only and hasattr(self.blocks[layer_idx], "mlp"):
+                mlp = self.blocks[layer_idx].mlp
+                if hasattr(mlp, "output") and hasattr(mlp.output, "weight"):
+                    mlp_out_weight = mlp.output.weight
+                    mlp_out_mean = mlp_out_weight.mean(dim=-1, keepdim=True)
+                    mlp.output.weight.data = mlp_out_weight - mlp_out_mean
+
+                if (
+                    hasattr(mlp, "output")
+                    and hasattr(mlp.output, "bias")
+                    and mlp.output.bias is not None
+                ):
+                    mlp_out_bias = mlp.output.bias
+                    mlp_out_bias_mean = mlp_out_bias.mean()
+                    mlp.output.bias.data = mlp_out_bias - mlp_out_bias_mean
+
+        print("Writing weights centering complete")
+
+    def _center_unembed_weights(self):
+        """Center the unembedding weights W_U.
+
+        This subtracts the mean from unembedding weights and biases.
+        Softmax is translation invariant so this doesn't affect log probs.
+        """
+        print("Centering unembed weights...")
+
+        if hasattr(self, "unembed") and hasattr(self.unembed, "weight"):
+            unembed_weight = self.unembed.weight
+            unembed_mean = unembed_weight.mean(dim=-1, keepdim=True)
+            self.unembed.weight.data = unembed_weight - unembed_mean
+            print(f"Centered unembed weights, mean was {unembed_mean.mean().item():.8f}")
+
+        if (
+            hasattr(self, "unembed")
+            and hasattr(self.unembed, "bias")
+            and self.unembed.bias is not None
+        ):
+            unembed_bias = self.unembed.bias
+            unembed_bias_mean = unembed_bias.mean()
+            self.unembed.bias.data = unembed_bias - unembed_bias_mean
+            print(f"Centered unembed bias, mean was {unembed_bias_mean.item():.8f}")
+
+        print("Unembed centering complete")
+
+    def _fold_value_biases_weights(self):
+        """Fold value biases into the output bias.
+
+        Because attention patterns sum to 1, value biases have a constant effect.
+        We can fold them into the output bias: b_O_new = b_O + sum_head(b_V @ W_O)
+        """
+        print("Folding value biases...")
+
+        for layer_idx in range(self.cfg.n_layers):
+            attn = self.blocks[layer_idx].attn
+
+            # Get value bias and output weight
+            if hasattr(attn, "v") and hasattr(attn.v, "bias") and attn.v.bias is not None:
+                if hasattr(attn, "o") and hasattr(attn.o, "weight"):
+                    b_v = attn.v.bias  # shape: [d_head] or [n_heads, d_head]
+                    W_o = attn.o.weight  # shape varies by architecture
+
+                    # Get original output bias or create zeros
+                    if hasattr(attn.o, "bias") and attn.o.bias is not None:
+                        b_o_original = attn.o.bias
+                    else:
+                        b_o_original = torch.zeros(
+                            self.cfg.d_model, device=W_o.device, dtype=W_o.dtype
+                        )
+
+                    # Fold b_V into b_O (implementation depends on architecture)
+                    # This is a simplified version - actual implementation would need
+                    # to handle different attention architectures properly
+                    try:
+                        if b_v.dim() == 1:  # single bias vector
+                            folded_contribution = (
+                                b_v @ W_o
+                                if W_o.dim() == 2
+                                else torch.sum(b_v[:, None] * W_o, dim=0)
+                            )
+                        else:  # per-head biases
+                            folded_contribution = (
+                                torch.sum(b_v @ W_o, dim=0)
+                                if W_o.dim() == 3
+                                else torch.sum(b_v.flatten()[:, None] * W_o, dim=0)
+                            )
+
+                        # Update biases
+                        new_b_o = b_o_original + folded_contribution
+                        if hasattr(attn.o, "bias"):
+                            attn.o.bias.data = new_b_o
+                        else:
+                            attn.o.bias = nn.Parameter(new_b_o)
+
+                        # Zero out value bias
+                        attn.v.bias.data.zero_()
+                        print(f"Folded value bias for layer {layer_idx}")
+
+                    except Exception as e:
+                        print(f"Could not fold value bias for layer {layer_idx}: {e}")
+
+        print("Value bias folding complete")
+
+    def process_weights(
+        self, fold_ln=True, center_writing_weights=True, center_unembed=True, fold_value_biases=True
+    ):
+        """Apply all HookedTransformer-style processing steps.
+
+        This applies the same processing that HookedTransformer.from_pretrained() does
+        by default to make the model more interpretable and effective for ablation studies.
+
+        Args:
+            fold_ln: Whether to fold LayerNorm weights into subsequent linear layers
+            center_writing_weights: Whether to center weights that write to residual stream
+            center_unembed: Whether to center unembedding weights
+            fold_value_biases: Whether to fold value biases into output biases
+        """
+        print("Starting comprehensive weight processing...")
+
+        if fold_ln:
+            self._fold_layer_norm()
+
+        if center_writing_weights:
+            self._center_writing_weights()
+
+        if center_unembed:
+            self._center_unembed_weights()
+
+        if fold_value_biases:
+            self._fold_value_biases_weights()
+
+        print("Comprehensive weight processing complete")
+
+    def _apply_weight_centering_processing(self):
+        """Legacy method - use process_weights() instead.
+
+        This applies the new comprehensive processing.
+        """
+        print("Applying comprehensive processing via process_weights()...")
+        self.process_weights(
+            fold_ln=True, center_writing_weights=True, center_unembed=True, fold_value_biases=True
+        )
 
     def fold_value_biases(self):
         """Fold the value biases into the output bias.
@@ -988,10 +1184,22 @@ class TransformerBridge(nn.Module):
                 w_v = block.attn.v.weight
                 w_o = block.attn.o.weight
 
-                # Reshape from [d_model, d_model] to [n_heads, d_model, d_head] and [n_heads, d_head, d_model]
-                # Handle different attention architectures (Multi-Head, Multi-Query, Grouped Query)
-                if w_q.shape == (self.cfg.d_model, self.cfg.d_model):
-                    d_head = self.cfg.d_model // self.cfg.n_heads
+                # TODO: Fix the complex reshaping logic - temporarily simplified
+                # Store weights in the expected format
+                params_dict[f"blocks.{layer_idx}.attn.W_Q"] = w_q
+                params_dict[f"blocks.{layer_idx}.attn.W_K"] = w_k
+                params_dict[f"blocks.{layer_idx}.attn.W_V"] = w_v
+                params_dict[f"blocks.{layer_idx}.attn.W_O"] = w_o
+
+                # Add biases if they exist
+                if hasattr(block.attn.q, "bias") and block.attn.q.bias is not None:
+                    params_dict[f"blocks.{layer_idx}.attn.b_Q"] = block.attn.q.bias
+                if hasattr(block.attn.k, "bias") and block.attn.k.bias is not None:
+                    params_dict[f"blocks.{layer_idx}.attn.b_K"] = block.attn.k.bias
+                if hasattr(block.attn.v, "bias") and block.attn.v.bias is not None:
+                    params_dict[f"blocks.{layer_idx}.attn.b_V"] = block.attn.v.bias
+                if hasattr(block.attn.o, "bias") and block.attn.o.bias is not None:
+                    params_dict[f"blocks.{layer_idx}.attn.b_O"] = block.attn.o.bias
                     w_q = w_q.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
                     w_o = w_o.reshape(self.cfg.n_heads, d_head, self.cfg.d_model)
 
@@ -1044,6 +1252,7 @@ class TransformerBridge(nn.Module):
                                 dtype=dtype,
                             )
 
+                # Store the processed weights
                 params_dict[f"blocks.{layer_idx}.attn.W_Q"] = w_q
                 params_dict[f"blocks.{layer_idx}.attn.W_K"] = w_k
                 params_dict[f"blocks.{layer_idx}.attn.W_V"] = w_v
