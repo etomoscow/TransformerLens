@@ -486,10 +486,13 @@ class TransformerBridge(nn.Module):
 
         if not no_processing:
             self.cfg.layer_norm_folding = True
-            self.fold_layer_norm()
-            self.fold_value_biases()
 
-    def fold_value_biases(self):
+            state_dict = self.get_params()
+            self.fold_layer_norm(state_dict)
+            self.fold_value_biases(state_dict)
+            self.set_params(state_dict)
+
+    def fold_value_biases(self, state_dict: Dict[str, torch.Tensor]):
         """Fold the value biases into the output bias.
 
         Because attention patterns add up to 1, the value biases always have a constant effect on a
@@ -500,74 +503,41 @@ class TransformerBridge(nn.Module):
         easier to interpret the head's output. Formally, we take b_O_new = b_O_original +
         sum_head(b_V_head @ W_O_head).
         """
-
-        assert self.adapter.conversion_rules is not None, "Conversion rules are not set"
-
         for layer in range(self.cfg.n_layers):
-            if not self.blocks[layer].attn.v.has_bias():
-                raise ValueError(
-                    f"The current model seems to not have value biases. Cannot fold value biases."
+            # shape [head_index, d_head]
+            if self.cfg.n_key_value_heads is None:
+                b_V = state_dict[f"blocks.{layer}.attn.b_V"]
+            else:
+                b_V = state_dict[f"blocks.{layer}.attn._b_V"]
+                b_V = torch.repeat_interleave(
+                    b_V, dim=0, repeats=self.cfg.n_heads // self.cfg.n_key_value_heads
                 )
-
-            # shape [(head_index d_head)]
-            v_bias = self.blocks[layer].attn.v.bias.data
-            v_bias_rearranged = einops.rearrange(
-                v_bias.squeeze(0),
-                "(head_index d_head) -> head_index d_head",
-                head_index=self.cfg.n_heads,
-                d_head=self.cfg.d_head,
-            )
-
-            if self.cfg.n_key_value_heads is not None:
-                v_bias_rearranged = torch.repeat_interleave(
-                    v_bias_rearranged, dim=0, repeats=self.cfg.n_heads // self.cfg.n_key_value_heads
-                )
-
-            # [(head_index d_head), d_model]
-            o_weight = self.blocks[layer].attn.o.weight.data
-            o_weight_rearranged = einops.rearrange(o_weight, "(i h) m -> i h m", i=self.cfg.n_heads)
-
+            # [head_index, d_head, d_model]
+            W_O = state_dict[f"blocks.{layer}.attn.W_O"]
             # [d_model]
-            o_original_bias = self.blocks[layer].attn.o.bias.data
-            o_bias_folded = o_original_bias + (
-                v_bias_rearranged[:, :, None] * o_weight_rearranged
-            ).sum([0, 1])
+            b_O_original = state_dict[f"blocks.{layer}.attn.b_O"]
+            folded_b_O = b_O_original + (b_V[:, :, None] * W_O).sum([0, 1])
 
-            self.blocks[layer].attn.o.bias.data = o_bias_folded
-            self.blocks[layer].attn.v.bias.data = torch.zeros_like(v_bias)
+            state_dict[f"blocks.{layer}.attn.b_O"] = folded_b_O
+            if self.cfg.n_key_value_heads is None:
+                state_dict[f"blocks.{layer}.attn.b_V"] = torch.zeros_like(b_V)
+            else:
+                state_dict[f"blocks.{layer}.attn._b_V"] = torch.zeros_like(
+                    state_dict[f"blocks.{layer}.attn._b_V"]
+                )
+        return state_dict
 
-    def fold_layer_norm(self, fold_biases=True, center_weights=True):
-        """Fold Layer Norm into the neighbouring weights. Can also be used to fold RMS Norm, when fold_biases and center_weights are set to False.
+    def fold_layer_norm(
+        self, state_dict: Dict[str, torch.Tensor], fold_biases=True, center_weights=True
+    ):
+        """Fold Layer Norm. Can also be used to fold RMS Norm, when fold_biases and center_weights are set to False.
 
-            Folding the LayerNorm weights to the subsequent linear layer does not change the computation.
-
-            `LayerNorm
-            <https://wandb.ai/wandb_fc/LayerNorm/reports/Layer-Normalization-in-Pytorch-With-Examples---VmlldzoxMjk5MTk1>`_
-            is a common regularization technique used in transformers. Unlike BatchNorm, it
-            cannot be turned off at inference time, as it significantly alters the mathematical
-            function implemented by the transformer.
-
-            When 'no_processing' is set to False, this function folds the LayerNorm weights into the subsequent linear layer.
-            This transformation is computationally equivalent and simplifies the model's interpretability.
-            It essentially merges LayerNorm weights into the subsequent linear layer's weights,
-            which is handled by HookedTransformer when loading pre-trained weights.
-            Set 'no_processing' to True when enabling compatibility mode if you wish to turn this off.
-
-            Mathematically, LayerNorm is defined as follows:
-
-            .. math::
-                x_1 &= x_0 - \\text{mean}(x_0)
-
-                x_2 &= \\frac{x_1}{\\sqrt{\\text{mean}(x_1^2)}}
-
-                x_3 &= x_2 \\cdot w
-
-                x_4 &= x_3 + b
-
-            For further details, refer to `this document
-            <https://transformer-circuits.pub/2021/framework/index.html#:~:text=Handling%20Layer%20Normalization>`_.
+        Takes in a state dict from a pretrained model, formatted to be consistent with
+        HookedTransformer but with LayerNorm weights and biases. Folds these into the neighbouring
+        weights.
 
         Args:
+            state_dict (Dict[str, torch.Tensor]): State dict of pretrained model.
             fold_biases (bool): Enables folding of LN biases. Should be disabled when RMS Norm is used.
             center_weights (bool): Enables the centering of weights after folding in LN. Should be disabled when RMS Norm is used.
         """
@@ -579,35 +549,52 @@ class TransformerBridge(nn.Module):
             fold_biases = False
             center_weights = False
 
+        # Models that use Grouped Query Attention (Only Mistral at the time of writing) prefix their K/V weights and
+        # biases with an underscore in order to distinguish them, but folding the LN into them still works the same,
+        # so we just add the underscore if GQA is used (i.e. if `cfg.n_key_value_heads is specified`).
+        gqa = "" if self.cfg.n_key_value_heads is None else "_"
+
         for l in range(self.cfg.n_layers):
             # Fold ln1 into attention - it's important to fold biases first, since biases depend on
             # weights but not vice versa The various indexing is just to broadcast ln.b and ln.w
             # along every axis other than d_model. Each weight matrix right multiplies. To fold in
             # the bias, we use the W_ matrix to map it to the hidden space of the layer, so we need
             # to sum along axis -2, which is the residual stream space axis.
-
             if fold_biases:
-                self.blocks[l].attn.q.bias.data = self.blocks[l].attn.q.bias.data + (
-                    self.blocks[l].attn.q.weight.data * self.blocks[l].ln1.bias.data[:, None]
+                state_dict[f"blocks.{l}.attn.b_Q"] = state_dict[f"blocks.{l}.attn.b_Q"] + (
+                    state_dict[f"blocks.{l}.attn.W_Q"]
+                    * state_dict[f"blocks.{l}.ln1.b"][None, :, None]
                 ).sum(-2)
-                self.blocks[l].attn.k.bias.data = self.blocks[l].attn.k.bias.data + (
-                    self.blocks[l].attn.k.weight.data * self.blocks[l].ln1.bias.data[:, None]
-                ).sum(-2)
-                self.blocks[l].attn.v.bias.data = self.blocks[l].attn.v.bias.data + (
-                    self.blocks[l].attn.v.weight.data * self.blocks[l].ln1.bias.data[:, None]
-                ).sum(-2)
-                self.blocks[l].ln1.bias.data = torch.zeros_like(self.blocks[l].ln1.bias)
+                state_dict[f"blocks.{l}.attn.{gqa}b_K"] = state_dict[
+                    f"blocks.{l}.attn.{gqa}b_K"
+                ] + (
+                    state_dict[f"blocks.{l}.attn.{gqa}W_K"]
+                    * state_dict[f"blocks.{l}.ln1.b"][None, :, None]
+                ).sum(
+                    -2
+                )
+                state_dict[f"blocks.{l}.attn.{gqa}b_V"] = state_dict[
+                    f"blocks.{l}.attn.{gqa}b_V"
+                ] + (
+                    state_dict[f"blocks.{l}.attn.{gqa}W_V"]
+                    * state_dict[f"blocks.{l}.ln1.b"][None, :, None]
+                ).sum(
+                    -2
+                )
+                del state_dict[f"blocks.{l}.ln1.b"]
 
-            self.blocks[l].attn.q.weight.data = (
-                self.blocks[l].attn.q.weight.data * self.blocks[l].ln1.weight.data[:, None]
+            state_dict[f"blocks.{l}.attn.W_Q"] = (
+                state_dict[f"blocks.{l}.attn.W_Q"] * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
             )
-            self.blocks[l].attn.k.weight.data = (
-                self.blocks[l].attn.k.weight.data * self.blocks[l].ln1.weight.data[:, None]
+            state_dict[f"blocks.{l}.attn.{gqa}W_K"] = (
+                state_dict[f"blocks.{l}.attn.{gqa}W_K"]
+                * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
             )
-            self.blocks[l].attn.v.weight.data = (
-                self.blocks[l].attn.v.weight.data * self.blocks[l].ln1.weight.data[:, None]
+            state_dict[f"blocks.{l}.attn.{gqa}W_V"] = (
+                state_dict[f"blocks.{l}.attn.{gqa}W_V"]
+                * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
             )
-            self.blocks[l].ln1.weight.data = torch.zeros_like(self.blocks[l].ln1.weight)
+            del state_dict[f"blocks.{l}.ln1.w"]
 
             # Finally, we center the weights reading from the residual stream. The output of the
             # first part of the LayerNorm is mean 0 and standard deviation 1, so the mean of any
@@ -615,105 +602,68 @@ class TransformerBridge(nn.Module):
             # output of LayerNormPre is orthogonal to the vector of all 1s (because dotting with
             # that gets the sum), so we can remove the component of the matrix parallel to this.
             if center_weights:
-                q_weight_rearranged = einops.rearrange(
-                    self.blocks[l].attn.q.weight.data.squeeze(0),
-                    "out_features (head_index d_head) -> head_index out_features d_head",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
+                state_dict[f"blocks.{l}.attn.W_Q"] -= einops.reduce(
+                    state_dict[f"blocks.{l}.attn.W_Q"],
+                    "head_index d_model d_head -> head_index 1 d_head",
+                    "mean",
                 )
-                k_weight_rearranged = einops.rearrange(
-                    self.blocks[l].attn.k.weight.data.squeeze(0),
-                    "out_features (head_index d_head) -> head_index out_features d_head",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
+                state_dict[f"blocks.{l}.attn.{gqa}W_K"] -= einops.reduce(
+                    state_dict[f"blocks.{l}.attn.{gqa}W_K"],
+                    "head_index d_model d_head -> head_index 1 d_head",
+                    "mean",
                 )
-                v_weight_rearranged = einops.rearrange(
-                    self.blocks[l].attn.v.weight.data.squeeze(0),
-                    "out_features (head_index d_head) -> head_index out_features d_head",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
+                state_dict[f"blocks.{l}.attn.{gqa}W_V"] -= einops.reduce(
+                    state_dict[f"blocks.{l}.attn.{gqa}W_V"],
+                    "head_index d_model d_head -> head_index 1 d_head",
+                    "mean",
                 )
-
-                q_weight_rearranged = q_weight_rearranged - einops.reduce(
-                    q_weight_rearranged, "head_index d_model d_head -> head_index 1 d_head", "mean"
-                )
-                k_weight_rearranged = k_weight_rearranged - einops.reduce(
-                    k_weight_rearranged, "head_index d_model d_head -> head_index 1 d_head", "mean"
-                )
-                v_weight_rearranged = v_weight_rearranged - einops.reduce(
-                    v_weight_rearranged, "head_index d_model d_head -> head_index 1 d_head", "mean"
-                )
-
-                q_weight_rearranged = einops.rearrange(
-                    q_weight_rearranged,
-                    "head_index out_features d_head -> out_features (head_index d_head)",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
-                )
-                k_weight_rearranged = einops.rearrange(
-                    k_weight_rearranged,
-                    "head_index out_features d_head -> out_features (head_index d_head)",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
-                )
-                v_weight_rearranged = einops.rearrange(
-                    v_weight_rearranged,
-                    "head_index out_features d_head -> out_features (head_index d_head)",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
-                )
-
-                self.blocks[l].attn.q.weight.data = q_weight_rearranged
-                self.blocks[l].attn.k.weight.data = k_weight_rearranged
-                self.blocks[l].attn.v.weight.data = v_weight_rearranged
 
             # Fold ln2 into MLP
             if not self.cfg.attn_only:
                 if fold_biases:
-                    self.blocks[l].mlp.input.bias.data = self.blocks[l].mlp.input.bias.data + (
-                        self.blocks[l].mlp.input.weight.data * self.blocks[l].ln2.bias.data[:, None]
+                    state_dict[f"blocks.{l}.mlp.b_in"] = state_dict[f"blocks.{l}.mlp.b_in"] + (
+                        state_dict[f"blocks.{l}.mlp.W_in"]
+                        * state_dict[f"blocks.{l}.ln2.b"][:, None]
                     ).sum(-2)
+                    del state_dict[f"blocks.{l}.ln2.b"]
 
-                    self.blocks[l].ln2.bias.data = torch.zeros_like(self.blocks[l].ln2.bias)
-
-                self.blocks[l].mlp.input.weight.data = (
-                    self.blocks[l].mlp.input.weight.data * self.blocks[l].ln2.weight.data[:, None]
+                state_dict[f"blocks.{l}.mlp.W_in"] = (
+                    state_dict[f"blocks.{l}.mlp.W_in"] * state_dict[f"blocks.{l}.ln2.w"][:, None]
                 )
 
                 if self.cfg.gated_mlp:
-                    self.blocks[l].mlp.gate.weight.data = (
-                        self.blocks[l].mlp.gate.weight.data
-                        * self.blocks[l].ln2.weight.data[:, None]
+                    state_dict[f"blocks.{l}.mlp.W_gate"] = (
+                        state_dict[f"blocks.{l}.mlp.W_gate"]
+                        * state_dict[f"blocks.{l}.ln2.w"][:, None]
                     )
 
-                self.blocks[l].ln2.weight.data = torch.zeros_like(self.blocks[l].ln2.weight)
+                del state_dict[f"blocks.{l}.ln2.w"]
 
                 if center_weights:
-                    self.blocks[l].mlp.input.weight.data = self.blocks[
-                        l
-                    ].mlp.input.weight.data - einops.reduce(
-                        self.blocks[l].mlp.input.weight.data,
+                    # Center the weights that read in from the LayerNormPre
+                    state_dict[f"blocks.{l}.mlp.W_in"] -= einops.reduce(
+                        state_dict[f"blocks.{l}.mlp.W_in"],
                         "d_model d_mlp -> 1 d_mlp",
                         "mean",
                     )
 
         # Fold ln_final into Unembed
         if fold_biases and self.unembed.has_bias():
-            self.unembed.bias.data = self.unembed.bias.data + (
-                self.unembed.weight.data * self.ln_final.bias.data[:, None]
-            ).sum(-2)
+            state_dict[f"unembed.b_U"] = state_dict[f"unembed.b_U"] + (
+                state_dict[f"unembed.W_U"] * state_dict[f"ln_final.b"][:, None]
+            ).sum(dim=-2)
+            del state_dict[f"ln_final.b"]
 
-            self.ln_final.bias.data = torch.zeros_like(self.ln_final.bias)
-
-        print(self.unembed.weight.data.shape, self.ln_final.weight.data.shape)
-        self.unembed.weight.data = self.unembed.weight.data * self.ln_final.weight.data[None, :]
-        self.ln_final.weight.data = torch.zeros_like(self.ln_final.weight)
+        state_dict[f"unembed.W_U"] = state_dict[f"unembed.W_U"] * state_dict[f"ln_final.w"][:, None]
+        del state_dict[f"ln_final.w"]
 
         if center_weights:
-            # Center the weights that read in from the LayerNorm ln_final
-            self.unembed.weight.data = self.unembed.weight.data - einops.reduce(
-                self.unembed.weight.data, "d_model d_vocab -> 1 d_vocab", "mean"
+            # Center the weights that read in from the LayerNormPre
+            state_dict[f"unembed.W_U"] -= einops.reduce(
+                state_dict[f"unembed.W_U"], "d_model d_vocab -> 1 d_vocab", "mean"
             )
+
+        return state_dict
 
     # ==================== TOKENIZATION METHODS ====================
 
@@ -1121,6 +1071,18 @@ class TransformerBridge(nn.Module):
             block = self.blocks[layer_idx]
 
             try:
+                params_dict[f"blocks.{layer_idx}.ln1.w"] = block.ln1.weight
+                params_dict[f"blocks.{layer_idx}.ln1.b"] = block.ln1.bias
+            except AttributeError:
+                device, dtype = _get_device_dtype()
+                params_dict[f"blocks.{layer_idx}.ln1.w"] = torch.zeros(
+                    self.cfg.d_model, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.ln1.b"] = torch.zeros(
+                    self.cfg.d_model, device=device, dtype=dtype
+                )
+
+            try:
                 # Attention weights - reshape to expected format
                 w_q = block.attn.q.weight
                 w_k = block.attn.k.weight
@@ -1261,6 +1223,18 @@ class TransformerBridge(nn.Module):
                 )
 
             try:
+                params_dict[f"blocks.{layer_idx}.ln2.w"] = block.ln1.weight
+                params_dict[f"blocks.{layer_idx}.ln2.b"] = block.ln1.bias
+            except AttributeError:
+                device, dtype = _get_device_dtype()
+                params_dict[f"blocks.{layer_idx}.ln2.w"] = torch.zeros(
+                    self.cfg.d_model, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.ln2.b"] = torch.zeros(
+                    self.cfg.d_model, device=device, dtype=dtype
+                )
+
+            try:
                 # MLP weights - access the actual weight tensors
                 params_dict[f"blocks.{layer_idx}.mlp.W_in"] = getattr(block.mlp, "in").weight
                 params_dict[f"blocks.{layer_idx}.mlp.W_out"] = block.mlp.out.weight
@@ -1308,6 +1282,14 @@ class TransformerBridge(nn.Module):
                     self.cfg.d_model, device=device, dtype=dtype
                 )
 
+        try:
+            params_dict[f"ln_final.w"] = self.ln_final.weight
+            params_dict[f"ln_final.b"] = self.ln_final.bias
+        except AttributeError:
+            device, dtype = _get_device_dtype()
+            params_dict[f"ln_final.w"] = torch.zeros(self.cfg.d_model, device=device, dtype=dtype)
+            params_dict[f"ln_final.b"] = torch.zeros(self.cfg.d_model, device=device, dtype=dtype)
+
         # Add unembedding weights
         try:
             params_dict["unembed.W_U"] = self.unembed.weight.T
@@ -1318,6 +1300,143 @@ class TransformerBridge(nn.Module):
             )
 
         return params_dict
+
+    def set_params(self, params_dict):
+        """Set model parameters from a state dictionary in TransformerLens naming convention.
+
+        Args:
+            params_dict: Dictionary of parameter tensors with TransformerLens naming convention
+        """
+
+        # Set embedding weights
+        if "embed.W_E" in params_dict:
+            self.embed.weight.data = params_dict["embed.W_E"]
+
+        if "pos_embed.W_pos" in params_dict:
+            self.pos_embed.weight.data = params_dict["pos_embed.W_pos"]
+
+        # Set attention, MLP, and layer norm weights for each layer
+        for layer_idx in range(self.cfg.n_layers):
+            if layer_idx >= len(self.blocks):
+                break
+
+            block = self.blocks[layer_idx]
+
+            # Layer norm 1 weights
+            if f"blocks.{layer_idx}.ln1.w" in params_dict:
+                if hasattr(block.ln1, "weight") and block.ln1.weight is not None:
+                    block.ln1.weight.data = params_dict[f"blocks.{layer_idx}.ln1.w"]
+
+            if f"blocks.{layer_idx}.ln1.b" in params_dict:
+                if hasattr(block.ln1, "bias") and block.ln1.bias is not None:
+                    block.ln1.bias.data = params_dict[f"blocks.{layer_idx}.ln1.b"]
+
+            # Attention weights - reverse the reshaping from get_params
+            if f"blocks.{layer_idx}.attn.W_Q" in params_dict:
+                w_q = params_dict[f"blocks.{layer_idx}.attn.W_Q"]
+                # Reshape from [n_heads, d_model, d_head] back to original format
+                if w_q.shape == (self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head):
+                    # For GPT2-style: flatten to [d_model, d_model]
+                    w_q = w_q.reshape(self.cfg.d_model, self.cfg.d_model)
+                block.attn.q.weight.data = w_q
+
+            if f"blocks.{layer_idx}.attn.W_K" in params_dict:
+                w_k = params_dict[f"blocks.{layer_idx}.attn.W_K"]
+                if w_k.shape == (self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head):
+                    w_k = w_k.reshape(self.cfg.d_model, self.cfg.d_model)
+                block.attn.k.weight.data = w_k
+
+            if f"blocks.{layer_idx}.attn.W_V" in params_dict:
+                w_v = params_dict[f"blocks.{layer_idx}.attn.W_V"]
+                if w_v.shape == (self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head):
+                    w_v = w_v.reshape(self.cfg.d_model, self.cfg.d_model)
+                block.attn.v.weight.data = w_v
+
+            if f"blocks.{layer_idx}.attn.W_O" in params_dict:
+                w_o = params_dict[f"blocks.{layer_idx}.attn.W_O"]
+                # Reshape from [n_heads, d_head, d_model] back to original format
+                if w_o.shape == (self.cfg.n_heads, self.cfg.d_head, self.cfg.d_model):
+                    w_o = w_o.reshape(self.cfg.d_model, self.cfg.d_model)
+                block.attn.o.weight.data = w_o
+
+            # Attention biases - reverse the reshaping
+            if f"blocks.{layer_idx}.attn.b_Q" in params_dict:
+                b_q = params_dict[f"blocks.{layer_idx}.attn.b_Q"]
+                if b_q.shape == (self.cfg.n_heads, self.cfg.d_head):
+                    b_q = b_q.reshape(-1)  # Flatten to original shape
+                if block.attn.q.bias is not None:
+                    block.attn.q.bias.data = b_q
+
+            if f"blocks.{layer_idx}.attn.b_K" in params_dict:
+                b_k = params_dict[f"blocks.{layer_idx}.attn.b_K"]
+                if b_k.shape == (self.cfg.n_heads, self.cfg.d_head):
+                    b_k = b_k.reshape(-1)
+                if block.attn.k.bias is not None:
+                    block.attn.k.bias.data = b_k
+
+            if f"blocks.{layer_idx}.attn.b_V" in params_dict:
+                b_v = params_dict[f"blocks.{layer_idx}.attn.b_V"]
+                if b_v.shape == (self.cfg.n_heads, self.cfg.d_head):
+                    b_v = b_v.reshape(-1)
+                if block.attn.v.bias is not None:
+                    block.attn.v.bias.data = b_v
+
+            if f"blocks.{layer_idx}.attn.b_O" in params_dict:
+                if block.attn.o.bias is not None:
+                    block.attn.o.bias.data = params_dict[f"blocks.{layer_idx}.attn.b_O"]
+
+            # Layer norm 2 weights
+            if f"blocks.{layer_idx}.ln2.w" in params_dict:
+                if hasattr(block.ln2, "weight") and block.ln2.weight is not None:
+                    block.ln2.weight.data = params_dict[f"blocks.{layer_idx}.ln2.w"]
+
+            if f"blocks.{layer_idx}.ln2.b" in params_dict:
+                if hasattr(block.ln2, "bias") and block.ln2.bias is not None:
+                    block.ln2.bias.data = params_dict[f"blocks.{layer_idx}.ln2.b"]
+
+            # MLP weights
+            if f"blocks.{layer_idx}.mlp.W_in" in params_dict:
+                getattr(block.mlp, "in").weight.data = params_dict[f"blocks.{layer_idx}.mlp.W_in"]
+
+            if f"blocks.{layer_idx}.mlp.W_out" in params_dict:
+                block.mlp.out.weight.data = params_dict[f"blocks.{layer_idx}.mlp.W_out"]
+
+            # MLP biases
+            if f"blocks.{layer_idx}.mlp.b_in" in params_dict:
+                mlp_in_bias = getattr(block.mlp, "in").bias
+                if mlp_in_bias is not None:
+                    mlp_in_bias.data = params_dict[f"blocks.{layer_idx}.mlp.b_in"]
+
+            if f"blocks.{layer_idx}.mlp.b_out" in params_dict:
+                if block.mlp.out.bias is not None:
+                    block.mlp.out.bias.data = params_dict[f"blocks.{layer_idx}.mlp.b_out"]
+
+            # Gate weights (for gated MLPs)
+            if f"blocks.{layer_idx}.mlp.W_gate" in params_dict:
+                if hasattr(block.mlp, "gate") and hasattr(block.mlp.gate, "weight"):
+                    block.mlp.gate.weight.data = params_dict[f"blocks.{layer_idx}.mlp.W_gate"]
+
+            if f"blocks.{layer_idx}.mlp.b_gate" in params_dict:
+                if (
+                    hasattr(block.mlp, "gate")
+                    and hasattr(block.mlp.gate, "bias")
+                    and block.mlp.gate.bias is not None
+                ):
+                    block.mlp.gate.bias.data = params_dict[f"blocks.{layer_idx}.mlp.b_gate"]
+
+        # Final layer norm weights
+        if "ln_final.w" in params_dict:
+            if hasattr(self.ln_final, "weight") and self.ln_final.weight is not None:
+                self.ln_final.weight.data = params_dict["ln_final.w"]
+
+        if "ln_final.b" in params_dict:
+            if hasattr(self.ln_final, "bias") and self.ln_final.bias is not None:
+                self.ln_final.bias.data = params_dict["ln_final.b"]
+
+        # Unembedding weights
+        if "unembed.W_U" in params_dict:
+            # get_params returns W_U transposed, so we need to transpose back
+            self.unembed.weight.data = params_dict["unembed.W_U"].T
 
     @property
     def params(self):
