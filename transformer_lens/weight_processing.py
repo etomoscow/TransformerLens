@@ -7,12 +7,13 @@ organized into a single ProcessWeights class with static methods. These function
 to modify transformer model weights for better interpretability and analysis.
 """
 
-from typing import Dict, Optional, Union
+from typing import Dict
 
 import einops
 import torch
-from transformer_lens.FactoredMatrix import FactoredMatrix
+
 import transformer_lens.utils as utils
+from transformer_lens.FactoredMatrix import FactoredMatrix
 
 
 class ProcessWeights:
@@ -184,18 +185,18 @@ class ProcessWeights:
         if not getattr(cfg, 'final_rms', False) and fold_biases:
             # Dumb bug from my old SoLU training code, some models have RMSNorm instead of LayerNorm
             # pre unembed.
-            state_dict[f"unembed.b_U"] = state_dict[f"unembed.b_U"] + (
-                state_dict[f"unembed.W_U"] * state_dict[f"ln_final.b"][:, None]
+            state_dict["unembed.b_U"] = state_dict["unembed.b_U"] + (
+                state_dict["unembed.W_U"] * state_dict["ln_final.b"][:, None]
             ).sum(dim=-2)
-            del state_dict[f"ln_final.b"]
+            del state_dict["ln_final.b"]
 
-        state_dict[f"unembed.W_U"] = state_dict[f"unembed.W_U"] * state_dict[f"ln_final.w"][:, None]
-        del state_dict[f"ln_final.w"]
+        state_dict["unembed.W_U"] = state_dict["unembed.W_U"] * state_dict["ln_final.w"][:, None]
+        del state_dict["ln_final.w"]
 
         if center_weights:
             # Center the weights that read in from the LayerNormPre
-            state_dict[f"unembed.W_U"] -= einops.reduce(
-                state_dict[f"unembed.W_U"], "d_model d_vocab -> 1 d_vocab", "mean"
+            state_dict["unembed.W_U"] -= einops.reduce(
+                state_dict["unembed.W_U"], "d_model d_vocab -> 1 d_vocab", "mean"
             )
 
         return state_dict
