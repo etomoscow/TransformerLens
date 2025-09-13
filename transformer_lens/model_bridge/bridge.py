@@ -275,6 +275,8 @@ class TransformerBridge(nn.Module):
             "rotary_embed.hook_in",
             "rotary_embed.hook_out",
             "ln_final.hook_in",
+            "ln_final.hook_scale",
+            "ln_final.hook_normalized",
             "ln_final.hook_out",
             "unembed.hook_in",
             "unembed.hook_out",
@@ -283,8 +285,12 @@ class TransformerBridge(nn.Module):
         for block_idx in range(self.cfg.n_layers):
             default_cached_hooks_names.append(f"blocks.{block_idx}.hook_in")
             default_cached_hooks_names.append(f"blocks.{block_idx}.ln1.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1.hook_scale")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1.hook_normalized")
             default_cached_hooks_names.append(f"blocks.{block_idx}.ln1.hook_out")
             default_cached_hooks_names.append(f"blocks.{block_idx}.ln1_post.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1_post.hook_scale")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1_post.hook_normalized")
             default_cached_hooks_names.append(f"blocks.{block_idx}.ln1_post.hook_out")
             default_cached_hooks_names.append(f"blocks.{block_idx}.attn.hook_in")
             default_cached_hooks_names.append(f"blocks.{block_idx}.attn.q.hook_in")
@@ -304,8 +310,12 @@ class TransformerBridge(nn.Module):
             default_cached_hooks_names.append(f"blocks.{block_idx}.attn.hook_hidden_states")
             default_cached_hooks_names.append(f"blocks.{block_idx}.attn.hook_out")
             default_cached_hooks_names.append(f"blocks.{block_idx}.ln2.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2.hook_scale")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2.hook_normalized")
             default_cached_hooks_names.append(f"blocks.{block_idx}.ln2.hook_out")
             default_cached_hooks_names.append(f"blocks.{block_idx}.ln2_post.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2_post.hook_scale")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2_post.hook_normalized")
             default_cached_hooks_names.append(f"blocks.{block_idx}.ln2_post.hook_out")
             default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.hook_in")
             default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.in.hook_in")
