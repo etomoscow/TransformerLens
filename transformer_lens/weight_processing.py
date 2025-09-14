@@ -19,7 +19,7 @@ from transformer_lens.FactoredMatrix import FactoredMatrix
 class ProcessWeights:
     """
     A collection of static methods for processing transformer model weights.
-    
+
     These methods are extracted from HookedTransformer and provide various weight
     transformations for improved model interpretability:
     - LayerNorm folding: Merges LayerNorm parameters into subsequent linear layers
@@ -57,7 +57,7 @@ class ProcessWeights:
         # Models that use Grouped Query Attention (Only Mistral at the time of writing) prefix their K/V weights and
         # biases with an underscore in order to distinguish them, but folding the LN into them still works the same,
         # so we just add the underscore if GQA is used (i.e. if `cfg.n_key_value_heads is specified`).
-        gqa = "" if getattr(cfg, 'n_key_value_heads', None) is None else "_"
+        gqa = "" if getattr(cfg, "n_key_value_heads", None) is None else "_"
 
         for l in range(cfg.n_layers):
             # Fold ln1 into attention - it's important to fold biases first, since biases depend on
@@ -124,7 +124,7 @@ class ProcessWeights:
                 )
 
             # Fold ln2 into MLP
-            if not getattr(cfg, 'attn_only', False):
+            if not getattr(cfg, "attn_only", False):
                 if fold_biases:
                     state_dict[f"blocks.{l}.mlp.b_in"] = state_dict[f"blocks.{l}.mlp.b_in"] + (
                         state_dict[f"blocks.{l}.mlp.W_in"]
@@ -136,7 +136,7 @@ class ProcessWeights:
                     state_dict[f"blocks.{l}.mlp.W_in"] * state_dict[f"blocks.{l}.ln2.w"][:, None]
                 )
 
-                if getattr(cfg, 'gated_mlp', False):
+                if getattr(cfg, "gated_mlp", False):
                     state_dict[f"blocks.{l}.mlp.W_gate"] = (
                         state_dict[f"blocks.{l}.mlp.W_gate"]
                         * state_dict[f"blocks.{l}.ln2.w"][:, None]
@@ -152,7 +152,7 @@ class ProcessWeights:
                         "mean",
                     )
 
-                if getattr(cfg, 'act_fn', None) is not None and cfg.act_fn.startswith("solu"):
+                if getattr(cfg, "act_fn", None) is not None and cfg.act_fn.startswith("solu"):
                     # Fold ln3 into activation
                     if fold_biases:
                         state_dict[f"blocks.{l}.mlp.b_out"] = state_dict[
@@ -182,7 +182,7 @@ class ProcessWeights:
                     del state_dict[f"blocks.{l}.mlp.ln.w"]
 
         # Fold ln_final into Unembed
-        if not getattr(cfg, 'final_rms', False) and fold_biases:
+        if not getattr(cfg, "final_rms", False) and fold_biases:
             # Dumb bug from my old SoLU training code, some models have RMSNorm instead of LayerNorm
             # pre unembed.
             state_dict["unembed.b_U"] = state_dict["unembed.b_U"] + (
@@ -202,9 +202,7 @@ class ProcessWeights:
         return state_dict
 
     @staticmethod
-    def center_writing_weights(
-        state_dict: Dict[str, torch.Tensor], cfg
-    ) -> Dict[str, torch.Tensor]:
+    def center_writing_weights(state_dict: Dict[str, torch.Tensor], cfg) -> Dict[str, torch.Tensor]:
         """Center Writing Weights.
 
         Centers the weights of the model that write to the residual stream - W_out, W_E, W_pos and
@@ -224,7 +222,7 @@ class ProcessWeights:
         state_dict["embed.W_E"] = state_dict["embed.W_E"] - state_dict["embed.W_E"].mean(
             -1, keepdim=True
         )
-        if getattr(cfg, 'positional_embedding_type', 'standard') != "rotary":
+        if getattr(cfg, "positional_embedding_type", "standard") != "rotary":
             state_dict["pos_embed.W_pos"] = state_dict["pos_embed.W_pos"] - state_dict[
                 "pos_embed.W_pos"
             ].mean(-1, keepdim=True)
@@ -237,7 +235,7 @@ class ProcessWeights:
             state_dict[f"blocks.{l}.attn.b_O"] = (
                 state_dict[f"blocks.{l}.attn.b_O"] - state_dict[f"blocks.{l}.attn.b_O"].mean()
             )  # b_O is [d_model]
-            if not getattr(cfg, 'attn_only', False):
+            if not getattr(cfg, "attn_only", False):
                 state_dict[f"blocks.{l}.mlp.W_out"] = state_dict[
                     f"blocks.{l}.mlp.W_out"
                 ] - state_dict[f"blocks.{l}.mlp.W_out"].mean(-1, keepdim=True)
@@ -272,9 +270,7 @@ class ProcessWeights:
         return state_dict
 
     @staticmethod
-    def fold_value_biases(
-        state_dict: Dict[str, torch.Tensor], cfg
-    ) -> Dict[str, torch.Tensor]:
+    def fold_value_biases(state_dict: Dict[str, torch.Tensor], cfg) -> Dict[str, torch.Tensor]:
         """Fold the value biases into the output bias.
 
         Because attention patterns add up to 1, the value biases always have a constant effect on a
@@ -297,7 +293,7 @@ class ProcessWeights:
 
         for layer in range(cfg.n_layers):
             # shape [head_index, d_head]
-            if getattr(cfg, 'n_key_value_heads', None) is None:
+            if getattr(cfg, "n_key_value_heads", None) is None:
                 b_V = state_dict[f"blocks.{layer}.attn.b_V"]
             else:
                 b_V = state_dict[f"blocks.{layer}.attn._b_V"]
@@ -311,7 +307,7 @@ class ProcessWeights:
             folded_b_O = b_O_original + (b_V[:, :, None] * W_O).sum([0, 1])
 
             state_dict[f"blocks.{layer}.attn.b_O"] = folded_b_O
-            if getattr(cfg, 'n_key_value_heads', None) is None:
+            if getattr(cfg, "n_key_value_heads", None) is None:
                 state_dict[f"blocks.{layer}.attn.b_V"] = torch.zeros_like(b_V)
             else:
                 state_dict[f"blocks.{layer}.attn._b_V"] = torch.zeros_like(
@@ -367,7 +363,7 @@ class ProcessWeights:
             Dict[str, torch.Tensor]: Modified state dict with refactored attention matrices.
         """
         assert (
-            getattr(cfg, 'positional_embedding_type', 'standard') != "rotary"
+            getattr(cfg, "positional_embedding_type", "standard") != "rotary"
         ), "You can't refactor the QK circuit when using rotary embeddings (as the QK matrix depends on the position of the query and key)"
 
         # Make a copy to avoid modifying the original
@@ -460,18 +456,20 @@ class ProcessWeights:
         processed_dict = state_dict.copy()
 
         if fold_ln:
-            if getattr(cfg, 'num_experts', None) and cfg.num_experts > 1:
+            if getattr(cfg, "num_experts", None) and cfg.num_experts > 1:
                 # Skip for MoE models
                 pass
-            elif getattr(cfg, 'normalization_type', 'LN') in ["LN", "LNPre"]:
+            elif getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"]:
                 processed_dict = ProcessWeights.fold_layer_norm(processed_dict, cfg)
-            elif getattr(cfg, 'normalization_type', 'LN') in ["RMS", "RMSPre"]:
+            elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
                 processed_dict = ProcessWeights.fold_layer_norm(
                     processed_dict, cfg, fold_biases=False, center_weights=False
                 )
 
         if center_writing_weights:
-            if getattr(cfg, 'normalization_type', 'LN') in ["LN", "LNPre"] and not getattr(cfg, 'final_rms', False):
+            if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and not getattr(
+                cfg, "final_rms", False
+            ):
                 processed_dict = ProcessWeights.center_writing_weights(processed_dict, cfg)
 
         if center_unembed:

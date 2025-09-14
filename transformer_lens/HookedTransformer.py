@@ -1625,7 +1625,7 @@ class HookedTransformer(HookedRootModule):
             )
 
         state_dict = self.fill_missing_keys(state_dict)
-        
+
         # Use the centralized ProcessWeights class for all weight processing
         state_dict = ProcessWeights.process_weights(
             state_dict,
