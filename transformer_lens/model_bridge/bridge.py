@@ -21,7 +21,6 @@ from typing import (
     overload,
 )
 
-import einops
 import numpy as np
 import torch
 import tqdm
@@ -365,54 +364,40 @@ class TransformerBridge(nn.Module):
         refactor_factored_attn_matrices: bool = False,
     ):
         """Apply weight processing using the centralized ProcessWeights class.
-        
+
         This method extracts the model's state dict, processes it using ProcessWeights,
         and loads the processed weights back into the model.
 
         Args:
             fold_ln: Whether to fold LayerNorm weights into subsequent layers
-            center_writing_weights: Whether to center weights writing to residual stream  
+            center_writing_weights: Whether to center weights writing to residual stream
             center_unembed: Whether to center unembedding weights
             fold_value_biases: Whether to fold value biases into output bias
             refactor_factored_attn_matrices: Whether to refactor attention matrices
         """
         print("Starting weight processing...")
-        
+
         # Extract current state dict from the underlying model
         current_state_dict = self.original_model.state_dict()
-        
-        tl_state_dict = self.adapter.convert_weights(self.original_model)
-        print(f"Converted to TL format: {len(tl_state_dict)} parameters")
-        
+
+        print(f"Processing HF state dict directly: {len(current_state_dict)} parameters")
+
         # Apply processing using the centralized ProcessWeights class
+        # Pass the adapter for key translation from TL to HF format
         processed_state_dict = ProcessWeights.process_weights(
-            tl_state_dict,
+            current_state_dict,  # Use HF state dict directly
             self.cfg,
             fold_ln=fold_ln,
             center_writing_weights=center_writing_weights,
             center_unembed=center_unembed,
             fold_value_biases=fold_value_biases,
             refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+            adapter=self.adapter,  # Pass adapter for key translation
         )
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        # Load the processed weights back into the model
+        self.original_model.load_state_dict(processed_state_dict, strict=False)
+        print("Processed weights loaded back into model")
 
     # ==================== TOKENIZATION METHODS ====================
 
@@ -793,7 +778,7 @@ class TransformerBridge(nn.Module):
 
         # Add embedding weights
         try:
-        params_dict["embed.W_E"] = self.embed.weight
+            params_dict["embed.W_E"] = self.embed.weight
         except AttributeError:
             device, dtype = _get_device_dtype()
             params_dict["embed.W_E"] = torch.zeros(
@@ -801,7 +786,7 @@ class TransformerBridge(nn.Module):
             )
 
         try:
-        params_dict["pos_embed.W_pos"] = self.pos_embed.weight
+            params_dict["pos_embed.W_pos"] = self.pos_embed.weight
         except AttributeError:
             device, dtype = _get_device_dtype()
             params_dict["pos_embed.W_pos"] = torch.zeros(
@@ -820,11 +805,11 @@ class TransformerBridge(nn.Module):
             block = self.blocks[layer_idx]
 
             try:
-            # Attention weights - reshape to expected format
-            w_q = block.attn.q.weight
-            w_k = block.attn.k.weight
-            w_v = block.attn.v.weight
-            w_o = block.attn.o.weight
+                # Attention weights - reshape to expected format
+                w_q = block.attn.q.weight
+                w_k = block.attn.k.weight
+                w_v = block.attn.v.weight
+                w_o = block.attn.o.weight
 
                 # TODO: Fix the complex reshaping logic - temporarily simplified
                 # Store weights in the expected format
@@ -895,16 +880,16 @@ class TransformerBridge(nn.Module):
                             )
 
                 # Store the processed weights
-            params_dict[f"blocks.{layer_idx}.attn.W_Q"] = w_q
-            params_dict[f"blocks.{layer_idx}.attn.W_K"] = w_k
-            params_dict[f"blocks.{layer_idx}.attn.W_V"] = w_v
-            params_dict[f"blocks.{layer_idx}.attn.W_O"] = w_o
+                params_dict[f"blocks.{layer_idx}.attn.W_Q"] = w_q
+                params_dict[f"blocks.{layer_idx}.attn.W_K"] = w_k
+                params_dict[f"blocks.{layer_idx}.attn.W_V"] = w_v
+                params_dict[f"blocks.{layer_idx}.attn.W_O"] = w_o
 
                 # Attention biases - handle None biases
                 if block.attn.q.bias is not None:
-            params_dict[f"blocks.{layer_idx}.attn.b_Q"] = block.attn.q.bias.reshape(
-                self.cfg.n_heads, -1
-            )
+                    params_dict[f"blocks.{layer_idx}.attn.b_Q"] = block.attn.q.bias.reshape(
+                        self.cfg.n_heads, -1
+                    )
                 else:
                     device, dtype = _get_device_dtype()
                     params_dict[f"blocks.{layer_idx}.attn.b_Q"] = torch.zeros(
@@ -912,9 +897,9 @@ class TransformerBridge(nn.Module):
                     )
 
                 if block.attn.k.bias is not None:
-            params_dict[f"blocks.{layer_idx}.attn.b_K"] = block.attn.k.bias.reshape(
-                self.cfg.n_heads, -1
-            )
+                    params_dict[f"blocks.{layer_idx}.attn.b_K"] = block.attn.k.bias.reshape(
+                        self.cfg.n_heads, -1
+                    )
                 else:
                     device, dtype = _get_device_dtype()
                     params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
@@ -922,9 +907,9 @@ class TransformerBridge(nn.Module):
                     )
 
                 if block.attn.v.bias is not None:
-            params_dict[f"blocks.{layer_idx}.attn.b_V"] = block.attn.v.bias.reshape(
-                self.cfg.n_heads, -1
-            )
+                    params_dict[f"blocks.{layer_idx}.attn.b_V"] = block.attn.v.bias.reshape(
+                        self.cfg.n_heads, -1
+                    )
                 else:
                     device, dtype = _get_device_dtype()
                     params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
@@ -932,7 +917,7 @@ class TransformerBridge(nn.Module):
                     )
 
                 if block.attn.o.bias is not None:
-            params_dict[f"blocks.{layer_idx}.attn.b_O"] = block.attn.o.bias
+                    params_dict[f"blocks.{layer_idx}.attn.b_O"] = block.attn.o.bias
                 else:
                     device, dtype = _get_device_dtype()
                     params_dict[f"blocks.{layer_idx}.attn.b_O"] = torch.zeros(
@@ -973,9 +958,9 @@ class TransformerBridge(nn.Module):
                 )
 
             try:
-            # MLP weights - access the actual weight tensors
-            params_dict[f"blocks.{layer_idx}.mlp.W_in"] = getattr(block.mlp, "in").weight
-            params_dict[f"blocks.{layer_idx}.mlp.W_out"] = block.mlp.out.weight
+                # MLP weights - access the actual weight tensors
+                params_dict[f"blocks.{layer_idx}.mlp.W_in"] = getattr(block.mlp, "in").weight
+                params_dict[f"blocks.{layer_idx}.mlp.W_out"] = block.mlp.out.weight
 
                 # MLP biases - handle None biases
                 mlp_in_bias = getattr(block.mlp, "in").bias
@@ -997,11 +982,11 @@ class TransformerBridge(nn.Module):
                         self.cfg.d_model, device=device, dtype=dtype
                     )
 
-            # Add gate weights if they exist
-            if hasattr(block.mlp, "gate") and hasattr(block.mlp.gate, "weight"):
-                params_dict[f"blocks.{layer_idx}.mlp.W_gate"] = block.mlp.gate.weight
-                if hasattr(block.mlp.gate, "bias") and block.mlp.gate.bias is not None:
-                    params_dict[f"blocks.{layer_idx}.mlp.b_gate"] = block.mlp.gate.bias
+                # Add gate weights if they exist
+                if hasattr(block.mlp, "gate") and hasattr(block.mlp.gate, "weight"):
+                    params_dict[f"blocks.{layer_idx}.mlp.W_gate"] = block.mlp.gate.weight
+                    if hasattr(block.mlp.gate, "bias") and block.mlp.gate.bias is not None:
+                        params_dict[f"blocks.{layer_idx}.mlp.b_gate"] = block.mlp.gate.bias
 
             except AttributeError:
                 # Create zero MLP weights for missing MLP component
@@ -1022,7 +1007,7 @@ class TransformerBridge(nn.Module):
 
         # Add unembedding weights
         try:
-        params_dict["unembed.W_U"] = self.unembed.weight.T
+            params_dict["unembed.W_U"] = self.unembed.weight.T
         except AttributeError:
             device, dtype = _get_device_dtype()
             params_dict["unembed.W_U"] = torch.zeros(

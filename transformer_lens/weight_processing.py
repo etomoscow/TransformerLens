@@ -27,7 +27,34 @@ class ProcessWeights:
     - Unembed centering: Centers unembedding weights (translation invariant)
     - Value bias folding: Consolidates value biases into output biases
     - Attention matrix refactoring: Experimental QK/OV matrix factorization
+
+    When an architecture adapter is provided, the methods will translate TransformerLens
+    parameter names to the target format (e.g., HuggingFace) for processing.
     """
+
+    @staticmethod
+    def _get_param_key(tl_key: str, adapter=None) -> str:
+        """Get the actual parameter key to use, translating via adapter if provided.
+
+        Args:
+            tl_key: TransformerLens format parameter key
+            adapter: Optional architecture adapter for key translation
+
+        Returns:
+            The key to use for accessing parameters in the state dict
+        """
+        if adapter is None:
+            return tl_key
+
+        # Use the adapter to translate from TL format to target format
+        # This assumes the adapter has a method to reverse the parameter mapping
+        if hasattr(adapter, "reverse_param_mapping"):
+            return adapter.reverse_param_mapping.get(tl_key, tl_key)
+        elif hasattr(adapter, "get_hf_param_name"):
+            return adapter.get_hf_param_name(tl_key)
+        else:
+            # If no reverse mapping available, return original key
+            return tl_key
 
     @staticmethod
     def fold_layer_norm(
@@ -35,6 +62,7 @@ class ProcessWeights:
         cfg,
         fold_biases: bool = True,
         center_weights: bool = True,
+        adapter=None,
     ) -> Dict[str, torch.Tensor]:
         """Fold Layer Norm. Can also be used to fold RMS Norm, when fold_biases and center_weights are set to False.
 
@@ -47,6 +75,7 @@ class ProcessWeights:
             cfg: Model configuration object with n_layers, n_key_value_heads, etc.
             fold_biases (bool): Enables folding of LN biases. Should be disabled when RMS Norm is used.
             center_weights (bool): Enables the centering of weights after folding in LN. Should be disabled when RMS Norm is used.
+            adapter: Optional architecture adapter for parameter key translation.
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with LayerNorm folded into linear layers.
@@ -60,46 +89,37 @@ class ProcessWeights:
         gqa = "" if getattr(cfg, "n_key_value_heads", None) is None else "_"
 
         for l in range(cfg.n_layers):
+            # Get translated parameter keys
+            b_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_Q", adapter)
+            W_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_Q", adapter)
+            b_K_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.{gqa}b_K", adapter)
+            W_K_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.{gqa}W_K", adapter)
+            b_V_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.{gqa}b_V", adapter)
+            W_V_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.{gqa}W_V", adapter)
+            ln1_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.b", adapter)
+            ln1_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.w", adapter)
+
             # Fold ln1 into attention - it's important to fold biases first, since biases depend on
             # weights but not vice versa The various indexing is just to broadcast ln.b and ln.w
             # along every axis other than d_model. Each weight matrix right multiplies. To fold in
             # the bias, we use the W_ matrix to map it to the hidden space of the layer, so we need
             # to sum along axis -2, which is the residual stream space axis.
             if fold_biases:
-                state_dict[f"blocks.{l}.attn.b_Q"] = state_dict[f"blocks.{l}.attn.b_Q"] + (
-                    state_dict[f"blocks.{l}.attn.W_Q"]
-                    * state_dict[f"blocks.{l}.ln1.b"][None, :, None]
+                state_dict[b_Q_key] = state_dict[b_Q_key] + (
+                    state_dict[W_Q_key] * state_dict[ln1_b_key][None, :, None]
                 ).sum(-2)
-                state_dict[f"blocks.{l}.attn.{gqa}b_K"] = state_dict[
-                    f"blocks.{l}.attn.{gqa}b_K"
-                ] + (
-                    state_dict[f"blocks.{l}.attn.{gqa}W_K"]
-                    * state_dict[f"blocks.{l}.ln1.b"][None, :, None]
-                ).sum(
-                    -2
-                )
-                state_dict[f"blocks.{l}.attn.{gqa}b_V"] = state_dict[
-                    f"blocks.{l}.attn.{gqa}b_V"
-                ] + (
-                    state_dict[f"blocks.{l}.attn.{gqa}W_V"]
-                    * state_dict[f"blocks.{l}.ln1.b"][None, :, None]
-                ).sum(
-                    -2
-                )
-                del state_dict[f"blocks.{l}.ln1.b"]
+                state_dict[b_K_key] = state_dict[b_K_key] + (
+                    state_dict[W_K_key] * state_dict[ln1_b_key][None, :, None]
+                ).sum(-2)
+                state_dict[b_V_key] = state_dict[b_V_key] + (
+                    state_dict[W_V_key] * state_dict[ln1_b_key][None, :, None]
+                ).sum(-2)
+                del state_dict[ln1_b_key]
 
-            state_dict[f"blocks.{l}.attn.W_Q"] = (
-                state_dict[f"blocks.{l}.attn.W_Q"] * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
-            )
-            state_dict[f"blocks.{l}.attn.{gqa}W_K"] = (
-                state_dict[f"blocks.{l}.attn.{gqa}W_K"]
-                * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
-            )
-            state_dict[f"blocks.{l}.attn.{gqa}W_V"] = (
-                state_dict[f"blocks.{l}.attn.{gqa}W_V"]
-                * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
-            )
-            del state_dict[f"blocks.{l}.ln1.w"]
+            state_dict[W_Q_key] = state_dict[W_Q_key] * state_dict[ln1_w_key][None, :, None]
+            state_dict[W_K_key] = state_dict[W_K_key] * state_dict[ln1_w_key][None, :, None]
+            state_dict[W_V_key] = state_dict[W_V_key] * state_dict[ln1_w_key][None, :, None]
+            del state_dict[ln1_w_key]
 
             # Finally, we center the weights reading from the residual stream. The output of the
             # first part of the LayerNorm is mean 0 and standard deviation 1, so the mean of any
@@ -107,102 +127,114 @@ class ProcessWeights:
             # output of LayerNormPre is orthogonal to the vector of all 1s (because dotting with
             # that gets the sum), so we can remove the component of the matrix parallel to this.
             if center_weights:
-                state_dict[f"blocks.{l}.attn.W_Q"] -= einops.reduce(
-                    state_dict[f"blocks.{l}.attn.W_Q"],
+                state_dict[W_Q_key] -= einops.reduce(
+                    state_dict[W_Q_key],
                     "head_index d_model d_head -> head_index 1 d_head",
                     "mean",
                 )
-                state_dict[f"blocks.{l}.attn.{gqa}W_K"] -= einops.reduce(
-                    state_dict[f"blocks.{l}.attn.{gqa}W_K"],
+                state_dict[W_K_key] -= einops.reduce(
+                    state_dict[W_K_key],
                     "head_index d_model d_head -> head_index 1 d_head",
                     "mean",
                 )
-                state_dict[f"blocks.{l}.attn.{gqa}W_V"] -= einops.reduce(
-                    state_dict[f"blocks.{l}.attn.{gqa}W_V"],
+                state_dict[W_V_key] -= einops.reduce(
+                    state_dict[W_V_key],
                     "head_index d_model d_head -> head_index 1 d_head",
                     "mean",
                 )
 
             # Fold ln2 into MLP
             if not getattr(cfg, "attn_only", False):
-                if fold_biases:
-                    state_dict[f"blocks.{l}.mlp.b_in"] = state_dict[f"blocks.{l}.mlp.b_in"] + (
-                        state_dict[f"blocks.{l}.mlp.W_in"]
-                        * state_dict[f"blocks.{l}.ln2.b"][:, None]
-                    ).sum(-2)
-                    del state_dict[f"blocks.{l}.ln2.b"]
+                # Get translated MLP parameter keys
+                mlp_b_in_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_in", adapter)
+                mlp_W_in_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_in", adapter)
+                mlp_W_gate_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_gate", adapter)
+                ln2_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.b", adapter)
+                ln2_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.w", adapter)
 
-                state_dict[f"blocks.{l}.mlp.W_in"] = (
-                    state_dict[f"blocks.{l}.mlp.W_in"] * state_dict[f"blocks.{l}.ln2.w"][:, None]
-                )
+                if fold_biases:
+                    state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
+                        state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
+                    ).sum(-2)
+                    del state_dict[ln2_b_key]
+
+                state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
 
                 if getattr(cfg, "gated_mlp", False):
-                    state_dict[f"blocks.{l}.mlp.W_gate"] = (
-                        state_dict[f"blocks.{l}.mlp.W_gate"]
-                        * state_dict[f"blocks.{l}.ln2.w"][:, None]
+                    state_dict[mlp_W_gate_key] = (
+                        state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
                     )
 
-                del state_dict[f"blocks.{l}.ln2.w"]
+                del state_dict[ln2_w_key]
 
                 if center_weights:
                     # Center the weights that read in from the LayerNormPre
-                    state_dict[f"blocks.{l}.mlp.W_in"] -= einops.reduce(
-                        state_dict[f"blocks.{l}.mlp.W_in"],
+                    state_dict[mlp_W_in_key] -= einops.reduce(
+                        state_dict[mlp_W_in_key],
                         "d_model d_mlp -> 1 d_mlp",
                         "mean",
                     )
 
                 if getattr(cfg, "act_fn", None) is not None and cfg.act_fn.startswith("solu"):
+                    # Get translated SoLU LayerNorm parameter keys
+                    mlp_b_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_out", adapter)
+                    mlp_W_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_out", adapter)
+                    mlp_ln_b_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.ln.b", adapter)
+                    mlp_ln_w_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.ln.w", adapter)
+
                     # Fold ln3 into activation
                     if fold_biases:
-                        state_dict[f"blocks.{l}.mlp.b_out"] = state_dict[
-                            f"blocks.{l}.mlp.b_out"
-                        ] + (
-                            state_dict[f"blocks.{l}.mlp.W_out"]
-                            * state_dict[f"blocks.{l}.mlp.ln.b"][:, None]
-                        ).sum(
-                            -2
-                        )
+                        state_dict[mlp_b_out_key] = state_dict[mlp_b_out_key] + (
+                            state_dict[mlp_W_out_key] * state_dict[mlp_ln_b_key][:, None]
+                        ).sum(-2)
 
-                        del state_dict[f"blocks.{l}.mlp.ln.b"]
+                        del state_dict[mlp_ln_b_key]
 
-                    state_dict[f"blocks.{l}.mlp.W_out"] = (
-                        state_dict[f"blocks.{l}.mlp.W_out"]
-                        * state_dict[f"blocks.{l}.mlp.ln.w"][:, None]
+                    state_dict[mlp_W_out_key] = (
+                        state_dict[mlp_W_out_key] * state_dict[mlp_ln_w_key][:, None]
                     )
 
                     if center_weights:
                         # Center the weights that read in from the LayerNormPre
-                        state_dict[f"blocks.{l}.mlp.W_out"] -= einops.reduce(
-                            state_dict[f"blocks.{l}.mlp.W_out"],
+                        state_dict[mlp_W_out_key] -= einops.reduce(
+                            state_dict[mlp_W_out_key],
                             "d_mlp d_model -> 1 d_model",
                             "mean",
                         )
 
-                    del state_dict[f"blocks.{l}.mlp.ln.w"]
+                    del state_dict[mlp_ln_w_key]
 
         # Fold ln_final into Unembed
+        unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
+        unembed_W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
+        ln_final_b_key = ProcessWeights._get_param_key("ln_final.b", adapter)
+        ln_final_w_key = ProcessWeights._get_param_key("ln_final.w", adapter)
+
         if not getattr(cfg, "final_rms", False) and fold_biases:
             # Dumb bug from my old SoLU training code, some models have RMSNorm instead of LayerNorm
             # pre unembed.
-            state_dict["unembed.b_U"] = state_dict["unembed.b_U"] + (
-                state_dict["unembed.W_U"] * state_dict["ln_final.b"][:, None]
+            state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + (
+                state_dict[unembed_W_U_key] * state_dict[ln_final_b_key][:, None]
             ).sum(dim=-2)
-            del state_dict["ln_final.b"]
+            del state_dict[ln_final_b_key]
 
-        state_dict["unembed.W_U"] = state_dict["unembed.W_U"] * state_dict["ln_final.w"][:, None]
-        del state_dict["ln_final.w"]
+        state_dict[unembed_W_U_key] = (
+            state_dict[unembed_W_U_key] * state_dict[ln_final_w_key][:, None]
+        )
+        del state_dict[ln_final_w_key]
 
         if center_weights:
             # Center the weights that read in from the LayerNormPre
-            state_dict["unembed.W_U"] -= einops.reduce(
-                state_dict["unembed.W_U"], "d_model d_vocab -> 1 d_vocab", "mean"
+            state_dict[unembed_W_U_key] -= einops.reduce(
+                state_dict[unembed_W_U_key], "d_model d_vocab -> 1 d_vocab", "mean"
             )
 
         return state_dict
 
     @staticmethod
-    def center_writing_weights(state_dict: Dict[str, torch.Tensor], cfg) -> Dict[str, torch.Tensor]:
+    def center_writing_weights(
+        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
+    ) -> Dict[str, torch.Tensor]:
         """Center Writing Weights.
 
         Centers the weights of the model that write to the residual stream - W_out, W_E, W_pos and
@@ -212,6 +244,7 @@ class ProcessWeights:
         Args:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
             cfg: Model configuration object.
+            adapter: Optional architecture adapter for parameter key translation.
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with centered writing weights.
@@ -219,33 +252,44 @@ class ProcessWeights:
         # Make a copy to avoid modifying the original
         state_dict = state_dict.copy()
 
-        state_dict["embed.W_E"] = state_dict["embed.W_E"] - state_dict["embed.W_E"].mean(
+        # Get translated parameter keys
+        embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
+        pos_embed_W_pos_key = ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
+
+        state_dict[embed_W_E_key] = state_dict[embed_W_E_key] - state_dict[embed_W_E_key].mean(
             -1, keepdim=True
         )
         if getattr(cfg, "positional_embedding_type", "standard") != "rotary":
-            state_dict["pos_embed.W_pos"] = state_dict["pos_embed.W_pos"] - state_dict[
-                "pos_embed.W_pos"
+            state_dict[pos_embed_W_pos_key] = state_dict[pos_embed_W_pos_key] - state_dict[
+                pos_embed_W_pos_key
             ].mean(-1, keepdim=True)
+
         for l in range(cfg.n_layers):
-            state_dict[f"blocks.{l}.attn.W_O"] = state_dict[f"blocks.{l}.attn.W_O"] - state_dict[
-                f"blocks.{l}.attn.W_O"
-            ].mean(
+            # Get translated parameter keys for this layer
+            attn_W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
+            attn_b_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_O", adapter)
+            mlp_W_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_out", adapter)
+            mlp_b_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_out", adapter)
+
+            state_dict[attn_W_O_key] = state_dict[attn_W_O_key] - state_dict[attn_W_O_key].mean(
                 -1, keepdim=True
             )  # W_O is [head_index, d_model, d_head]
-            state_dict[f"blocks.{l}.attn.b_O"] = (
-                state_dict[f"blocks.{l}.attn.b_O"] - state_dict[f"blocks.{l}.attn.b_O"].mean()
+            state_dict[attn_b_O_key] = (
+                state_dict[attn_b_O_key] - state_dict[attn_b_O_key].mean()
             )  # b_O is [d_model]
             if not getattr(cfg, "attn_only", False):
-                state_dict[f"blocks.{l}.mlp.W_out"] = state_dict[
-                    f"blocks.{l}.mlp.W_out"
-                ] - state_dict[f"blocks.{l}.mlp.W_out"].mean(-1, keepdim=True)
-                state_dict[f"blocks.{l}.mlp.b_out"] = (
-                    state_dict[f"blocks.{l}.mlp.b_out"] - state_dict[f"blocks.{l}.mlp.b_out"].mean()
+                state_dict[mlp_W_out_key] = state_dict[mlp_W_out_key] - state_dict[
+                    mlp_W_out_key
+                ].mean(-1, keepdim=True)
+                state_dict[mlp_b_out_key] = (
+                    state_dict[mlp_b_out_key] - state_dict[mlp_b_out_key].mean()
                 )
         return state_dict
 
     @staticmethod
-    def center_unembed(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def center_unembed(
+        state_dict: Dict[str, torch.Tensor], adapter=None
+    ) -> Dict[str, torch.Tensor]:
         """Center the unembedding weights W_U.
 
         This is done by subtracting the mean of the weights from the weights themselves. This is
@@ -256,6 +300,7 @@ class ProcessWeights:
 
         Args:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
+            adapter: Optional architecture adapter for parameter key translation.
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with centered unembedding weights.
@@ -263,14 +308,22 @@ class ProcessWeights:
         # Make a copy to avoid modifying the original
         state_dict = state_dict.copy()
 
-        state_dict["unembed.W_U"] = state_dict["unembed.W_U"] - state_dict["unembed.W_U"].mean(
-            -1, keepdim=True
+        # Get translated parameter keys
+        unembed_W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
+        unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
+
+        state_dict[unembed_W_U_key] = state_dict[unembed_W_U_key] - state_dict[
+            unembed_W_U_key
+        ].mean(-1, keepdim=True)
+        state_dict[unembed_b_U_key] = (
+            state_dict[unembed_b_U_key] - state_dict[unembed_b_U_key].mean()
         )
-        state_dict["unembed.b_U"] = state_dict["unembed.b_U"] - state_dict["unembed.b_U"].mean()
         return state_dict
 
     @staticmethod
-    def fold_value_biases(state_dict: Dict[str, torch.Tensor], cfg) -> Dict[str, torch.Tensor]:
+    def fold_value_biases(
+        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
+    ) -> Dict[str, torch.Tensor]:
         """Fold the value biases into the output bias.
 
         Because attention patterns add up to 1, the value biases always have a constant effect on a
@@ -284,6 +337,7 @@ class ProcessWeights:
         Args:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
             cfg: Model configuration object.
+            adapter: Optional architecture adapter for parameter key translation.
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with value biases folded into output bias.
@@ -292,32 +346,37 @@ class ProcessWeights:
         state_dict = state_dict.copy()
 
         for layer in range(cfg.n_layers):
-            # shape [head_index, d_head]
+            # Get translated parameter keys
             if getattr(cfg, "n_key_value_heads", None) is None:
-                b_V = state_dict[f"blocks.{layer}.attn.b_V"]
+                b_V_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn.b_V", adapter)
+                b_V = state_dict[b_V_key]
             else:
-                b_V = state_dict[f"blocks.{layer}.attn._b_V"]
+                b_V_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn._b_V", adapter)
+                b_V = state_dict[b_V_key]
                 b_V = torch.repeat_interleave(
                     b_V, dim=0, repeats=cfg.n_heads // cfg.n_key_value_heads
                 )
+
+            # Get other translated parameter keys
+            W_O_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn.W_O", adapter)
+            b_O_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn.b_O", adapter)
+
             # [head_index, d_head, d_model]
-            W_O = state_dict[f"blocks.{layer}.attn.W_O"]
+            W_O = state_dict[W_O_key]
             # [d_model]
-            b_O_original = state_dict[f"blocks.{layer}.attn.b_O"]
+            b_O_original = state_dict[b_O_key]
             folded_b_O = b_O_original + (b_V[:, :, None] * W_O).sum([0, 1])
 
-            state_dict[f"blocks.{layer}.attn.b_O"] = folded_b_O
+            state_dict[b_O_key] = folded_b_O
             if getattr(cfg, "n_key_value_heads", None) is None:
-                state_dict[f"blocks.{layer}.attn.b_V"] = torch.zeros_like(b_V)
+                state_dict[b_V_key] = torch.zeros_like(b_V)
             else:
-                state_dict[f"blocks.{layer}.attn._b_V"] = torch.zeros_like(
-                    state_dict[f"blocks.{layer}.attn._b_V"]
-                )
+                state_dict[b_V_key] = torch.zeros_like(state_dict[b_V_key])
         return state_dict
 
     @staticmethod
     def refactor_factored_attn_matrices(
-        state_dict: Dict[str, torch.Tensor], cfg
+        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
     ) -> Dict[str, torch.Tensor]:
         """Experimental method for managing queries, keys and values.
 
@@ -358,6 +417,7 @@ class ProcessWeights:
         Args:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
             cfg: Model configuration object.
+            adapter: Optional architecture adapter for parameter key translation.
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with refactored attention matrices.
@@ -370,19 +430,29 @@ class ProcessWeights:
         state_dict = state_dict.copy()
 
         for l in range(cfg.n_layers):
+            # Get translated parameter keys
+            W_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_Q", adapter)
+            b_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_Q", adapter)
+            W_K_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_K", adapter)
+            b_K_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_K", adapter)
+            W_V_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_V", adapter)
+            W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
+            b_V_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_V", adapter)
+            b_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_O", adapter)
+
             # W_QK = W_Q @ W_K.T
             # Concatenate biases to make a d_model+1 input dimension
             W_Q_eff = torch.cat(
                 [
-                    state_dict[f"blocks.{l}.attn.W_Q"],
-                    state_dict[f"blocks.{l}.attn.b_Q"][:, None, :],
+                    state_dict[W_Q_key],
+                    state_dict[b_Q_key][:, None, :],
                 ],
                 dim=1,
             )
             W_K_eff = torch.cat(
                 [
-                    state_dict[f"blocks.{l}.attn.W_K"],
-                    state_dict[f"blocks.{l}.attn.b_K"][:, None, :],
+                    state_dict[W_K_key],
+                    state_dict[b_K_key][:, None, :],
                 ],
                 dim=1,
             )
@@ -392,18 +462,18 @@ class ProcessWeights:
             )
             W_K_eff_even = W_K_eff_even_T.transpose(-1, -2)
 
-            state_dict[f"blocks.{l}.attn.W_Q"] = W_Q_eff_even[:, :-1, :]
-            state_dict[f"blocks.{l}.attn.b_Q"] = W_Q_eff_even[:, -1, :]
-            state_dict[f"blocks.{l}.attn.W_K"] = W_K_eff_even[:, :-1, :]
-            state_dict[f"blocks.{l}.attn.b_K"] = W_K_eff_even[:, -1, :]
+            state_dict[W_Q_key] = W_Q_eff_even[:, :-1, :]
+            state_dict[b_Q_key] = W_Q_eff_even[:, -1, :]
+            state_dict[W_K_key] = W_K_eff_even[:, :-1, :]
+            state_dict[b_K_key] = W_K_eff_even[:, -1, :]
 
             # W_OV = W_V @ W_O
-            W_V = state_dict[f"blocks.{l}.attn.W_V"]
-            W_O = state_dict[f"blocks.{l}.attn.W_O"]
+            W_V = state_dict[W_V_key]
+            W_O = state_dict[W_O_key]
 
             # Factors the bias to be consistent.
-            b_V = state_dict[f"blocks.{l}.attn.b_V"]
-            b_O = state_dict[f"blocks.{l}.attn.b_O"]
+            b_V = state_dict[b_V_key]
+            b_O = state_dict[b_O_key]
 
             # Add singleton dimension for broadcasting
             b_V_expanded = einops.rearrange(b_V, "head_index d_head -> head_index d_head 1")
@@ -415,14 +485,14 @@ class ProcessWeights:
             b_V_contribution = b_V_times_W_O.sum(1).sum(0)
 
             effective_bias = b_O + b_V_contribution
-            state_dict[f"blocks.{l}.attn.b_V"] = torch.zeros_like(b_V)
-            state_dict[f"blocks.{l}.attn.b_O"] = effective_bias
+            state_dict[b_V_key] = torch.zeros_like(b_V)
+            state_dict[b_O_key] = effective_bias
 
             # Helper class to efficiently deal with low rank factored matrices.
             W_OV = FactoredMatrix(W_V, W_O)
             U, S, Vh = W_OV.svd()
-            state_dict[f"blocks.{l}.attn.W_V"] = U @ S.diag_embed()
-            state_dict[f"blocks.{l}.attn.W_O"] = utils.transpose(Vh)
+            state_dict[W_V_key] = U @ S.diag_embed()
+            state_dict[W_O_key] = utils.transpose(Vh)
 
         return state_dict
 
@@ -435,6 +505,7 @@ class ProcessWeights:
         center_unembed: bool = True,
         fold_value_biases: bool = True,
         refactor_factored_attn_matrices: bool = False,
+        adapter=None,
     ) -> Dict[str, torch.Tensor]:
         """Apply all weight processing transformations in the correct order.
 
@@ -449,6 +520,7 @@ class ProcessWeights:
             center_unembed (bool): Whether to center unembedding weights.
             fold_value_biases (bool): Whether to fold value biases into output bias.
             refactor_factored_attn_matrices (bool): Whether to refactor attention matrices.
+            adapter: Optional architecture adapter for parameter key translation.
 
         Returns:
             Dict[str, torch.Tensor]: Fully processed state dict.
@@ -460,25 +532,31 @@ class ProcessWeights:
                 # Skip for MoE models
                 pass
             elif getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"]:
-                processed_dict = ProcessWeights.fold_layer_norm(processed_dict, cfg)
+                processed_dict = ProcessWeights.fold_layer_norm(
+                    processed_dict, cfg, adapter=adapter
+                )
             elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
                 processed_dict = ProcessWeights.fold_layer_norm(
-                    processed_dict, cfg, fold_biases=False, center_weights=False
+                    processed_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
                 )
 
         if center_writing_weights:
             if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and not getattr(
                 cfg, "final_rms", False
             ):
-                processed_dict = ProcessWeights.center_writing_weights(processed_dict, cfg)
+                processed_dict = ProcessWeights.center_writing_weights(
+                    processed_dict, cfg, adapter=adapter
+                )
 
         if center_unembed:
-            processed_dict = ProcessWeights.center_unembed(processed_dict)
+            processed_dict = ProcessWeights.center_unembed(processed_dict, adapter=adapter)
 
         if fold_value_biases:
-            processed_dict = ProcessWeights.fold_value_biases(processed_dict, cfg)
+            processed_dict = ProcessWeights.fold_value_biases(processed_dict, cfg, adapter=adapter)
 
         if refactor_factored_attn_matrices:
-            processed_dict = ProcessWeights.refactor_factored_attn_matrices(processed_dict, cfg)
+            processed_dict = ProcessWeights.refactor_factored_attn_matrices(
+                processed_dict, cfg, adapter=adapter
+            )
 
         return processed_dict
