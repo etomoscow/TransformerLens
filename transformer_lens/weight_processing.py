@@ -47,14 +47,7 @@ class ProcessWeights:
             return tl_key
 
         # Use the adapter to translate from TL format to target format
-        # This assumes the adapter has a method to reverse the parameter mapping
-        if hasattr(adapter, "reverse_param_mapping"):
-            return adapter.reverse_param_mapping.get(tl_key, tl_key)
-        elif hasattr(adapter, "get_hf_param_name"):
-            return adapter.get_hf_param_name(tl_key)
-        else:
-            # If no reverse mapping available, return original key
-            return tl_key
+        return adapter.translate_transformer_lens_path(tl_key)
 
     @staticmethod
     def fold_layer_norm(
