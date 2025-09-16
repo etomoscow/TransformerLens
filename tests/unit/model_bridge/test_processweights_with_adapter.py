@@ -7,8 +7,9 @@ This validates that ProcessWeights can work with HF format weights using the ada
 import torch
 from transformers import GPT2LMHeadModel
 
-from transformer_lens import HookedTransformer, utils
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
+from transformer_lens import HookedTransformer
+from transformer_lens import utilities as utils
+from transformer_lens.config.TransformerBridgeConfig import TransformerBridgeConfig
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.weight_processing import ProcessWeights
 
@@ -29,8 +30,8 @@ def test_processweights_with_adapter():
     hf_model.eval()
 
     print("\n3. Setting up architecture adapter...")
-    # Create a TL config that matches GPT-2
-    cfg = HookedTransformerConfig.from_dict(
+    # Create a TransformerBridge config that matches GPT-2
+    cfg = TransformerBridgeConfig.from_dict(
         {
             "n_layers": 12,
             "d_model": 768,
