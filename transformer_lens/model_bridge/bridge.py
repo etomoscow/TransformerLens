@@ -202,14 +202,14 @@ class TransformerBridge(nn.Module):
             # Check if this is a GeneralizedComponent with its own hook registry
             if hasattr(mod, "get_hooks") and callable(getattr(mod, "get_hooks")):
                 # Use the component's own hook registry
-                    component_hooks = mod.get_hooks()  # type: ignore
-                    if isinstance(component_hooks, dict):
-                        # Type cast to help mypy understand this is a dict of hooks
-                        hooks_dict = cast(Dict[str, HookPoint], component_hooks)  # type: ignore
-                        for hook_name, hook in hooks_dict.items():  # type: ignore
-                            full_name = f"{path}.{hook_name}" if path else hook_name
-                            hook.name = full_name
-                            self._hook_registry[full_name] = hook
+                component_hooks = mod.get_hooks()  # type: ignore
+                if isinstance(component_hooks, dict):
+                    # Type cast to help mypy understand this is a dict of hooks
+                    hooks_dict = cast(Dict[str, HookPoint], component_hooks)  # type: ignore
+                    for hook_name, hook in hooks_dict.items():  # type: ignore
+                        full_name = f"{path}.{hook_name}" if path else hook_name
+                        hook.name = full_name
+                        self._hook_registry[full_name] = hook
 
             # Always scan attributes for additional hooks and submodules
             for attr_name in dir(mod):
