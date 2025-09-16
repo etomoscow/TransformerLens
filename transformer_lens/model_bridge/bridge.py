@@ -1858,9 +1858,121 @@ class TransformerBridge(nn.Module):
         remove_batch_dim: bool = False,
         **kwargs,
     ) -> Any:
-        """Run the model with specified forward and backward hooks - placeholder implementation."""
-        # Simplified implementation - just run forward
-        return self.forward(input, return_type=return_type, **kwargs)
+        """Run the model with specified forward and backward hooks.
+
+        Args:
+            input: Input to the model
+            fwd_hooks: Forward hooks to apply
+            bwd_hooks: Backward hooks to apply
+            reset_hooks_end: Whether to reset hooks at the end
+            clear_contexts: Whether to clear hook contexts
+            return_type: What to return ("logits", "loss", etc.)
+            names_filter: Filter for hook names (not used directly, for compatibility)
+            stop_at_layer: Layer to stop at (not yet fully implemented)
+            remove_batch_dim: Whether to remove batch dimension from hook inputs (only works for batch_size==1)
+            **kwargs: Additional arguments
+
+        Returns:
+            Model output
+        """
+
+        # Store hooks that we add so we can remove them later
+        added_hooks: List[Tuple[HookPoint, str]] = []
+
+        def add_hook_to_point(
+            hook_point: HookPoint, hook_fn: Callable, name: str, dir: Literal["fwd", "bwd"] = "fwd"
+        ):
+            hook_point.add_hook(hook_fn, dir=dir)
+            added_hooks.append((hook_point, name))
+
+        # Add stop_at_layer hook if specified
+        if stop_at_layer is not None:
+            # stop_at_layer is exclusive, so stop_at_layer=1 means run layer 0 and stop before layer 1
+            # We need to hook the output of the last layer to be processed (stop_at_layer - 1)
+            last_layer_to_process = stop_at_layer - 1
+            if (
+                hasattr(self, "blocks")
+                and last_layer_to_process >= 0
+                and last_layer_to_process < len(self.blocks)
+            ):
+
+                def stop_hook(tensor: torch.Tensor, *, hook: Any) -> torch.Tensor:
+                    raise StopAtLayerException(tensor, stop_at_layer)
+
+                # Add hook to the output of the last layer to be processed
+                block_hook_name = f"blocks.{last_layer_to_process}.hook_out"
+                hook_dict = self.hook_dict
+                if block_hook_name in hook_dict:
+                    add_hook_to_point(hook_dict[block_hook_name], stop_hook, block_hook_name, "fwd")
+
+        # Helper function to apply hooks based on name or filter function
+        def apply_hooks(hooks: List[Tuple[Union[str, Callable], Callable]], is_fwd: bool):
+            direction: Literal["fwd", "bwd"] = "fwd" if is_fwd else "bwd"
+            # Collect aliases for resolving legacy hook names
+            aliases = collect_aliases_recursive(self)
+
+            for hook_name_or_filter, hook_fn in hooks:
+                # Wrap the hook function to handle remove_batch_dim if needed
+                if remove_batch_dim:
+                    original_hook_fn = hook_fn
+
+                    def wrapped_hook_fn(tensor, hook):
+                        # Remove batch dimension if it's size 1
+                        if tensor.shape[0] == 1:
+                            tensor_no_batch = tensor.squeeze(0)
+                            result = original_hook_fn(tensor_no_batch, hook)
+                            # Add batch dimension back if result doesn't have it
+                            if result.dim() == tensor_no_batch.dim():
+                                result = result.unsqueeze(0)
+                            return result
+                        else:
+                            return original_hook_fn(tensor, hook)
+
+                    hook_fn = wrapped_hook_fn
+
+                if isinstance(hook_name_or_filter, str):
+                    # Direct hook name - check for aliases first
+                    hook_dict = self.hook_dict
+                    actual_hook_name = hook_name_or_filter
+
+                    # If this is an alias, resolve it to the actual hook name
+                    if hook_name_or_filter in aliases:
+                        actual_hook_name = aliases[hook_name_or_filter]
+
+                    if actual_hook_name in hook_dict:
+                        add_hook_to_point(
+                            hook_dict[actual_hook_name], hook_fn, actual_hook_name, direction
+                        )
+                else:
+                    # Filter function
+                    hook_dict = self.hook_dict
+                    for name, hook_point in hook_dict.items():
+                        if hook_name_or_filter(name):
+                            add_hook_to_point(hook_point, hook_fn, name, direction)
+
+        try:
+            # Apply forward hooks
+            apply_hooks(fwd_hooks, True)
+
+            # Apply backward hooks (though we don't fully support them yet)
+            apply_hooks(bwd_hooks, False)
+
+            # Run the model
+            try:
+                output = self.forward(input, return_type=return_type or "logits", **kwargs)
+            except StopAtLayerException as e:
+                # Return the intermediate output from the specified layer
+                output = e.layer_output
+
+            return output
+
+        finally:
+            if reset_hooks_end:
+                # Remove all hooks we added
+                for hook_point, name in added_hooks:
+                    hook_point.remove_hooks()
+
+    # ==================== GENERATION METHODS ====================
 
     def generate(
         self,
@@ -1922,17 +2034,163 @@ class TransformerBridge(nn.Module):
         """
         return self.to(torch.device("cpu"))  # type: ignore
 
-    def get_params(self):
-        """Access to model parameters in the format expected by SVDInterpreter.
+    def get_embeddings(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Get embeddings for tokens.
 
-        For missing weights, returns zero tensors of appropriate shape instead of raising exceptions.
-        This ensures compatibility across different model architectures.
+        Args:
+            tokens: Input tokens
 
         Returns:
-            dict: Dictionary of parameter tensors with TransformerLens naming convention
+            Token embeddings
+        """
+        # Use the embed component if available
+        if hasattr(self, "embed") and hasattr(self.embed, "weight"):
+            return torch.nn.functional.embedding(tokens, self.embed.weight)
+        else:
+            # Fallback to using the underlying model's embedding layer
+            if hasattr(self.original_model, "get_input_embeddings"):
+                embedding_layer = self.original_model.get_input_embeddings()  # type: ignore[operator]
+                return embedding_layer(tokens)
+            else:
+                raise NotImplementedError("No embedding method available")
 
-        Raises:
-            ValueError: If configuration is inconsistent (e.g., cfg.n_layers != len(blocks))
+    def mps(self) -> "TransformerBridge":
+        """Move model to MPS.
+
+        Returns:
+            Self for chaining
+        """
+        return self.to(torch.device("mps"))  # type: ignore
+
+    def add_hook(self, name: str, hook_fn, dir="fwd", is_permanent=False):
+        """Add a hook to a specific component."""
+        # Navigate to the hook point using the name
+        component = self
+        parts = name.split(".")
+
+        for part in parts[:-1]:  # All but the last part
+            if hasattr(component, part):
+                component = getattr(component, part)
+            else:
+                raise AttributeError(f"Component path '{'.'.join(parts[:-1])}' not found")
+
+        # The last part should be a hook name
+        hook_name = parts[-1]
+        if hasattr(component, hook_name):
+            hook_point = getattr(component, hook_name)
+            if isinstance(hook_point, HookPoint):
+                hook_point.add_hook(hook_fn, dir=dir, is_permanent=is_permanent)
+            else:
+                raise AttributeError(
+                    f"'{hook_name}' is not a hook point. Found object of type: {type(hook_point)} with value: {hook_point}"
+                )
+        else:
+            raise AttributeError(f"Hook point '{hook_name}' not found on component")
+
+    def reset_hooks(self, clear_contexts=True):
+        """Remove all hooks from the model."""
+
+        # Recursively remove hooks from all components
+        def remove_hooks_recursive(module):
+            if isinstance(module, GeneralizedComponent):
+                module.remove_hooks()
+            for child in module.children():
+                remove_hooks_recursive(child)
+
+        remove_hooks_recursive(self)
+
+    def get_caching_hooks(
+        self,
+        names_filter=None,
+        incl_bwd=False,
+        device=None,
+        remove_batch_dim=False,
+        cache=None,
+        pos_slice=None,
+    ):
+        """Creates hooks to cache activations."""
+        if cache is None:
+            cache = {}
+
+        if names_filter is None:
+            names_filter = lambda name: True
+        elif isinstance(names_filter, str):
+            filter_str = names_filter
+            names_filter = lambda name: filter_str in name
+        elif callable(names_filter):
+            pass  # Already a function
+        else:
+            raise ValueError("names_filter must be a string, callable, or None")
+
+        def make_cache_hook(name):
+            def cache_hook(tensor, hook):
+                cache[name] = tensor.detach().clone()
+                if remove_batch_dim and tensor.shape[0] == 1:
+                    cache[name] = cache[name].squeeze(0)
+                if device is not None:
+                    cache[name] = cache[name].to(device)
+                return tensor
+
+            return cache_hook
+
+        fwd_hooks: List[Tuple[str, Callable]] = []
+        bwd_hooks: List[Tuple[str, Callable]] = []
+
+        # Collect hooks from all HookPoint objects in the model
+        def collect_hooks(module, prefix=""):
+            for name, child in module.named_children():
+                full_name = f"{prefix}.{name}" if prefix else name
+                if hasattr(child, "add_hook") and names_filter(full_name):
+                    fwd_hooks.append((full_name, make_cache_hook(full_name)))
+                collect_hooks(child, full_name)
+
+        collect_hooks(self)
+
+        return cache, fwd_hooks, bwd_hooks
+
+    def hooks(self, fwd_hooks=[], bwd_hooks=[], reset_hooks_end=True, clear_contexts=False):
+        """Context manager for temporarily adding hooks."""
+
+        @contextmanager
+        def _hooks_context():
+            added_hooks = []
+
+            try:
+                # Add forward hooks
+                for hook_name, hook_fn in fwd_hooks:
+                    try:
+                        self.add_hook(hook_name, hook_fn, dir="fwd")
+                        added_hooks.append((hook_name, hook_fn))
+                    except Exception as e:
+                        print(f"Warning: Failed to add forward hook {hook_name}: {e}")
+
+                # Add backward hooks
+                for hook_name, hook_fn in bwd_hooks:
+                    try:
+                        self.add_hook(hook_name, hook_fn, dir="bwd")
+                        added_hooks.append((hook_name, hook_fn))
+                    except Exception as e:
+                        print(f"Warning: Failed to add backward hook {hook_name}: {e}")
+
+                yield
+
+            finally:
+                if reset_hooks_end:
+                    # Reset all hooks
+                    self.reset_hooks()
+
+        return _hooks_context()
+
+    def set_use_attn_result(self, use_attn_result: bool):
+        """Toggle whether to explicitly calculate and expose the result for each attention head.
+
+        Useful for interpretability but can easily burn through GPU memory.
+        """
+        self.cfg.use_attn_result = use_attn_result
+
+    def set_use_split_qkv_input(self, use_split_qkv_input: bool):
+        """
+        Toggles whether to allow editing of inputs to each attention head.
         """
         return get_bridge_params(self)
 
