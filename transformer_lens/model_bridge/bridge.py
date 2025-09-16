@@ -353,7 +353,7 @@ class TransformerBridge(nn.Module):
         hooks_to_cache = {}
 
         if self.compatibility_mode:
-            aliases = collect_aliases_recursive(self)
+            aliases = collect_aliases_recursive(self.hook_dict)
 
         if include_all:
             self.hooks_to_cache = self.hook_dict
@@ -1655,7 +1655,7 @@ class TransformerBridge(nn.Module):
         """
         # Process names_filter to create a callable that handles legacy hook names
         # Collect all aliases from bridge components (both hook and cache aliases)
-        aliases = collect_aliases_recursive(self)
+        aliases = collect_aliases_recursive(self.hook_dict)
 
         def create_names_filter_fn(filter_input):
             if filter_input is None:
@@ -1714,8 +1714,8 @@ class TransformerBridge(nn.Module):
 
             return cache_hook
 
-        # Use cached hooks instead of re-discovering them
-        hook_dict = self.hooks_to_cache
+        # Use hook dictionary to get all available hooks
+        hook_dict = self.hook_dict
 
         # Filter hooks based on names_filter
         for hook_name, hook in hook_dict.items():
@@ -1787,7 +1787,17 @@ class TransformerBridge(nn.Module):
                 if "output_attentions" not in filtered_kwargs:
                     filtered_kwargs["output_attentions"] = True
 
-                output = self.original_model(*processed_args, **filtered_kwargs)
+                # Call forward with the input as the first argument
+                if processed_args:
+                    output = self.forward(processed_args[0], **filtered_kwargs)
+                elif "input_ids" in filtered_kwargs:
+                    # If we have input_ids but no processed_args, use the input_ids as input
+                    output = self.forward(
+                        filtered_kwargs["input_ids"],
+                        **{k: v for k, v in filtered_kwargs.items() if k != "input_ids"},
+                    )
+                else:
+                    output = self.forward(**filtered_kwargs)
                 # Extract logits if output is a HuggingFace model output object
                 if hasattr(output, "logits"):
                     output = output.logits
@@ -1909,7 +1919,7 @@ class TransformerBridge(nn.Module):
         def apply_hooks(hooks: List[Tuple[Union[str, Callable], Callable]], is_fwd: bool):
             direction: Literal["fwd", "bwd"] = "fwd" if is_fwd else "bwd"
             # Collect aliases for resolving legacy hook names
-            aliases = collect_aliases_recursive(self)
+            aliases = collect_aliases_recursive(self.hook_dict)
 
             for hook_name_or_filter, hook_fn in hooks:
                 # Wrap the hook function to handle remove_batch_dim if needed
@@ -2191,6 +2201,20 @@ class TransformerBridge(nn.Module):
     def set_use_split_qkv_input(self, use_split_qkv_input: bool):
         """
         Toggles whether to allow editing of inputs to each attention head.
+        """
+        self.cfg.use_split_qkv_input = use_split_qkv_input
+
+    def get_params(self):
+        """Access to model parameters in the format expected by SVDInterpreter.
+
+        For missing weights, returns zero tensors of appropriate shape instead of raising exceptions.
+        This ensures compatibility across different model architectures.
+
+        Returns:
+            dict: Dictionary of parameter tensors with TransformerLens naming convention
+
+        Raises:
+            ValueError: If configuration is inconsistent (e.g., cfg.n_layers != len(blocks))
         """
         return get_bridge_params(self)
 
