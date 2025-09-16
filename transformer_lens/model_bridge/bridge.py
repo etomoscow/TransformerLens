@@ -32,10 +32,12 @@ from transformer_lens.hook_points import HookPoint
 
 class StopAtLayerException(Exception):
     """Exception to stop forward pass at a specific layer."""
+
     def __init__(self, tensor, layer_idx):
         self.tensor = tensor
         self.layer_idx = layer_idx
         super().__init__(f"Stopped at layer {layer_idx}")
+
 
 def collect_aliases_recursive(hook_dict, prefix=""):
     """Recursively collect hook aliases from a nested hook dictionary."""
@@ -44,11 +46,14 @@ def collect_aliases_recursive(hook_dict, prefix=""):
         full_key = f"{prefix}.{key}" if prefix else key
         if isinstance(value, dict):
             aliases.update(collect_aliases_recursive(value, full_key))
-        elif hasattr(value, 'name'):
+        elif hasattr(value, "name"):
             aliases[full_key] = value.name
     return aliases
+
+
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.component_setup import set_original_components
+from transformer_lens.model_bridge.get_params_util import get_bridge_params
 from transformer_lens.model_bridge.hook_point_wrapper import HookPointWrapper
 from transformer_lens.model_bridge.types import ComponentMapping
 from transformer_lens.utilities.aliases import resolve_alias
@@ -174,13 +179,11 @@ class TransformerBridge(nn.Module):
             if isinstance(target, list):
                 # For list targets, try each one until one works
                 for single_target in target:
-                    try:
-                        target_hook = resolve_alias(self, alias_name, {alias_name: single_target})
-                        if target_hook is not None:
-                            hooks[alias_name] = target_hook
-                            break
-                    except AttributeError:
-                        continue
+                    target_hook = resolve_alias(self, alias_name, {alias_name: single_target})
+                    if target_hook is not None:
+                        hooks[alias_name] = target_hook
+                        break
+                    continue
             else:
                 target_hook = resolve_alias(self, alias_name, {alias_name: target})
                 if target_hook is not None:
@@ -199,18 +202,14 @@ class TransformerBridge(nn.Module):
             # Check if this is a GeneralizedComponent with its own hook registry
             if hasattr(mod, "get_hooks") and callable(getattr(mod, "get_hooks")):
                 # Use the component's own hook registry
-                try:
-                    component_hooks = mod.get_hooks()  # type: ignore
-                    if isinstance(component_hooks, dict):
-                        # Type cast to help mypy understand this is a dict of hooks
-                        hooks_dict = cast(Dict[str, HookPoint], component_hooks)  # type: ignore
-                        for hook_name, hook in hooks_dict.items():  # type: ignore
-                            full_name = f"{path}.{hook_name}" if path else hook_name
-                            hook.name = full_name
-                            self._hook_registry[full_name] = hook
-                except Exception:
-                    # If get_hooks() fails, fall through to the else block
-                    pass
+                component_hooks = mod.get_hooks()  # type: ignore
+                if isinstance(component_hooks, dict):
+                    # Type cast to help mypy understand this is a dict of hooks
+                    hooks_dict = cast(Dict[str, HookPoint], component_hooks)  # type: ignore
+                    for hook_name, hook in hooks_dict.items():  # type: ignore
+                        full_name = f"{path}.{hook_name}" if path else hook_name
+                        hook.name = full_name
+                        self._hook_registry[full_name] = hook
 
             # Always scan attributes for additional hooks and submodules
             for attr_name in dir(mod):
@@ -219,10 +218,7 @@ class TransformerBridge(nn.Module):
                 if attr_name == "original_component" or "original_model":
                     continue
 
-                try:
                     attr = getattr(mod, attr_name)
-                except Exception:
-                    continue
 
                 name = f"{path}.{attr_name}" if path else attr_name
 
@@ -652,7 +648,6 @@ class TransformerBridge(nn.Module):
         lm_head_weight = lm_head_weight - torch.mean(lm_head_weight, dim=1, keepdim=True)
         state_dict["lm_head.weight"] = lm_head_weight
 
-
     def _add_identity_layer_norm_params(self, processed_hf_state_dict):
         """Add missing LayerNorm parameters as identity values.
 
@@ -696,14 +691,6 @@ class TransformerBridge(nn.Module):
                 if orig_key.replace("._original_component", "") == processed_key:
                     original_state_dict[orig_key].data.copy_(processed_tensor)
                     break
-
-
-
-
-
-
-
-
 
     def _load_processed_weights_from_hf_dict(self, processed_hf_dict):
         """Load processed weights (in HF format) back into the TransformerBridge.
@@ -891,7 +878,6 @@ class TransformerBridge(nn.Module):
             # Apply the folding transformation if we have all components
             if v_bias is not None and w_o is not None and b_o is not None:
                 try:
-
                     # Reshape v_bias to [n_heads, d_head] if needed
                     if v_bias.dim() == 1:
                         expected_size = self.cfg.n_heads * self.cfg.d_head
@@ -1406,268 +1392,9 @@ class TransformerBridge(nn.Module):
     def OV(self):
         return FactoredMatrix(self.W_V, self.W_O)
 
-    def get_params(self):
-        """Access to model parameters in the format expected by SVDInterpreter.
-
-        Returns:
-            dict: Dictionary of parameter tensors with TransformerLens naming convention
-        """
-        params_dict = {}
-
-        # Helper function to get device and dtype from existing weights
-        def _get_device_dtype():
-            device = self.cfg.device if hasattr(self.cfg, "device") else torch.device("cpu")
-            dtype = torch.float32  # Default dtype
-
-            # Try to get dtype from existing weights
-            try:
-                device = self.embed.weight.device
-                dtype = self.embed.weight.dtype
-            except AttributeError:
-                try:
-                    device = self.pos_embed.weight.device
-                    dtype = self.pos_embed.weight.dtype
-                except AttributeError:
-                    if len(self.blocks) > 0:
-                        try:
-                            device = self.blocks[0].attn.q.weight.device
-                            dtype = self.blocks[0].attn.q.weight.dtype
-                        except AttributeError:
-                            pass
-            return device, dtype
-
-        # Add embedding weights
-        try:
-        params_dict["embed.W_E"] = self.embed.weight
-        except AttributeError:
-            device, dtype = _get_device_dtype()
-            params_dict["embed.W_E"] = torch.zeros(
-                self.cfg.d_vocab, self.cfg.d_model, device=device, dtype=dtype
-            )
-
-        try:
-        params_dict["pos_embed.W_pos"] = self.pos_embed.weight
-        except AttributeError:
-            device, dtype = _get_device_dtype()
-            params_dict["pos_embed.W_pos"] = torch.zeros(
-                self.cfg.n_ctx, self.cfg.d_model, device=device, dtype=dtype
-            )
-
-        # Add attention weights
-        for layer_idx in range(self.cfg.n_layers):
-            # Validate that the layer actually exists
-            if layer_idx >= len(self.blocks):
-                raise ValueError(
-                    f"Configuration mismatch: cfg.n_layers={self.cfg.n_layers} but only "
-                    f"{len(self.blocks)} blocks found. Layer {layer_idx} does not exist."
-                )
-
-            block = self.blocks[layer_idx]
-
-            try:
-            # Attention weights - reshape to expected format
-            w_q = block.attn.q.weight
-            w_k = block.attn.k.weight
-            w_v = block.attn.v.weight
-            w_o = block.attn.o.weight
-
-            # Reshape from [d_model, d_model] to [n_heads, d_model, d_head] and [n_heads, d_head, d_model]
-                # Handle different attention architectures (Multi-Head, Multi-Query, Grouped Query)
-            if w_q.shape == (self.cfg.d_model, self.cfg.d_model):
-                d_head = self.cfg.d_model // self.cfg.n_heads
-                w_q = w_q.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
-                    w_o = w_o.reshape(self.cfg.n_heads, d_head, self.cfg.d_model)
-
-                    # Handle K and V weights - they might have different shapes in Multi-Query Attention
-                    if w_k.shape == (self.cfg.d_model, self.cfg.d_model):
-                w_k = w_k.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
-                    elif w_k.shape == (self.cfg.d_head, self.cfg.d_model) or w_k.shape == (
-                        self.cfg.d_model // self.cfg.n_heads,
-                        self.cfg.d_model,
-                    ):
-                        # Multi-Query Attention: single K head shared across all Q heads
-                        # Need to transpose to match expected [n_heads, d_model, d_head] format
-                        w_k = w_k.transpose(0, 1).unsqueeze(0).expand(self.cfg.n_heads, -1, -1)
-                    else:
-                        # Try to reshape based on element count
-                        if w_k.numel() == self.cfg.n_heads * self.cfg.d_model * self.cfg.d_head:
-                            w_k = w_k.view(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
-                        else:
-                            # Create zero tensor if can't reshape
-                            device, dtype = _get_device_dtype()
-                            w_k = torch.zeros(
-                                self.cfg.n_heads,
-                                self.cfg.d_model,
-                                self.cfg.d_head,
-                                device=device,
-                                dtype=dtype,
-                            )
-
-                    if w_v.shape == (self.cfg.d_model, self.cfg.d_model):
-                w_v = w_v.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
-                    elif w_v.shape == (self.cfg.d_head, self.cfg.d_model) or w_v.shape == (
-                        self.cfg.d_model // self.cfg.n_heads,
-                        self.cfg.d_model,
-                    ):
-                        # Multi-Query Attention: single V head shared across all Q heads
-                        # Need to transpose to match expected [n_heads, d_model, d_head] format
-                        w_v = w_v.transpose(0, 1).unsqueeze(0).expand(self.cfg.n_heads, -1, -1)
-                    else:
-                        # Try to reshape based on element count
-                        if w_v.numel() == self.cfg.n_heads * self.cfg.d_model * self.cfg.d_head:
-                            w_v = w_v.view(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
-                        else:
-                            # Create zero tensor if can't reshape
-                            device, dtype = _get_device_dtype()
-                            w_v = torch.zeros(
-                                self.cfg.n_heads,
-                                self.cfg.d_model,
-                                self.cfg.d_head,
-                                device=device,
-                                dtype=dtype,
-                            )
-
-            params_dict[f"blocks.{layer_idx}.attn.W_Q"] = w_q
-            params_dict[f"blocks.{layer_idx}.attn.W_K"] = w_k
-            params_dict[f"blocks.{layer_idx}.attn.W_V"] = w_v
-            params_dict[f"blocks.{layer_idx}.attn.W_O"] = w_o
-
-                # Attention biases - handle None biases
-                if block.attn.q.bias is not None:
-            params_dict[f"blocks.{layer_idx}.attn.b_Q"] = block.attn.q.bias.reshape(
-                self.cfg.n_heads, -1
-            )
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.attn.b_Q"] = torch.zeros(
-                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
-                    )
-
-                if block.attn.k.bias is not None:
-            params_dict[f"blocks.{layer_idx}.attn.b_K"] = block.attn.k.bias.reshape(
-                self.cfg.n_heads, -1
-            )
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
-                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
-                    )
-
-                if block.attn.v.bias is not None:
-            params_dict[f"blocks.{layer_idx}.attn.b_V"] = block.attn.v.bias.reshape(
-                self.cfg.n_heads, -1
-            )
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
-                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
-                    )
-
-                if block.attn.o.bias is not None:
-            params_dict[f"blocks.{layer_idx}.attn.b_O"] = block.attn.o.bias
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.attn.b_O"] = torch.zeros(
-                        self.cfg.d_model, device=device, dtype=dtype
-                    )
-
-            except AttributeError:
-                # Create zero attention weights for missing attention component
-                device, dtype = _get_device_dtype()
-                expected_qkv_shape = (self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
-                expected_o_shape = (self.cfg.n_heads, self.cfg.d_head, self.cfg.d_model)
-                expected_qkv_bias_shape = (self.cfg.n_heads, self.cfg.d_head)
-                expected_o_bias_shape = (self.cfg.d_model,)
-
-                params_dict[f"blocks.{layer_idx}.attn.W_Q"] = torch.zeros(
-                    *expected_qkv_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.W_K"] = torch.zeros(
-                    *expected_qkv_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.W_V"] = torch.zeros(
-                    *expected_qkv_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.W_O"] = torch.zeros(
-                    *expected_o_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.b_Q"] = torch.zeros(
-                    *expected_qkv_bias_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
-                    *expected_qkv_bias_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
-                    *expected_qkv_bias_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.b_O"] = torch.zeros(
-                    *expected_o_bias_shape, device=device, dtype=dtype
-                )
-
-            try:
-                # MLP weights - access the actual weight tensors
-                params_dict[f"blocks.{layer_idx}.mlp.W_in"] = getattr(block.mlp, "in").weight
-                params_dict[f"blocks.{layer_idx}.mlp.W_out"] = block.mlp.out.weight
-
-                # MLP biases - handle None biases
-                mlp_in_bias = getattr(block.mlp, "in").bias
-                if mlp_in_bias is not None:
-                    params_dict[f"blocks.{layer_idx}.mlp.b_in"] = mlp_in_bias
-                else:
-                    device, dtype = _get_device_dtype()
-                    d_mlp = self.cfg.d_mlp if self.cfg.d_mlp is not None else (4 * self.cfg.d_model)
-                    params_dict[f"blocks.{layer_idx}.mlp.b_in"] = torch.zeros(
-                        d_mlp, device=device, dtype=dtype
-                    )
-
-                mlp_out_bias = block.mlp.out.bias
-                if mlp_out_bias is not None:
-                    params_dict[f"blocks.{layer_idx}.mlp.b_out"] = mlp_out_bias
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.mlp.b_out"] = torch.zeros(
-                        self.cfg.d_model, device=device, dtype=dtype
-                    )
-
-                # Add gate weights if they exist
-                if hasattr(block.mlp, "gate") and hasattr(block.mlp.gate, "weight"):
-                    params_dict[f"blocks.{layer_idx}.mlp.W_gate"] = block.mlp.gate.weight
-                    if hasattr(block.mlp.gate, "bias") and block.mlp.gate.bias is not None:
-                        params_dict[f"blocks.{layer_idx}.mlp.b_gate"] = block.mlp.gate.bias
-
-            except AttributeError:
-                # Create zero MLP weights for missing MLP component
-                device, dtype = _get_device_dtype()
-                d_mlp = self.cfg.d_mlp if self.cfg.d_mlp is not None else (4 * self.cfg.d_model)
-                params_dict[f"blocks.{layer_idx}.mlp.W_in"] = torch.zeros(
-                    self.cfg.d_model, d_mlp, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.mlp.W_out"] = torch.zeros(
-                    d_mlp, self.cfg.d_model, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.mlp.b_in"] = torch.zeros(
-                    d_mlp, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.mlp.b_out"] = torch.zeros(
-                    self.cfg.d_model, device=device, dtype=dtype
-                )
-
-        # Add unembedding weights
-        try:
-            params_dict["unembed.W_U"] = self.unembed.weight.T
-        except AttributeError:
-            device, dtype = _get_device_dtype()
-            params_dict["unembed.W_U"] = torch.zeros(
-                self.cfg.d_model, self.cfg.d_vocab, device=device, dtype=dtype
-            )
-
-        return params_dict
-
-    @property
     def params(self):
         """Property access to model parameters in the format expected by SVDInterpreter."""
         return self.get_params()
-
 
     def named_parameters(
         self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True
@@ -2000,7 +1727,6 @@ class TransformerBridge(nn.Module):
         for hp, name in hooks:
             hp.add_hook(make_cache_hook(name))
 
-        try:
             processed_args = [input]
             # Handle string input whether passed positionally or as a kwarg
             if processed_args and isinstance(processed_args[0], str):
@@ -2068,10 +1794,9 @@ class TransformerBridge(nn.Module):
             except StopAtLayerException as e:
                 # Return the intermediate output from the specified layer
                 output = e.layer_output
-
-        finally:
-            for hp, _ in hooks:
-                hp.remove_hooks()
+            finally:
+                for hp, _ in hooks:
+                    hp.remove_hooks()
 
         if self.compatibility_mode == True:
             # If compatibility mode is enabled, we need to handle aliases
@@ -2196,3 +1921,17 @@ class TransformerBridge(nn.Module):
             Self for chaining
         """
         return self.to(torch.device("cpu"))  # type: ignore
+
+    def get_params(self):
+        """Access to model parameters in the format expected by SVDInterpreter.
+
+        For missing weights, returns zero tensors of appropriate shape instead of raising exceptions.
+        This ensures compatibility across different model architectures.
+
+        Returns:
+            dict: Dictionary of parameter tensors with TransformerLens naming convention
+
+        Raises:
+            ValueError: If configuration is inconsistent (e.g., cfg.n_layers != len(blocks))
+        """
+        return get_bridge_params(self)
