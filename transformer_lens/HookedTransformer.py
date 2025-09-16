@@ -1412,6 +1412,7 @@ class HookedTransformer(HookedRootModule):
         if move_to_device:
             model.move_model_modules_to_device()
 
+        print(f"Loaded pretrained model {model_name} into HookedTransformer")
         return model
 
     @classmethod
