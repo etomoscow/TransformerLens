@@ -305,99 +305,98 @@ def test_get_component_invalid_paths(
 
 def test_translate_weight_processing_paths(adapter: Gemma3ArchitectureAdapter) -> None:
     """Test translation of paths used in weight processing functions.
-    
+
     This ensures that all paths used in ProcessWeights methods can be properly
     translated by the adapter.
     """
-    # Test embedding and positional embedding paths
+    # Test embedding paths (Gemma3 doesn't have positional embeddings)
     assert adapter.translate_transformer_lens_path("embed.W_E") == "model.embed_tokens.weight"
-    assert adapter.translate_transformer_lens_path("pos_embed.W_pos") == "model.pos_embed.weight" 
-    
+
     # Test unembedding paths
     assert adapter.translate_transformer_lens_path("unembed.W_U") == "lm_head.weight"
     assert adapter.translate_transformer_lens_path("unembed.b_U") == "lm_head.bias"
-    
+
     # Test layer norm paths
     assert adapter.translate_transformer_lens_path("ln_final.w") == "model.norm.weight"
     assert adapter.translate_transformer_lens_path("ln_final.b") == "model.norm.bias"
-    
+
     # Test attention weight and bias paths for multiple layers
     for layer in [0, 1]:
         # Attention weights
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_Q") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_Q")
             == f"model.layers.{layer}.self_attn.q_proj.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_K") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_K")
             == f"model.layers.{layer}.self_attn.k_proj.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_V") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_V")
             == f"model.layers.{layer}.self_attn.v_proj.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_O") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_O")
             == f"model.layers.{layer}.self_attn.o_proj.weight"
         )
-        
+
         # Attention biases
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_Q") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_Q")
             == f"model.layers.{layer}.self_attn.q_proj.bias"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_K") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_K")
             == f"model.layers.{layer}.self_attn.k_proj.bias"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_V") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_V")
             == f"model.layers.{layer}.self_attn.v_proj.bias"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_O") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_O")
             == f"model.layers.{layer}.self_attn.o_proj.bias"
         )
-        
+
         # MLP weights
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.W_in") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.W_in")
             == f"model.layers.{layer}.mlp.up_proj.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.W_out") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.W_out")
             == f"model.layers.{layer}.mlp.down_proj.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.W_gate") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.W_gate")
             == f"model.layers.{layer}.mlp.gate_proj.weight"
         )
-        
+
         # MLP biases
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.b_in") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.b_in")
             == f"model.layers.{layer}.mlp.up_proj.bias"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.b_out") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.b_out")
             == f"model.layers.{layer}.mlp.down_proj.bias"
         )
-        
+
         # Layer norm paths within blocks
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.ln1.w") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.ln1.w")
             == f"model.layers.{layer}.input_layernorm.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.ln1.b") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.ln1.b")
             == f"model.layers.{layer}.input_layernorm.bias"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.ln2.w") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.ln2.w")
             == f"model.layers.{layer}.pre_feedforward_layernorm.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.ln2.b") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.ln2.b")
             == f"model.layers.{layer}.pre_feedforward_layernorm.bias"
         )
 
@@ -408,19 +407,19 @@ def test_translate_weight_processing_paths_gqa(adapter: Gemma3ArchitectureAdapte
     for layer in [0, 1]:
         # GQA paths use underscore prefix for grouped K/V
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn._b_K") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn._b_K")
             == f"model.layers.{layer}.self_attn.k_proj.bias"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn._W_K") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn._W_K")
             == f"model.layers.{layer}.self_attn.k_proj.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn._b_V") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn._b_V")
             == f"model.layers.{layer}.self_attn.v_proj.bias"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn._W_V") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.attn._W_V")
             == f"model.layers.{layer}.self_attn.v_proj.weight"
         )
 
@@ -430,10 +429,10 @@ def test_translate_weight_processing_solu_paths(adapter: Gemma3ArchitectureAdapt
     # Test SoLU MLP layer norm paths (used in some older models)
     for layer in [0, 1]:
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.ln.w") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.ln.w")
             == f"model.layers.{layer}.mlp.ln.weight"
         )
         assert (
-            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.ln.b") 
+            adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.ln.b")
             == f"model.layers.{layer}.mlp.ln.bias"
         )

@@ -141,7 +141,14 @@ class ProcessWeights:
                 # Get translated MLP parameter keys
                 mlp_b_in_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_in", adapter)
                 mlp_W_in_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_in", adapter)
-                mlp_W_gate_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_gate", adapter)
+
+                # Only get gate key if model has gated MLPs
+                mlp_W_gate_key = None
+                if getattr(cfg, "gated_mlp", False):
+                    mlp_W_gate_key = ProcessWeights._get_param_key(
+                        f"blocks.{l}.mlp.W_gate", adapter
+                    )
+
                 ln2_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.b", adapter)
                 ln2_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.w", adapter)
 
@@ -153,7 +160,7 @@ class ProcessWeights:
 
                 state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
 
-                if getattr(cfg, "gated_mlp", False):
+                if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
                     state_dict[mlp_W_gate_key] = (
                         state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
                     )
@@ -203,7 +210,10 @@ class ProcessWeights:
         ln_final_b_key = ProcessWeights._get_param_key("ln_final.b", adapter)
         ln_final_w_key = ProcessWeights._get_param_key("ln_final.w", adapter)
 
-        if not getattr(cfg, "final_rms", False) and fold_biases:
+        # Check if unembedding bias actually exists (some models like GPT-2 don't have it)
+        has_unembed_bias = unembed_b_U_key in state_dict
+
+        if not getattr(cfg, "final_rms", False) and fold_biases and has_unembed_bias:
             # Dumb bug from my old SoLU training code, some models have RMSNorm instead of LayerNorm
             # pre unembed.
             state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + (
@@ -308,9 +318,12 @@ class ProcessWeights:
         state_dict[unembed_W_U_key] = state_dict[unembed_W_U_key] - state_dict[
             unembed_W_U_key
         ].mean(-1, keepdim=True)
-        state_dict[unembed_b_U_key] = (
-            state_dict[unembed_b_U_key] - state_dict[unembed_b_U_key].mean()
-        )
+
+        # Only center bias if it exists (some models like GPT-2 don't have unembedding bias)
+        if unembed_b_U_key in state_dict:
+            state_dict[unembed_b_U_key] = (
+                state_dict[unembed_b_U_key] - state_dict[unembed_b_U_key].mean()
+            )
         return state_dict
 
     @staticmethod

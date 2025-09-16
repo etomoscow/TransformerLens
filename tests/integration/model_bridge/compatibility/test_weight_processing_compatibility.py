@@ -89,8 +89,7 @@ def test_integration_compatibility():
 
     print("Testing TransformerBridge with processing...")
     bridge_processed = boot(model_name, device=device)
-    # Apply processing to the bridge
-    # TODO: Need to implement processing for TransformerBridge
+    bridge_processed.process_weights()
     bridge_proc_orig, bridge_proc_ablated = test_model_ablation(
         bridge_processed, "TransformerBridge (processed)"
     )
