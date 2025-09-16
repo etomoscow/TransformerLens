@@ -432,9 +432,9 @@ class ArchitectureAdapter:
                                 hasattr(current_mapping, "submodules")
                                 and part in current_mapping.submodules
                             ):
-                                current_mapping = current_mapping.submodules[part]
+                                current_mapping = current_mapping.submodules[part]  # type: ignore
                             elif hasattr(current_mapping, "__getitem__"):
-                                current_mapping = current_mapping[part]
+                                current_mapping = current_mapping[part]  # type: ignore
 
                         # Check available attention subcomponents
                         if hasattr(current_mapping, "submodules"):
@@ -502,9 +502,9 @@ class ArchitectureAdapter:
                                 hasattr(current_mapping, "submodules")
                                 and part in current_mapping.submodules
                             ):
-                                current_mapping = current_mapping.submodules[part]
+                                current_mapping = current_mapping.submodules[part]  # type: ignore
                             elif hasattr(current_mapping, "__getitem__"):
-                                current_mapping = current_mapping[part]
+                                current_mapping = current_mapping[part]  # type: ignore
 
                         # Check available MLP subcomponents
                         if hasattr(current_mapping, "submodules"):

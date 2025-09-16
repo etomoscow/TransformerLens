@@ -4,6 +4,7 @@ This module provides the bridge components that wrap remote model components and
 a consistent interface for accessing their weights and performing operations.
 """
 
+from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -36,6 +37,7 @@ class StopAtLayerException(Exception):
     def __init__(self, tensor, layer_idx):
         self.tensor = tensor
         self.layer_idx = layer_idx
+        self.layer_output = tensor  # Add the missing layer_output attribute
         super().__init__(f"Stopped at layer {layer_idx}")
 
 
@@ -53,6 +55,9 @@ def collect_aliases_recursive(hook_dict, prefix=""):
 
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.component_setup import set_original_components
+from transformer_lens.model_bridge.generalized_components.base import (
+    GeneralizedComponent,
+)
 from transformer_lens.model_bridge.get_params_util import get_bridge_params
 from transformer_lens.model_bridge.hook_point_wrapper import HookPointWrapper
 from transformer_lens.model_bridge.types import ComponentMapping
@@ -1850,10 +1855,10 @@ class TransformerBridge(nn.Module):
         if return_cache_object:
             from transformer_lens.ActivationCache import ActivationCache
 
-            cache = ActivationCache({}, self)
-            return output, cache
+            activation_cache = ActivationCache(cache, self)
+            return output, activation_cache
         else:
-            return output, {}
+            return output, cache
 
     def run_with_hooks(
         self,
@@ -2217,11 +2222,3 @@ class TransformerBridge(nn.Module):
             ValueError: If configuration is inconsistent (e.g., cfg.n_layers != len(blocks))
         """
         return get_bridge_params(self)
-
-    def set_use_split_qkv_input(self, use_split_qkv_input: bool) -> None:
-        """Set the use_split_qkv_input flag for compatibility with HookedTransformer."""
-        self.cfg.use_split_qkv_input = use_split_qkv_input
-
-    def set_use_attn_result(self, use_attn_result: bool) -> None:
-        """Set the use_attn_result flag for compatibility with HookedTransformer."""
-        self.cfg.use_attn_result = use_attn_result
