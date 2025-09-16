@@ -97,6 +97,9 @@ class TransformerBridge(nn.Module):
         # Initialize hook registry after components are set up
         self._initialize_hook_registry()
 
+        # Intiialize dictionary containing hooks that will be cached
+        self._initialize_hooks_to_cache()
+
     def __setattr__(self, name: str, value: Any) -> None:
         """Override setattr to track HookPoint objects dynamically."""
         # Call parent setattr first
@@ -133,7 +136,36 @@ class TransformerBridge(nn.Module):
         # Scan existing components for hooks
         self._scan_existing_hooks(self, "")
 
+        # Add bridge aliases if compatibility mode is enabled
+        if self.compatibility_mode:
+            self._add_aliases_to_hooks(self._hook_registry)
+
         self._hook_registry_initialized = True
+
+    def _add_aliases_to_hooks(self, hooks: Dict[str, HookPoint]) -> None:
+        """Add aliases to hooks in place."""
+
+        # If no aliases, do nothing
+        if not self.hook_aliases:
+            return
+
+        for alias_name, target in self.hook_aliases.items():
+            # Use the existing alias system to resolve the target hook
+            # Convert to Dict[str, str] for resolve_alias if target_name is a list
+            if isinstance(target, list):
+                # For list targets, try each one until one works
+                for single_target in target:
+                    try:
+                        target_hook = resolve_alias(self, alias_name, {alias_name: single_target})
+                        if target_hook is not None:
+                            hooks[alias_name] = target_hook
+                            break
+                    except AttributeError:
+                        continue
+            else:
+                target_hook = resolve_alias(self, alias_name, {alias_name: target})
+                if target_hook is not None:
+                    hooks[alias_name] = target_hook
 
     def _scan_existing_hooks(self, module: nn.Module, prefix: str = "") -> None:
         """Scan existing modules for hooks and add them to registry."""
@@ -202,8 +234,13 @@ class TransformerBridge(nn.Module):
     @property
     def hook_dict(self) -> dict[str, HookPoint]:
         """Get all HookPoint objects in the model for compatibility with HookedTransformer."""
-        # Start with the current registry
-        return self._hook_registry.copy()
+        hooks = self._hook_registry.copy()
+
+        # Add aliases if compatibility mode is enabled
+        if self.compatibility_mode:
+            self._add_aliases_to_hooks(hooks)
+
+        return hooks
 
     def _discover_hooks(self) -> dict[str, HookPoint]:
         """Get all HookPoint objects from the registry (deprecated, use hook_dict)."""
@@ -217,6 +254,108 @@ class TransformerBridge(nn.Module):
         """Clear the hook registry and force re-initialization."""
         self._hook_registry.clear()
         self._hook_registry_initialized = False
+
+    def _initialize_hooks_to_cache(self) -> None:
+        """Initialize the hooks to cache when running the model with cache."""
+        self.hooks_to_cache = {}
+
+        default_cached_hooks_names = [
+            "embed.hook_in",
+            "embed.hook_out",
+            "pos_embed.hook_in",
+            "pos_embed.hook_out",
+            "rotary_embed.hook_in",
+            "rotary_embed.hook_out",
+            "ln_final.hook_in",
+            "ln_final.hook_scale",
+            "ln_final.hook_normalized",
+            "ln_final.hook_out",
+            "unembed.hook_in",
+            "unembed.hook_out",
+        ]
+
+        for block_idx in range(self.cfg.n_layers):
+            default_cached_hooks_names.append(f"blocks.{block_idx}.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1.hook_scale")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1.hook_normalized")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1_post.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1_post.hook_scale")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1_post.hook_normalized")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln1_post.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.q.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.q.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.q_norm.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.q_norm.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.k.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.k.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.k_norm.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.k_norm.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.v.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.v.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.o.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.o.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.hook_attn_scores")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.hook_pattern")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.hook_hidden_states")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.attn.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2.hook_scale")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2.hook_normalized")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2_post.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2_post.hook_scale")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2_post.hook_normalized")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.ln2_post.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.in.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.in.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.out.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.out.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.gate.hook_in")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.gate.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.mlp.hook_out")
+            default_cached_hooks_names.append(f"blocks.{block_idx}.hook_out")
+
+        for hook_name in default_cached_hooks_names:
+            if hook_name in self._hook_registry:
+                self.hooks_to_cache[hook_name] = self._hook_registry[hook_name]
+
+    def set_hooks_to_cache(
+        self, hook_names: Optional[List[str]] = None, include_all: bool = False
+    ) -> None:
+        """Set the hooks to cache when running the model with cache.
+
+        You can specify hook names that were only available in the old HookedTransformer,
+        but in this case you need to make sure to enable compatibility mode.
+
+        Args:
+            hook_names (Optional[List[str]]): List of hook names to cache
+            include_all (bool): Whether to cache all hooks
+        """
+        hooks_to_cache = {}
+
+        if self.compatibility_mode:
+            aliases = collect_aliases_recursive(self)
+
+        if include_all:
+            self.hooks_to_cache = self.hook_dict
+            return
+
+        if hook_names is not None:
+            for hook_name in hook_names:
+                if hook_name in self._hook_registry:
+                    hooks_to_cache[hook_name] = self._hook_registry[hook_name]
+                else:
+                    raise ValueError(
+                        f"Hook {hook_name} does not exist. If you are using a hook name used with the old HookedTransformer, make sure to enable compatibility mode."
+                    )
+        else:
+            raise ValueError("hook_names must be provided if include_all is False")
+
+        self.hooks_to_cache = hooks_to_cache
 
     def __getattr__(self, name: str) -> Any:
         """Provide a clear error message for missing attributes."""
@@ -2016,11 +2155,255 @@ class TransformerBridge(nn.Module):
         Returns:
             dict: Dictionary of parameter tensors with TransformerLens naming convention
         """
-        # Simplified implementation to avoid syntax errors
-        # The HF-native processing approach doesn't rely on this method
         params_dict = {}
 
-        # Return empty dict - main functionality is in process_weights()
+        # Helper function to get device and dtype from existing weights
+        def _get_device_dtype():
+            device = self.cfg.device if hasattr(self.cfg, "device") else torch.device("cpu")
+            dtype = torch.float32  # Default dtype
+
+            # Try to get dtype from existing weights
+            try:
+                device = self.embed.weight.device
+                dtype = self.embed.weight.dtype
+            except AttributeError:
+                try:
+                    device = self.pos_embed.weight.device
+                    dtype = self.pos_embed.weight.dtype
+                except AttributeError:
+                    if len(self.blocks) > 0:
+                        try:
+                            device = self.blocks[0].attn.q.weight.device
+                            dtype = self.blocks[0].attn.q.weight.dtype
+                        except AttributeError:
+                            pass
+            return device, dtype
+
+        # Add embedding weights
+        try:
+            params_dict["embed.W_E"] = self.embed.weight
+        except AttributeError:
+            device, dtype = _get_device_dtype()
+            params_dict["embed.W_E"] = torch.zeros(
+                self.cfg.d_vocab, self.cfg.d_model, device=device, dtype=dtype
+            )
+
+        try:
+            params_dict["pos_embed.W_pos"] = self.pos_embed.weight
+        except AttributeError:
+            device, dtype = _get_device_dtype()
+            params_dict["pos_embed.W_pos"] = torch.zeros(
+                self.cfg.n_ctx, self.cfg.d_model, device=device, dtype=dtype
+            )
+
+        # Add attention weights
+        for layer_idx in range(self.cfg.n_layers):
+            # Validate that the layer actually exists
+            if layer_idx >= len(self.blocks):
+                raise ValueError(
+                    f"Configuration mismatch: cfg.n_layers={self.cfg.n_layers} but only "
+                    f"{len(self.blocks)} blocks found. Layer {layer_idx} does not exist."
+                )
+
+            block = self.blocks[layer_idx]
+
+            try:
+                # Attention weights - reshape to expected format
+                w_q = block.attn.q.weight
+                w_k = block.attn.k.weight
+                w_v = block.attn.v.weight
+                w_o = block.attn.o.weight
+
+                # Reshape from [d_model, d_model] to [n_heads, d_model, d_head] and [n_heads, d_head, d_model]
+                # Handle different attention architectures (Multi-Head, Multi-Query, Grouped Query)
+                if w_q.shape == (self.cfg.d_model, self.cfg.d_model):
+                    d_head = self.cfg.d_model // self.cfg.n_heads
+                    w_q = w_q.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
+                    w_o = w_o.reshape(self.cfg.n_heads, d_head, self.cfg.d_model)
+
+                    # Handle K and V weights - they might have different shapes in Multi-Query Attention
+                    if w_k.shape == (self.cfg.d_model, self.cfg.d_model):
+                        w_k = w_k.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
+                    elif w_k.shape == (self.cfg.d_head, self.cfg.d_model) or w_k.shape == (
+                        self.cfg.d_model // self.cfg.n_heads,
+                        self.cfg.d_model,
+                    ):
+                        # Multi-Query Attention: single K head shared across all Q heads
+                        # Need to transpose to match expected [n_heads, d_model, d_head] format
+                        w_k = w_k.transpose(0, 1).unsqueeze(0).expand(self.cfg.n_heads, -1, -1)
+                    else:
+                        # Try to reshape based on element count
+                        if w_k.numel() == self.cfg.n_heads * self.cfg.d_model * self.cfg.d_head:
+                            w_k = w_k.view(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
+                        else:
+                            # Create zero tensor if can't reshape
+                            device, dtype = _get_device_dtype()
+                            w_k = torch.zeros(
+                                self.cfg.n_heads,
+                                self.cfg.d_model,
+                                self.cfg.d_head,
+                                device=device,
+                                dtype=dtype,
+                            )
+
+                    if w_v.shape == (self.cfg.d_model, self.cfg.d_model):
+                        w_v = w_v.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
+                    elif w_v.shape == (self.cfg.d_head, self.cfg.d_model) or w_v.shape == (
+                        self.cfg.d_model // self.cfg.n_heads,
+                        self.cfg.d_model,
+                    ):
+                        # Multi-Query Attention: single V head shared across all Q heads
+                        # Need to transpose to match expected [n_heads, d_model, d_head] format
+                        w_v = w_v.transpose(0, 1).unsqueeze(0).expand(self.cfg.n_heads, -1, -1)
+                    else:
+                        # Try to reshape based on element count
+                        if w_v.numel() == self.cfg.n_heads * self.cfg.d_model * self.cfg.d_head:
+                            w_v = w_v.view(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
+                        else:
+                            # Create zero tensor if can't reshape
+                            device, dtype = _get_device_dtype()
+                            w_v = torch.zeros(
+                                self.cfg.n_heads,
+                                self.cfg.d_model,
+                                self.cfg.d_head,
+                                device=device,
+                                dtype=dtype,
+                            )
+
+                params_dict[f"blocks.{layer_idx}.attn.W_Q"] = w_q
+                params_dict[f"blocks.{layer_idx}.attn.W_K"] = w_k
+                params_dict[f"blocks.{layer_idx}.attn.W_V"] = w_v
+                params_dict[f"blocks.{layer_idx}.attn.W_O"] = w_o
+
+                # Attention biases - handle None biases
+                if block.attn.q.bias is not None:
+                    params_dict[f"blocks.{layer_idx}.attn.b_Q"] = block.attn.q.bias.reshape(
+                        self.cfg.n_heads, -1
+                    )
+                else:
+                    device, dtype = _get_device_dtype()
+                    params_dict[f"blocks.{layer_idx}.attn.b_Q"] = torch.zeros(
+                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
+                    )
+
+                if block.attn.k.bias is not None:
+                    params_dict[f"blocks.{layer_idx}.attn.b_K"] = block.attn.k.bias.reshape(
+                        self.cfg.n_heads, -1
+                    )
+                else:
+                    device, dtype = _get_device_dtype()
+                    params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
+                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
+                    )
+
+                if block.attn.v.bias is not None:
+                    params_dict[f"blocks.{layer_idx}.attn.b_V"] = block.attn.v.bias.reshape(
+                        self.cfg.n_heads, -1
+                    )
+                else:
+                    device, dtype = _get_device_dtype()
+                    params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
+                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
+                    )
+
+                if block.attn.o.bias is not None:
+                    params_dict[f"blocks.{layer_idx}.attn.b_O"] = block.attn.o.bias
+                else:
+                    device, dtype = _get_device_dtype()
+                    params_dict[f"blocks.{layer_idx}.attn.b_O"] = torch.zeros(
+                        self.cfg.d_model, device=device, dtype=dtype
+                    )
+
+            except AttributeError:
+                # Create zero attention weights for missing attention component
+                device, dtype = _get_device_dtype()
+                expected_qkv_shape = (self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
+                expected_o_shape = (self.cfg.n_heads, self.cfg.d_head, self.cfg.d_model)
+                expected_qkv_bias_shape = (self.cfg.n_heads, self.cfg.d_head)
+                expected_o_bias_shape = (self.cfg.d_model,)
+
+                params_dict[f"blocks.{layer_idx}.attn.W_Q"] = torch.zeros(
+                    *expected_qkv_shape, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.attn.W_K"] = torch.zeros(
+                    *expected_qkv_shape, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.attn.W_V"] = torch.zeros(
+                    *expected_qkv_shape, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.attn.W_O"] = torch.zeros(
+                    *expected_o_shape, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.attn.b_Q"] = torch.zeros(
+                    *expected_qkv_bias_shape, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
+                    *expected_qkv_bias_shape, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
+                    *expected_qkv_bias_shape, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.attn.b_O"] = torch.zeros(
+                    *expected_o_bias_shape, device=device, dtype=dtype
+                )
+
+            try:
+                # MLP weights - access the actual weight tensors
+                params_dict[f"blocks.{layer_idx}.mlp.W_in"] = getattr(block.mlp, "in").weight
+                params_dict[f"blocks.{layer_idx}.mlp.W_out"] = block.mlp.out.weight
+
+                # MLP biases - handle None biases
+                mlp_in_bias = getattr(block.mlp, "in").bias
+                if mlp_in_bias is not None:
+                    params_dict[f"blocks.{layer_idx}.mlp.b_in"] = mlp_in_bias
+                else:
+                    device, dtype = _get_device_dtype()
+                    d_mlp = self.cfg.d_mlp if self.cfg.d_mlp is not None else (4 * self.cfg.d_model)
+                    params_dict[f"blocks.{layer_idx}.mlp.b_in"] = torch.zeros(
+                        d_mlp, device=device, dtype=dtype
+                    )
+
+                mlp_out_bias = block.mlp.out.bias
+                if mlp_out_bias is not None:
+                    params_dict[f"blocks.{layer_idx}.mlp.b_out"] = mlp_out_bias
+                else:
+                    device, dtype = _get_device_dtype()
+                    params_dict[f"blocks.{layer_idx}.mlp.b_out"] = torch.zeros(
+                        self.cfg.d_model, device=device, dtype=dtype
+                    )
+
+                # Add gate weights if they exist
+                if hasattr(block.mlp, "gate") and hasattr(block.mlp.gate, "weight"):
+                    params_dict[f"blocks.{layer_idx}.mlp.W_gate"] = block.mlp.gate.weight
+                    if hasattr(block.mlp.gate, "bias") and block.mlp.gate.bias is not None:
+                        params_dict[f"blocks.{layer_idx}.mlp.b_gate"] = block.mlp.gate.bias
+
+            except AttributeError:
+                # Create zero MLP weights for missing MLP component
+                device, dtype = _get_device_dtype()
+                d_mlp = self.cfg.d_mlp if self.cfg.d_mlp is not None else (4 * self.cfg.d_model)
+                params_dict[f"blocks.{layer_idx}.mlp.W_in"] = torch.zeros(
+                    self.cfg.d_model, d_mlp, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.mlp.W_out"] = torch.zeros(
+                    d_mlp, self.cfg.d_model, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.mlp.b_in"] = torch.zeros(
+                    d_mlp, device=device, dtype=dtype
+                )
+                params_dict[f"blocks.{layer_idx}.mlp.b_out"] = torch.zeros(
+                    self.cfg.d_model, device=device, dtype=dtype
+                )
+
+        # Add unembedding weights
+        try:
+            params_dict["unembed.W_U"] = self.unembed.weight.T
+        except AttributeError:
+            device, dtype = _get_device_dtype()
+            params_dict["unembed.W_U"] = torch.zeros(
+                self.cfg.d_model, self.cfg.d_vocab, device=device, dtype=dtype
+            )
+
         return params_dict
 
     @property
@@ -2272,9 +2655,205 @@ class TransformerBridge(nn.Module):
         stop_at_layer: Optional[int] = None,
         **kwargs,
     ) -> Tuple[Any, Union[ActivationCache, Dict[str, torch.Tensor]]]:
-        """Run the model and cache all activations - placeholder implementation."""
-        # Simplified implementation - just run forward and return empty cache
-        output = self.forward(input, **kwargs)
+        """Run the model and cache all activations.
+
+        Args:
+            input: Input to the model
+            return_cache_object: Whether to return ActivationCache object
+            remove_batch_dim: Whether to remove batch dimension
+            names_filter: Filter for which activations to cache (str, list of str, or callable)
+            stop_at_layer: Layer to stop forward pass at (not yet fully implemented)
+            **kwargs: Additional arguments
+
+        Returns:
+            Tuple of (output, cache)
+        """
+        # Process names_filter to create a callable that handles legacy hook names
+        # Collect all aliases from bridge components (both hook and cache aliases)
+        aliases = collect_aliases_recursive(self)
+
+        def create_names_filter_fn(filter_input):
+            if filter_input is None:
+                return lambda name: True
+            elif isinstance(filter_input, str):
+                # Check if this is a legacy hook name that needs mapping
+                mapped_name = aliases.get(filter_input, None)
+                if mapped_name:
+                    return lambda name: name == mapped_name or name == filter_input
+                else:
+                    return lambda name: name == filter_input
+            elif isinstance(filter_input, list):
+                # Map all legacy names in the list to new names
+                mapped_list = []
+                for item in filter_input:
+                    mapped_list.append(item)  # Keep original
+                    mapped_name = aliases.get(item, None)
+                    if mapped_name:
+                        mapped_list.append(mapped_name)
+                return lambda name: name in mapped_list
+            elif callable(filter_input):
+                return filter_input
+            else:
+                raise ValueError("names_filter must be a string, list of strings, or callable")
+
+        names_filter_fn = create_names_filter_fn(names_filter)
+
+        cache: Dict[str, torch.Tensor] = {}
+        hooks: List[Tuple[HookPoint, str]] = []
+        visited: set[int] = set()
+
+        def make_cache_hook(name: str):
+            def cache_hook(tensor: torch.Tensor, *, hook: Any) -> torch.Tensor:
+                # Handle different types of outputs from bridge components
+                if tensor is None:
+                    cache[name] = None
+                elif isinstance(tensor, torch.Tensor):
+                    cache[name] = tensor.detach().cpu()
+                elif isinstance(tensor, tuple):
+                    # For tuple outputs, cache the first element (usually hidden states)
+                    if len(tensor) > 0 and isinstance(tensor[0], torch.Tensor):
+                        cache[name] = tensor[0].detach().cpu()
+                    else:
+                        # If tuple doesn't contain tensors, don't cache it
+                        pass
+                else:
+                    # For other types, try to convert to tensor, otherwise skip
+                    try:
+                        if hasattr(tensor, "detach"):
+                            cache[name] = tensor.detach().cpu()
+                        # If it's not a tensor-like object, don't cache it
+                    except:
+                        # If conversion fails, don't cache it
+                        pass
+                return tensor
+
+            return cache_hook
+
+        # Use cached hooks instead of re-discovering them
+        hook_dict = self.hooks_to_cache
+
+        # Filter hooks based on names_filter
+        for hook_name, hook in hook_dict.items():
+            # Only add hook if it passes the names filter
+            if names_filter_fn(hook_name):
+                hooks.append((hook, hook_name))
+
+        # Register hooks
+        for hp, name in hooks:
+            hp.add_hook(make_cache_hook(name))
+
+        try:
+            processed_args = [input]
+            # Handle string input whether passed positionally or as a kwarg
+            if processed_args and isinstance(processed_args[0], str):
+                assert self.tokenizer is not None, "Tokenizer must be set to pass string input."
+                input_ids = self.to_tokens(processed_args[0])
+                input_ids = input_ids.to(next(self.original_model.parameters()).device)
+                kwargs["input_ids"] = input_ids
+                processed_args = processed_args[1:]
+            elif "input" in kwargs and isinstance(kwargs["input"], str):
+                assert self.tokenizer is not None, "Tokenizer must be set to pass string input."
+                input_ids = self.to_tokens(kwargs["input"])
+                input_ids = input_ids.to(next(self.original_model.parameters()).device)
+                kwargs["input_ids"] = input_ids
+                del kwargs["input"]
+
+            # Add stop_at_layer hook if specified
+            if stop_at_layer is not None:
+                # stop_at_layer is exclusive, so stop_at_layer=1 means run layer 0 and stop before layer 1
+                # We need to hook the output of the last layer to be processed (stop_at_layer - 1)
+                last_layer_to_process = stop_at_layer - 1
+                if (
+                    hasattr(self, "blocks")
+                    and last_layer_to_process >= 0
+                    and last_layer_to_process < len(self.blocks)
+                ):
+
+                    def stop_hook(tensor: torch.Tensor, *, hook: Any) -> torch.Tensor:
+                        raise StopAtLayerException(tensor, stop_at_layer)
+
+                    # Add hook to the output of the last layer to be processed
+                    block_hook_name = f"blocks.{last_layer_to_process}.hook_out"
+                    hook_dict = self.hook_dict
+                    if block_hook_name in hook_dict:
+                        hook_dict[block_hook_name].add_hook(stop_hook)
+                        hooks.append((hook_dict[block_hook_name], block_hook_name))
+
+            # Run the underlying model's forward method
+            # Handle device parameter properly - move model to device if specified
+            filtered_kwargs = kwargs.copy()
+            target_device = filtered_kwargs.pop("device", None)  # Remove device from kwargs
+
+            if target_device is not None:
+                # Ensure model is on the target device
+                self.original_model = self.original_model.to(target_device)
+                # Also move processed_args to the same device if needed
+                if processed_args and isinstance(processed_args[0], torch.Tensor):
+                    processed_args = [processed_args[0].to(target_device)] + list(
+                        processed_args[1:]
+                    )
+                # Move any tensor kwargs to the target device
+                for key, value in filtered_kwargs.items():
+                    if isinstance(value, torch.Tensor):
+                        filtered_kwargs[key] = value.to(target_device)
+
+            try:
+                # For caching, we want attention weights to be available for hooks
+                # Add output_attentions=True if not already specified
+                if "output_attentions" not in filtered_kwargs:
+                    filtered_kwargs["output_attentions"] = True
+
+                output = self.original_model(*processed_args, **filtered_kwargs)
+                # Extract logits if output is a HuggingFace model output object
+                if hasattr(output, "logits"):
+                    output = output.logits
+            except StopAtLayerException as e:
+                # Return the intermediate output from the specified layer
+                output = e.layer_output
+
+        finally:
+            for hp, _ in hooks:
+                hp.remove_hooks()
+
+        if self.compatibility_mode == True:
+            # If compatibility mode is enabled, we need to handle aliases
+            # Create duplicate cache entries for TransformerLens compatibility
+            # Use the aliases collected from components (reverse mapping: new -> old)
+            # Handle the case where some alias values might be lists
+            reverse_aliases = {}
+            for old_name, new_name in aliases.items():
+                if isinstance(new_name, list):
+                    # For list values, create a mapping for each item in the list
+                    for single_new_name in new_name:
+                        reverse_aliases[single_new_name] = old_name
+                else:
+                    reverse_aliases[new_name] = old_name
+
+            # Create duplicate entries in cache
+            cache_items_to_add = {}
+            for cache_name, cached_value in cache.items():
+                # Check if this cache name should have an alias
+                for new_name, old_name in reverse_aliases.items():
+                    if cache_name == new_name:
+                        cache_items_to_add[old_name] = cached_value
+                        break
+
+            # Add the aliased entries to the cache
+            cache.update(cache_items_to_add)
+
+            # Add cache entries for all aliases (both hook and cache aliases)
+            for alias_name, target_name in aliases.items():
+                # Handle both string and list target names
+                if isinstance(target_name, list):
+                    # For list targets, find the first one that exists in cache
+                    for single_target in target_name:
+                        if single_target in cache and alias_name not in cache:
+                            cache[alias_name] = cache[single_target]
+                            break
+                else:
+                    if target_name in cache and alias_name not in cache:
+                        cache[alias_name] = cache[target_name]
+
         if return_cache_object:
             from transformer_lens.ActivationCache import ActivationCache
 

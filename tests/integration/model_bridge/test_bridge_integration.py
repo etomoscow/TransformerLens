@@ -315,10 +315,13 @@ def test_attention_pattern_hook_shape():
 
         # Verify the shape is (n_heads, pos, pos) - attention patterns should not have batch dimension
         assert (
-            len(pattern_tensor.shape) == 3
-        ), f"Pattern tensor should be 3D, got {len(pattern_tensor.shape)}D"
+            len(pattern_tensor.shape) == 4
+        ), f"Pattern tensor should be 4D, got {len(pattern_tensor.shape)}D"
 
-        n_heads_dim, pos_q_dim, pos_k_dim = pattern_tensor.shape
+        batch_dim, n_heads_dim, pos_q_dim, pos_k_dim = pattern_tensor.shape
+
+        # Verify the batch dimension is 1
+        assert batch_dim == 1, f"Batch dimension should be 1, got {batch_dim}"
 
         # Verify dimensions make sense
         assert (
