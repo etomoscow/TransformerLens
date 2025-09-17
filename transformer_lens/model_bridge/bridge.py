@@ -171,14 +171,89 @@ class TransformerBridge(nn.Module):
 
         self._hook_registry_initialized = True
 
+    def _collect_component_aliases(self, component_mapping, prefix=""):
+        """Recursively collect aliases from components."""
+        aliases = {}
+
+        # Handle dict of components (like component_mapping)
+        if isinstance(component_mapping, dict):
+            for name, component in component_mapping.items():
+                sub_prefix = f"{prefix}.{name}" if prefix else name
+                aliases.update(self._collect_component_aliases(component, sub_prefix))
+        else:
+            # Handle individual component
+            if hasattr(component_mapping, "hook_aliases") and component_mapping.hook_aliases:
+                for alias_name, target in component_mapping.hook_aliases.items():
+                    full_alias = f"{prefix}.{alias_name}" if prefix else alias_name
+                    full_target = f"{prefix}.{target}" if prefix else target
+                    aliases[full_alias] = full_target
+
+            # Recursively collect from submodules
+            if hasattr(component_mapping, "submodules") and component_mapping.submodules:
+                for sub_name, sub_component in component_mapping.submodules.items():
+                    sub_prefix = f"{prefix}.{sub_name}" if prefix else sub_name
+                    aliases.update(self._collect_component_aliases(sub_component, sub_prefix))
+
+        return aliases
+
+    def _collect_hook_aliases_from_registry(self):
+        """Collect aliases based on existing hooks in the registry."""
+        aliases = {}
+
+        # Get component aliases from the adapter
+        if hasattr(self.adapter, "component_mapping"):
+            component_aliases = self._collect_component_aliases(self.adapter.component_mapping)
+
+            # Apply component aliases to all existing hooks
+            for hook_name in self._hook_registry.keys():
+                # Check if this hook matches any component alias pattern
+                for alias_pattern, target_pattern in component_aliases.items():
+                    # Handle dynamic block patterns (blocks.0, blocks.1, etc.)
+                    if "blocks." in target_pattern and "blocks." in hook_name:
+                        # Extract the block number from the hook name
+                        import re
+
+                        block_match = re.search(r"blocks\.(\d+)", hook_name)
+                        if block_match:
+                            block_num = block_match.group(1)
+                            # Replace generic patterns with actual block numbers
+                            dynamic_alias_pattern = alias_pattern.replace(
+                                "blocks.", f"blocks.{block_num}."
+                            )
+                            dynamic_target_pattern = target_pattern.replace(
+                                "blocks.", f"blocks.{block_num}."
+                            )
+
+                            # Check if this hook name matches the target pattern
+                            if hook_name.endswith(dynamic_target_pattern):
+                                # Create the alias name by replacing the target with the alias
+                                alias_name = hook_name.replace(
+                                    dynamic_target_pattern, dynamic_alias_pattern
+                                )
+                                aliases[alias_name] = hook_name
+                    else:
+                        # Handle non-block patterns
+                        if hook_name.endswith(target_pattern):
+                            # Create the alias name by replacing the target with the alias
+                            alias_name = hook_name.replace(target_pattern, alias_pattern)
+                            aliases[alias_name] = hook_name
+
+        return aliases
+
     def _add_aliases_to_hooks(self, hooks: Dict[str, HookPoint]) -> None:
         """Add aliases to hooks in place."""
 
+        # Collect component aliases and merge with bridge aliases
+        component_aliases = self._collect_hook_aliases_from_registry()
+
+        # Merge component aliases with bridge aliases
+        all_aliases = {**self.hook_aliases, **component_aliases}
+
         # If no aliases, do nothing
-        if not self.hook_aliases:
+        if not all_aliases:
             return
 
-        for alias_name, target in self.hook_aliases.items():
+        for alias_name, target in all_aliases.items():
             # Use the existing alias system to resolve the target hook
             # Convert to Dict[str, str] for resolve_alias if target_name is a list
             if isinstance(target, list):

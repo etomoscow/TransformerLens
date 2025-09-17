@@ -392,6 +392,8 @@ class ArchitectureAdapter:
                 ".W_U",
                 ".W_pos",
                 ".w",
+                "._W_K",
+                "._W_V",
             )
         ):
             param_suffix = ".weight"
@@ -408,6 +410,8 @@ class ArchitectureAdapter:
                 ".b_U",
                 ".b_pos",
                 ".b",
+                "._b_K",
+                "._b_V",
             )
         ):
             param_suffix = ".bias"
@@ -415,7 +419,19 @@ class ArchitectureAdapter:
         # Handle attention weights based on actual architecture
         # Check if this is an attention weight that needs architecture-specific mapping
         if any(
-            path.endswith(suffix) for suffix in [".W_Q", ".W_K", ".W_V", ".b_Q", ".b_K", ".b_V"]
+            path.endswith(suffix)
+            for suffix in [
+                ".W_Q",
+                ".W_K",
+                ".W_V",
+                ".b_Q",
+                ".b_K",
+                ".b_V",
+                "._W_K",
+                "._W_V",
+                "._b_K",
+                "._b_V",
+            ]
         ):
             # Extract the attention component path (e.g., "blocks.0.attn")
             attn_path_parts = path.split(".")
@@ -448,6 +464,11 @@ class ArchitectureAdapter:
                                 path = path.replace(".b_Q", ".qkv")
                                 path = path.replace(".b_K", ".qkv")
                                 path = path.replace(".b_V", ".qkv")
+                                # Handle GQA-specific paths
+                                path = path.replace("._W_K", ".qkv")
+                                path = path.replace("._W_V", ".qkv")
+                                path = path.replace("._b_K", ".qkv")
+                                path = path.replace("._b_V", ".qkv")
                             # If we have separate q, k, v components, map individually
                             elif all(comp in attn_components for comp in ["q", "k", "v"]):
                                 path = path.replace(".W_Q", ".q")
@@ -456,6 +477,11 @@ class ArchitectureAdapter:
                                 path = path.replace(".b_Q", ".q")
                                 path = path.replace(".b_K", ".k")
                                 path = path.replace(".b_V", ".v")
+                                # Handle GQA-specific paths - map to regular k/v components
+                                path = path.replace("._W_K", ".k")
+                                path = path.replace("._W_V", ".v")
+                                path = path.replace("._b_K", ".k")
+                                path = path.replace("._b_V", ".v")
                             # If we have qkv_proj (like some other architectures), use that
                             elif "qkv_proj" in attn_components:
                                 path = path.replace(".W_Q", ".qkv_proj")
@@ -486,7 +512,10 @@ class ArchitectureAdapter:
 
         # Handle MLP weights based on actual architecture
         # Check if this is an MLP weight that needs architecture-specific mapping
-        if any(path.endswith(suffix) for suffix in [".W_in", ".W_out", ".b_in", ".b_out"]):
+        if any(
+            path.endswith(suffix)
+            for suffix in [".W_in", ".W_out", ".b_in", ".b_out", ".ln.w", ".ln.b"]
+        ):
             # Extract the MLP component path (e.g., "blocks.0.mlp")
             mlp_path_parts = path.split(".")
             if len(mlp_path_parts) >= 3 and mlp_path_parts[-2] == "mlp":
@@ -529,6 +558,11 @@ class ArchitectureAdapter:
                                 path = path.replace(".b_in", ".fc_in")
                                 path = path.replace(".W_out", ".fc_out")
                                 path = path.replace(".b_out", ".fc_out")
+
+                            # Handle SoLU MLP layer norm paths
+                            if "ln" in mlp_components:
+                                path = path.replace(".ln.w", ".ln")
+                                path = path.replace(".ln.b", ".ln")
                 except Exception:
                     # Fallback to default behavior if component mapping inspection fails
                     pass

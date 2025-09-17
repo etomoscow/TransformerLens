@@ -89,6 +89,7 @@ def test_integration_compatibility():
 
     print("Testing TransformerBridge with processing...")
     bridge_processed = boot(model_name, device=device)
+    bridge_processed.enable_compatibility_mode()  # Enable compatibility mode for hook aliases
     bridge_processed.process_weights()
     bridge_proc_orig, bridge_proc_ablated = test_model_ablation(
         bridge_processed, "TransformerBridge (processed)"
@@ -96,6 +97,7 @@ def test_integration_compatibility():
 
     print("Testing TransformerBridge without processing...")
     bridge_unprocessed = boot(model_name, device=device)
+    bridge_unprocessed.enable_compatibility_mode()  # Enable compatibility mode for hook aliases
     # No processing applied
     bridge_unproc_orig, bridge_unproc_ablated = test_model_ablation(
         bridge_unprocessed, "TransformerBridge (unprocessed)"
