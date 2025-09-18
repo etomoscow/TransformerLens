@@ -16,7 +16,7 @@ import torch
 from jaxtyping import Float
 
 from transformer_lens import HookedTransformer, utils
-from transformer_lens.model_bridge.sources.transformers import boot
+from transformer_lens.model_bridge.bridge import TransformerBridge
 
 
 def test_integration_compatibility():
@@ -88,7 +88,7 @@ def test_integration_compatibility():
     )
 
     print("Testing TransformerBridge with processing...")
-    bridge_processed = boot(model_name, device=device)
+    bridge_processed = TransformerBridge.boot_transformers(model_name, device=device)
     bridge_processed.enable_compatibility_mode()  # Enable compatibility mode for hook aliases
     bridge_processed.process_weights()
     bridge_proc_orig, bridge_proc_ablated = test_model_ablation(
@@ -96,7 +96,7 @@ def test_integration_compatibility():
     )
 
     print("Testing TransformerBridge without processing...")
-    bridge_unprocessed = boot(model_name, device=device)
+    bridge_unprocessed = TransformerBridge.boot_transformers(model_name, device=device)
     bridge_unprocessed.enable_compatibility_mode()  # Enable compatibility mode for hook aliases
     # No processing applied
     bridge_unproc_orig, bridge_unproc_ablated = test_model_ablation(
