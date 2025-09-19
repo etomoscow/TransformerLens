@@ -11,6 +11,7 @@ from typing import Dict
 
 import einops
 import torch
+from torch import nn
 
 import transformer_lens.utils as utils
 from transformer_lens.FactoredMatrix import FactoredMatrix
@@ -50,39 +51,91 @@ class ProcessWeights:
         return adapter.translate_transformer_lens_path(tl_key)
 
     @staticmethod
-    def fold_layer_norm(
+    def _fold_layer(
         state_dict: Dict[str, torch.Tensor],
         cfg,
-        fold_biases: bool = True,
-        center_weights: bool = True,
-        adapter=None,
-    ) -> Dict[str, torch.Tensor]:
-        """Fold Layer Norm. Can also be used to fold RMS Norm, when fold_biases and center_weights are set to False.
-
-        Takes in a state dict from a pretrained model, formatted to be consistent with
-        HookedTransformer but with LayerNorm weights and biases. Folds these into the neighbouring
-        weights. See further_comments.md for more details.
-
+        layer_idx: int,
+        fold_biases: bool,
+        center_weights: bool,
+        adapter,
+        gqa: str,
+    ) -> None:
+        """Fold LayerNorm for a single layer.
+        
         Args:
-            state_dict (Dict[str, torch.Tensor]): State dict of pretrained model.
-            cfg: Model configuration object with n_layers, n_key_value_heads, etc.
-            fold_biases (bool): Enables folding of LN biases. Should be disabled when RMS Norm is used.
-            center_weights (bool): Enables the centering of weights after folding in LN. Should be disabled when RMS Norm is used.
-            adapter: Optional architecture adapter for parameter key translation.
-
-        Returns:
-            Dict[str, torch.Tensor]: Modified state dict with LayerNorm folded into linear layers.
+            state_dict: The state dictionary to process (modified in place)
+            cfg: Model configuration object
+            layer_idx: The layer index to process
+            fold_biases: Whether to fold LayerNorm biases
+            center_weights: Whether to center weights after folding
+            adapter: Optional architecture adapter for parameter key translation
+            gqa: GQA prefix string (empty or "_")
         """
-        # Make a copy to avoid modifying the original
-        state_dict = state_dict.copy()
-
-        # Models that use Grouped Query Attention (Only Mistral at the time of writing) prefix their K/V weights and
-        # biases with an underscore in order to distinguish them, but folding the LN into them still works the same,
-        # so we just add the underscore if GQA is used (i.e. if `cfg.n_key_value_heads is specified`).
-        gqa = "" if getattr(cfg, "n_key_value_heads", None) is None else "_"
-
-        for l in range(cfg.n_layers):
-            # Get translated parameter keys
+        l = layer_idx
+        
+        # When adapter is provided, always use HuggingFace format processing
+        if adapter:
+            # HuggingFace format: combined QKV weights and biases
+            # Process the combined QKV tensor once
+            W_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_Q", adapter)
+            b_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_Q", adapter)
+            ln1_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.b", adapter)
+            ln1_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.w", adapter)
+            
+            # Get the combined QKV tensors
+            qkv_weight = state_dict[W_Q_key]  # [d_model, 3 * d_model]
+            qkv_bias = state_dict[b_Q_key]    # [3 * n_heads * d_head]
+            ln1_b = state_dict[ln1_b_key]     # [d_model]
+            ln1_w = state_dict[ln1_w_key]     # [d_model]
+            
+            n_heads = cfg.n_heads
+            d_head = cfg.d_head
+            d_model = cfg.d_model
+            
+            # Split the combined QKV weight and bias
+            W_Q, W_K, W_V = torch.tensor_split(qkv_weight, 3, dim=1)  # Each: [d_model, d_model]
+            b_Q, b_K, b_V = torch.tensor_split(qkv_bias, 3, dim=0)    # Each: [n_heads * d_head]
+            
+            # Fold layer norm into QKV weights and biases
+            # COMMENTED OUT: Bias folding to find specific problematic lines
+            if fold_biases:
+                # Fold ln1 bias into QKV biases
+                # For each of Q, K, V: b_new = b_old + (W * ln_b).sum(dim=0)
+                b_Q_new = b_Q + (W_Q * ln1_b[:, None]).sum(dim=0)
+                b_K_new = b_K + (W_K * ln1_b[:, None]).sum(dim=0)
+                b_V_new = b_V + (W_V * ln1_b[:, None]).sum(dim=0)
+                
+                # Combine back into single QKV bias
+                new_qkv_bias = torch.cat([b_Q_new, b_K_new, b_V_new])
+                state_dict[b_Q_key] = new_qkv_bias
+                del state_dict[ln1_b_key]
+            
+            # Fold ln1 weight into QKV weights
+            W_Q_new = W_Q * ln1_w[:, None]
+            W_K_new = W_K * ln1_w[:, None]
+            W_V_new = W_V * ln1_w[:, None]
+            
+            # Combine back into single QKV weight
+            new_qkv_weight = torch.cat([W_Q_new, W_K_new, W_V_new], dim=1)
+            state_dict[W_Q_key] = new_qkv_weight
+            del state_dict[ln1_w_key]
+            
+            # Center the weights if requested
+            if center_weights:
+                # Center each of Q, K, V weights along the d_model dimension (dim=0)
+                # This matches the TransformerLens format centering: "head_index d_model d_head -> head_index 1 d_head"
+                # For HuggingFace format [d_model, d_model], we center along dim=0 (d_model)
+                W_Q_centered = W_Q_new - W_Q_new.mean(dim=0, keepdim=True)
+                W_K_centered = W_K_new - W_K_new.mean(dim=0, keepdim=True)
+                W_V_centered = W_V_new - W_V_new.mean(dim=0, keepdim=True)
+                
+                # Combine back into single QKV weight
+                centered_qkv_weight = torch.cat([W_Q_centered, W_K_centered, W_V_centered], dim=1)
+                state_dict[W_Q_key] = centered_qkv_weight
+                
+        else:
+            # TransformerLens format: separate Q, K, V weights and biases
+            # Get translated parameter keys for separate format
             b_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_Q", adapter)
             W_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_Q", adapter)
             b_K_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.{gqa}b_K", adapter)
@@ -91,7 +144,7 @@ class ProcessWeights:
             W_V_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.{gqa}W_V", adapter)
             ln1_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.b", adapter)
             ln1_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.w", adapter)
-
+            
             # Fold ln1 into attention - it's important to fold biases first, since biases depend on
             # weights but not vice versa The various indexing is just to broadcast ln.b and ln.w
             # along every axis other than d_model. Each weight matrix right multiplies. To fold in
@@ -136,73 +189,111 @@ class ProcessWeights:
                     "mean",
                 )
 
-            # Fold ln2 into MLP
-            if not getattr(cfg, "attn_only", False):
-                # Get translated MLP parameter keys
-                mlp_b_in_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_in", adapter)
-                mlp_W_in_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_in", adapter)
+        # Fold ln2 into MLP
+        if not getattr(cfg, "attn_only", False):
+            # Get translated MLP parameter keys
+            mlp_b_in_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_in", adapter)
+            mlp_W_in_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_in", adapter)
 
-                # Only get gate key if model has gated MLPs
-                mlp_W_gate_key = None
-                if getattr(cfg, "gated_mlp", False):
-                    mlp_W_gate_key = ProcessWeights._get_param_key(
-                        f"blocks.{l}.mlp.W_gate", adapter
-                    )
+            # Only get gate key if model has gated MLPs
+            mlp_W_gate_key = None
+            if getattr(cfg, "gated_mlp", False):
+                mlp_W_gate_key = ProcessWeights._get_param_key(
+                    f"blocks.{l}.mlp.W_gate", adapter
+                )
 
-                ln2_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.b", adapter)
-                ln2_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.w", adapter)
+            ln2_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.b", adapter)
+            ln2_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.w", adapter)
 
+            if fold_biases:
+                state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
+                    state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
+                ).sum(-2)
+                del state_dict[ln2_b_key]
+
+            state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
+
+            if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
+                state_dict[mlp_W_gate_key] = (
+                    state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
+                )
+
+            del state_dict[ln2_w_key]
+
+            if center_weights:
+                # Center the weights that read in from the LayerNormPre
+                state_dict[mlp_W_in_key] -= einops.reduce(
+                    state_dict[mlp_W_in_key],
+                    "d_model d_mlp -> 1 d_mlp",
+                    "mean",
+                )
+
+            if getattr(cfg, "act_fn", None) is not None and cfg.act_fn.startswith("solu"):
+                # Get translated SoLU LayerNorm parameter keys
+                mlp_b_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_out", adapter)
+                mlp_W_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_out", adapter)
+                mlp_ln_b_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.ln.b", adapter)
+                mlp_ln_w_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.ln.w", adapter)
+
+                # Fold ln3 into activation
                 if fold_biases:
-                    state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
-                        state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
+                    state_dict[mlp_b_out_key] = state_dict[mlp_b_out_key] + (
+                        state_dict[mlp_W_out_key] * state_dict[mlp_ln_b_key][:, None]
                     ).sum(-2)
-                    del state_dict[ln2_b_key]
 
-                state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
+                    del state_dict[mlp_ln_b_key]
 
-                if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
-                    state_dict[mlp_W_gate_key] = (
-                        state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
-                    )
-
-                del state_dict[ln2_w_key]
+                state_dict[mlp_W_out_key] = (
+                    state_dict[mlp_W_out_key] * state_dict[mlp_ln_w_key][:, None]
+                )
 
                 if center_weights:
                     # Center the weights that read in from the LayerNormPre
-                    state_dict[mlp_W_in_key] -= einops.reduce(
-                        state_dict[mlp_W_in_key],
-                        "d_model d_mlp -> 1 d_mlp",
+                    state_dict[mlp_W_out_key] -= einops.reduce(
+                        state_dict[mlp_W_out_key],
+                        "d_mlp d_model -> 1 d_model",
                         "mean",
                     )
 
-                if getattr(cfg, "act_fn", None) is not None and cfg.act_fn.startswith("solu"):
-                    # Get translated SoLU LayerNorm parameter keys
-                    mlp_b_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_out", adapter)
-                    mlp_W_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_out", adapter)
-                    mlp_ln_b_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.ln.b", adapter)
-                    mlp_ln_w_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.ln.w", adapter)
+                del state_dict[mlp_ln_w_key]
 
-                    # Fold ln3 into activation
-                    if fold_biases:
-                        state_dict[mlp_b_out_key] = state_dict[mlp_b_out_key] + (
-                            state_dict[mlp_W_out_key] * state_dict[mlp_ln_b_key][:, None]
-                        ).sum(-2)
+    @staticmethod
+    def fold_layer_norm(
+        state_dict: Dict[str, torch.Tensor],
+        cfg,
+        fold_biases: bool = True,
+        center_weights: bool = True,
+        adapter=None,
+    ) -> Dict[str, torch.Tensor]:
+        """Fold Layer Norm. Can also be used to fold RMS Norm, when fold_biases and center_weights are set to False.
 
-                        del state_dict[mlp_ln_b_key]
+        Takes in a state dict from a pretrained model, formatted to be consistent with
+        HookedTransformer but with LayerNorm weights and biases. Folds these into the neighbouring
+        weights. See further_comments.md for more details.
 
-                    state_dict[mlp_W_out_key] = (
-                        state_dict[mlp_W_out_key] * state_dict[mlp_ln_w_key][:, None]
-                    )
+        Args:
+            state_dict (Dict[str, torch.Tensor]): State dict of pretrained model.
+            cfg: Model configuration object with n_layers, n_key_value_heads, etc.
+            fold_biases (bool): Enables folding of LN biases. Should be disabled when RMS Norm is used.
+            center_weights (bool): Enables the centering of weights after folding in LN. Should be disabled when RMS Norm is used.
+            adapter: Optional architecture adapter for parameter key translation.
 
-                    if center_weights:
-                        # Center the weights that read in from the LayerNormPre
-                        state_dict[mlp_W_out_key] -= einops.reduce(
-                            state_dict[mlp_W_out_key],
-                            "d_mlp d_model -> 1 d_model",
-                            "mean",
-                        )
+        Returns:
+            Dict[str, torch.Tensor]: Modified state dict with LayerNorm folded into linear layers.
+        """
+        # Make a copy to avoid modifying the original
+        state_dict = state_dict.copy()
 
-                    del state_dict[mlp_ln_w_key]
+        # Models that use Grouped Query Attention (Only Mistral at the time of writing) prefix their K/V weights and
+        # biases with an underscore in order to distinguish them, but folding the LN into them still works the same,
+        # so we just add the underscore if GQA is used (i.e. if `cfg.n_key_value_heads is specified`).
+        gqa = "" if getattr(cfg, "n_key_value_heads", None) is None else "_"
+
+        print("n layers", cfg.n_layers)
+        for l in range(cfg.n_layers):
+            ProcessWeights._fold_layer(
+                state_dict, cfg, l, fold_biases, center_weights, adapter, gqa
+            )
 
         # Fold ln_final into Unembed
         unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
@@ -216,21 +307,60 @@ class ProcessWeights:
         if not getattr(cfg, "final_rms", False) and fold_biases and has_unembed_bias:
             # Dumb bug from my old SoLU training code, some models have RMSNorm instead of LayerNorm
             # pre unembed.
-            state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + (
-                state_dict[unembed_W_U_key] * state_dict[ln_final_b_key][:, None]
-            ).sum(dim=-2)
+            unembed_weight = state_dict[unembed_W_U_key]
+            ln_bias = state_dict[ln_final_b_key]
+            
+            # Handle different tensor shapes for bias folding
+            if len(unembed_weight.shape) == 2 and len(ln_bias.shape) == 1:
+                if unembed_weight.shape[1] == ln_bias.shape[0]:
+                    # HuggingFace format: [vocab_size, d_model] * [d_model] -> sum over d_model
+                    bias_contribution = (unembed_weight * ln_bias[None, :]).sum(dim=-1)
+                elif unembed_weight.shape[0] == ln_bias.shape[0]:
+                    # TransformerLens format: [d_model, vocab_size] * [d_model] -> sum over d_model
+                    bias_contribution = (unembed_weight * ln_bias[:, None]).sum(dim=-2)
+                else:
+                    raise ValueError(f"Cannot broadcast unembedding weight {unembed_weight.shape} with layer norm bias {ln_bias.shape}")
+            else:
+                raise ValueError(f"Unexpected tensor shapes: unembedding {unembed_weight.shape}, layer norm bias {ln_bias.shape}")
+            
+            state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + bias_contribution
             del state_dict[ln_final_b_key]
 
-        state_dict[unembed_W_U_key] = (
-            state_dict[unembed_W_U_key] * state_dict[ln_final_w_key][:, None]
-        )
+        # Generalized layer norm folding for unembedding
+        unembed_weight = state_dict[unembed_W_U_key]
+        ln_weight = state_dict[ln_final_w_key]
+        
+        # Handle different tensor shapes (TransformerLens vs HuggingFace format)
+        if len(unembed_weight.shape) == 2 and len(ln_weight.shape) == 1:
+            # Check if we need to transpose for proper broadcasting
+            if unembed_weight.shape[1] == ln_weight.shape[0]:
+                # HuggingFace format: [vocab_size, d_model] * [d_model] -> [vocab_size, d_model]
+                state_dict[unembed_W_U_key] = unembed_weight * ln_weight[None, :]
+            elif unembed_weight.shape[0] == ln_weight.shape[0]:
+                # TransformerLens format: [d_model, vocab_size] * [d_model] -> [d_model, vocab_size]
+                state_dict[unembed_W_U_key] = unembed_weight * ln_weight[:, None]
+            else:
+                raise ValueError(f"Cannot broadcast unembedding weight {unembed_weight.shape} with layer norm weight {ln_weight.shape}")
+        else:
+            raise ValueError(f"Unexpected tensor shapes: unembedding {unembed_weight.shape}, layer norm {ln_weight.shape}")
         del state_dict[ln_final_w_key]
 
         if center_weights:
             # Center the weights that read in from the LayerNormPre
-            state_dict[unembed_W_U_key] -= einops.reduce(
-                state_dict[unembed_W_U_key], "d_model d_vocab -> 1 d_vocab", "mean"
-            )
+            unembed_weight = state_dict[unembed_W_U_key]
+            if len(unembed_weight.shape) == 2:
+                if unembed_weight.shape[0] > unembed_weight.shape[1]:
+                    # TransformerLens format: [d_model, vocab_size] - center along d_model
+                    state_dict[unembed_W_U_key] -= einops.reduce(
+                        unembed_weight, "d_model d_vocab -> 1 d_vocab", "mean"
+                    )
+                else:
+                    # HuggingFace format: [vocab_size, d_model] - center along d_model
+                    state_dict[unembed_W_U_key] -= einops.reduce(
+                        unembed_weight, "vocab_size d_model -> vocab_size 1", "mean"
+                    )
+            else:
+                raise ValueError(f"Unexpected unembedding weight shape: {unembed_weight.shape}")
 
         return state_dict
 
@@ -355,29 +485,61 @@ class ProcessWeights:
             # Get translated parameter keys
             if getattr(cfg, "n_key_value_heads", None) is None:
                 b_V_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn.b_V", adapter)
-                b_V = state_dict[b_V_key]
             else:
                 b_V_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn._b_V", adapter)
-                b_V = state_dict[b_V_key]
-                b_V = torch.repeat_interleave(
-                    b_V, dim=0, repeats=cfg.n_heads // cfg.n_key_value_heads
-                )
 
             # Get other translated parameter keys
             W_O_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn.W_O", adapter)
             b_O_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn.b_O", adapter)
 
-            # [head_index, d_head, d_model]
-            W_O = state_dict[W_O_key]
-            # [d_model]
-            b_O_original = state_dict[b_O_key]
-            folded_b_O = b_O_original + (b_V[:, :, None] * W_O).sum([0, 1])
-
-            state_dict[b_O_key] = folded_b_O
-            if getattr(cfg, "n_key_value_heads", None) is None:
-                state_dict[b_V_key] = torch.zeros_like(b_V)
-            else:
-                state_dict[b_V_key] = torch.zeros_like(state_dict[b_V_key])
+            # Check if we have combined QKV format (HuggingFace) or separate format (TransformerLens)
+            if b_V_key in state_dict:
+                b_V = state_dict[b_V_key]
+                W_O = state_dict[W_O_key]
+                b_O_original = state_dict[b_O_key]
+                
+                # Handle different tensor formats
+                if len(b_V.shape) == 1 and len(W_O.shape) == 2:
+                    # HuggingFace format: combined QKV bias [3 * n_heads * d_head], W_O [d_model, d_model]
+                    n_heads = cfg.n_heads
+                    d_head = cfg.d_head
+                    d_model = cfg.d_model
+                    
+                    # Extract just the V bias from the combined QKV bias
+                    # Combined bias is [Q_bias, K_bias, V_bias] where each is [n_heads * d_head]
+                    v_bias_start = 2 * n_heads * d_head  # Start of V bias
+                    v_bias_end = 3 * n_heads * d_head    # End of V bias
+                    b_V_only = b_V[v_bias_start:v_bias_end]  # [n_heads * d_head]
+                    
+                    # Reshape for computation: [n_heads * d_head] -> [n_heads, d_head]
+                    b_V_reshaped = b_V_only.reshape(n_heads, d_head)
+                    
+                    # W_O is [d_model, d_model], we need to reshape it to [n_heads, d_head, d_model]
+                    # W_O represents the output projection, so we need to split it by heads
+                    W_O_reshaped = W_O.T.reshape(n_heads, d_head, d_model)
+                    
+                    # Compute the folded bias: sum over heads and d_head dimensions
+                    folded_b_O = b_O_original + (b_V_reshaped[:, :, None] * W_O_reshaped).sum([0, 1])
+                    
+                    # Zero out the V bias in the combined QKV bias
+                    new_b_V = b_V.clone()
+                    new_b_V[v_bias_start:v_bias_end] = 0
+                    state_dict[b_V_key] = new_b_V
+                    
+                elif len(b_V.shape) == 2 and len(W_O.shape) == 3:
+                    # TransformerLens format: separate V bias [n_heads, d_head], W_O [n_heads, d_head, d_model]
+                    if getattr(cfg, "n_key_value_heads", None) is not None:
+                        b_V = torch.repeat_interleave(
+                            b_V, dim=0, repeats=cfg.n_heads // cfg.n_key_value_heads
+                        )
+                    
+                    folded_b_O = b_O_original + (b_V[:, :, None] * W_O).sum([0, 1])
+                    state_dict[b_V_key] = torch.zeros_like(b_V)
+                else:
+                    raise ValueError(f"Unexpected tensor shapes: b_V {b_V.shape}, W_O {W_O.shape}")
+                
+                state_dict[b_O_key] = folded_b_O
+                
         return state_dict
 
     @staticmethod
@@ -539,12 +701,12 @@ class ProcessWeights:
                 pass
             elif getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"]:
                 processed_dict = ProcessWeights.fold_layer_norm(
-                    processed_dict, cfg, adapter=adapter
+                    processed_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter
                 )
-            elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
-                processed_dict = ProcessWeights.fold_layer_norm(
-                    processed_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
-                )
+        #     elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
+        #         processed_dict = ProcessWeights.fold_layer_norm(
+        #             processed_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
+        #         )
 
         if center_writing_weights:
             if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and not getattr(
@@ -566,3 +728,127 @@ class ProcessWeights:
             )
 
         return processed_dict
+
+    @staticmethod
+    def extract_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
+        """Extract state dictionary from an nn.Module, cleaning up any _original_component references.
+        
+        This function extracts the state dictionary from a PyTorch model and removes any
+        _original_component suffixes that might be present in bridge models.
+        
+        Args:
+            model: The PyTorch model to extract state dict from
+            
+        Returns:
+            Dict[str, torch.Tensor]: Cleaned state dictionary without _original_component references
+        """
+        # If the model has a custom state_dict method (like TransformerBridge), use it directly
+        if hasattr(model, 'state_dict') and hasattr(model.__class__, 'state_dict') and model.__class__.state_dict != nn.Module.state_dict:
+            return model.state_dict()
+        
+        # Otherwise, manually clean up _original_component suffixes
+        state_dict = model.state_dict()
+        cleaned_state_dict = {}
+        for key, tensor in state_dict.items():
+            clean_key = key.replace("._original_component", "")
+            cleaned_state_dict[clean_key] = tensor.clone()
+        
+        return cleaned_state_dict
+
+    @staticmethod
+    def load_processed_weights_into_module(processed_state_dict, module):
+        """Load processed weights into an nn.Module.
+        
+        Args:
+            processed_state_dict: Dictionary of processed weights
+            module: The nn.Module to load weights into
+            
+        Returns:
+            The same module with processed weights loaded
+        """
+        import torch
+
+        # If the module has a custom load_state_dict method (like TransformerBridge), use it directly
+        if hasattr(module, 'load_state_dict') and hasattr(module.__class__, 'load_state_dict') and module.__class__.load_state_dict != nn.Module.load_state_dict:
+            module.load_state_dict(processed_state_dict, strict=False)
+            return module
+        
+        # Otherwise, manually map processed keys to original keys with _original_component suffixes
+        original_state_dict = module.state_dict()
+        new_state_dict = {}
+        
+        # Map processed keys to original keys
+        for processed_key, processed_tensor in processed_state_dict.items():
+            # Find the corresponding key with _original_component suffix
+            for orig_key in original_state_dict.keys():
+                if orig_key.replace("._original_component", "") == processed_key:
+                    new_state_dict[orig_key] = processed_tensor
+                    # Debug output for QKV weights
+                    if 'c_attn.weight' in processed_key:
+                        print(f"DEBUG: Mapped {processed_key} -> {orig_key}")
+                        print(f"  Processed range: [{processed_tensor.min():.6f}, {processed_tensor.max():.6f}]")
+                    break
+        
+        # Load the new state dict into the module
+        module.load_state_dict(new_state_dict, strict=False)
+        
+        return module
+    
+    @staticmethod
+    def create_model_with_processed_weights(processed_state_dict, original_model, model_class=None):
+        """Create a new model instance with processed weights.
+        
+        Args:
+            processed_state_dict: Dictionary of processed weights
+            original_model: The original model to use as a template
+            model_class: The model class to instantiate (if None, uses type(original_model))
+            
+        Returns:
+            A new model instance with processed weights loaded
+        """
+        import torch
+
+        # if model_class is None:
+        #     model_class = type(original_model)
+        # Create a new model instance
+        # new_model = model_class(original_model.config)
+        # # Get the new model's state dict
+        # new_state_dict = new_model.state_dict()
+        # # Map processed keys to new model keys
+        # for processed_key, processed_tensor in processed_state_dict.items():
+        #     # Find the corresponding key in the new model
+        #     for new_key in new_state_dict.keys():
+        #         if new_key.replace("._original_component", "") == processed_key:
+        #             new_state_dict[new_key] = processed_tensor
+        #             break
+        
+        original_model.load_state_dict(processed_state_dict, strict=True, assign=True)
+        # print("loading weights")
+        # # Load the processed weights into the new model
+        # state_dict_keys = list(processed_state_dict.keys())
+        # for key in state_dict_keys:
+            
+        #     del processed_state_dict[key]
+        
+        return original_model
+    
+    @staticmethod
+    def _get_parameter_by_name(module, param_name):
+        """Get a parameter from a module by its name.
+        
+        Args:
+            module: The nn.Module
+            param_name: The parameter name (e.g., "transformer.h.0.attn.c_attn.weight")
+            
+        Returns:
+            The parameter tensor or None if not found
+        """
+        parts = param_name.split('.')
+        current = module
+        
+        try:
+            for part in parts:
+                current = getattr(current, part)
+            return current
+        except AttributeError:
+            return None

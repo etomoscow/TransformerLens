@@ -50,6 +50,11 @@ class UnembeddingBridge(GeneralizedComponent):
         assert isinstance(weight, torch.Tensor), f"Weight is not a tensor for {self.name}"
         return weight.T
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """Return the unembedding weight matrix (alias for W_U)."""
+        return self.W_U
+
     def forward(
         self,
         hidden_states: torch.Tensor,
