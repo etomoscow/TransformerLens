@@ -145,27 +145,29 @@ class ProcessWeights:
             ln1_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.b", adapter)
             ln1_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.w", adapter)
             
-            # Fold ln1 into attention - it's important to fold biases first, since biases depend on
-            # weights but not vice versa The various indexing is just to broadcast ln.b and ln.w
-            # along every axis other than d_model. Each weight matrix right multiplies. To fold in
-            # the bias, we use the W_ matrix to map it to the hidden space of the layer, so we need
-            # to sum along axis -2, which is the residual stream space axis.
-            if fold_biases:
-                state_dict[b_Q_key] = state_dict[b_Q_key] + (
-                    state_dict[W_Q_key] * state_dict[ln1_b_key][None, :, None]
-                ).sum(-2)
-                state_dict[b_K_key] = state_dict[b_K_key] + (
-                    state_dict[W_K_key] * state_dict[ln1_b_key][None, :, None]
-                ).sum(-2)
-                state_dict[b_V_key] = state_dict[b_V_key] + (
-                    state_dict[W_V_key] * state_dict[ln1_b_key][None, :, None]
-                ).sum(-2)
-                del state_dict[ln1_b_key]
+            # Check if LayerNorm parameters exist (they might not for already processed models)
+            if ln1_b_key in state_dict and ln1_w_key in state_dict:
+                # Fold ln1 into attention - it's important to fold biases first, since biases depend on
+                # weights but not vice versa The various indexing is just to broadcast ln.b and ln.w
+                # along every axis other than d_model. Each weight matrix right multiplies. To fold in
+                # the bias, we use the W_ matrix to map it to the hidden space of the layer, so we need
+                # to sum along axis -2, which is the residual stream space axis.
+                if fold_biases:
+                    state_dict[b_Q_key] = state_dict[b_Q_key] + (
+                        state_dict[W_Q_key] * state_dict[ln1_b_key][None, :, None]
+                    ).sum(-2)
+                    state_dict[b_K_key] = state_dict[b_K_key] + (
+                        state_dict[W_K_key] * state_dict[ln1_b_key][None, :, None]
+                    ).sum(-2)
+                    state_dict[b_V_key] = state_dict[b_V_key] + (
+                        state_dict[W_V_key] * state_dict[ln1_b_key][None, :, None]
+                    ).sum(-2)
+                    del state_dict[ln1_b_key]
 
-            state_dict[W_Q_key] = state_dict[W_Q_key] * state_dict[ln1_w_key][None, :, None]
-            state_dict[W_K_key] = state_dict[W_K_key] * state_dict[ln1_w_key][None, :, None]
-            state_dict[W_V_key] = state_dict[W_V_key] * state_dict[ln1_w_key][None, :, None]
-            del state_dict[ln1_w_key]
+                state_dict[W_Q_key] = state_dict[W_Q_key] * state_dict[ln1_w_key][None, :, None]
+                state_dict[W_K_key] = state_dict[W_K_key] * state_dict[ln1_w_key][None, :, None]
+                state_dict[W_V_key] = state_dict[W_V_key] * state_dict[ln1_w_key][None, :, None]
+                del state_dict[ln1_w_key]
 
             # Finally, we center the weights reading from the residual stream. The output of the
             # first part of the LayerNorm is mean 0 and standard deviation 1, so the mean of any
@@ -205,20 +207,22 @@ class ProcessWeights:
             ln2_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.b", adapter)
             ln2_w_key = ProcessWeights._get_param_key(f"blocks.{l}.ln2.w", adapter)
 
-            if fold_biases:
-                state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
-                    state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
-                ).sum(-2)
-                del state_dict[ln2_b_key]
+            # Check if MLP LayerNorm parameters exist (they might not for already processed models)
+            if ln2_b_key in state_dict and ln2_w_key in state_dict:
+                if fold_biases:
+                    state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
+                        state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
+                    ).sum(-2)
+                    del state_dict[ln2_b_key]
 
-            state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
+                state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
 
-            if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
-                state_dict[mlp_W_gate_key] = (
-                    state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
-                )
+                if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
+                    state_dict[mlp_W_gate_key] = (
+                        state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
+                    )
 
-            del state_dict[ln2_w_key]
+                del state_dict[ln2_w_key]
 
             if center_weights:
                 # Center the weights that read in from the LayerNormPre
@@ -703,10 +707,10 @@ class ProcessWeights:
                 processed_dict = ProcessWeights.fold_layer_norm(
                     processed_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter
                 )
-        #     elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
-        #         processed_dict = ProcessWeights.fold_layer_norm(
-        #             processed_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
-        #         )
+            elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
+                processed_dict = ProcessWeights.fold_layer_norm(
+                    processed_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
+                )
 
         if center_writing_weights:
             if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and not getattr(
