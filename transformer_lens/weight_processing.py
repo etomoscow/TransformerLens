@@ -73,10 +73,10 @@ class ProcessWeights:
         """
         l = layer_idx
         
-        # When adapter is provided, always use HuggingFace format processing
+        # When adapter is provided, convert to TransformerLens format, process, then convert back
         if adapter:
             # HuggingFace format: combined QKV weights and biases
-            # Process the combined QKV tensor once
+            # First, convert to TransformerLens format for processing
             W_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_Q", adapter)
             b_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_Q", adapter)
             ln1_b_key = ProcessWeights._get_param_key(f"blocks.{l}.ln1.b", adapter)
@@ -84,7 +84,7 @@ class ProcessWeights:
             
             # Get the combined QKV tensors
             qkv_weight = state_dict[W_Q_key]  # [d_model, 3 * d_model]
-            qkv_bias = state_dict[b_Q_key]    # [3 * n_heads * d_head]
+            qkv_bias = state_dict[b_Q_key]    # [3 * d_model] (HuggingFace format)
             ln1_b = state_dict[ln1_b_key]     # [d_model]
             ln1_w = state_dict[ln1_w_key]     # [d_model]
             
@@ -92,46 +92,58 @@ class ProcessWeights:
             d_head = cfg.d_head
             d_model = cfg.d_model
             
-            # Split the combined QKV weight and bias
-            W_Q, W_K, W_V = torch.tensor_split(qkv_weight, 3, dim=1)  # Each: [d_model, d_model]
-            b_Q, b_K, b_V = torch.tensor_split(qkv_bias, 3, dim=0)    # Each: [n_heads * d_head]
+            # Convert HuggingFace format to TransformerLens format
+            # Split combined QKV weight: [d_model, 3*d_model] -> [n_heads, d_model, d_head] for each
+            W_Q_hf, W_K_hf, W_V_hf = torch.tensor_split(qkv_weight, 3, dim=1)  # Each: [d_model, d_model]
+            W_Q_tl = W_Q_hf.T.reshape(n_heads, d_model, d_head)  # [n_heads, d_model, d_head]
+            W_K_tl = W_K_hf.T.reshape(n_heads, d_model, d_head)  # [n_heads, d_model, d_head]
+            W_V_tl = W_V_hf.T.reshape(n_heads, d_model, d_head)  # [n_heads, d_model, d_head]
             
-            # Fold layer norm into QKV weights and biases
-            # COMMENTED OUT: Bias folding to find specific problematic lines
-            if fold_biases:
-                # Fold ln1 bias into QKV biases
-                # For each of Q, K, V: b_new = b_old + (W * ln_b).sum(dim=0)
-                b_Q_new = b_Q + (W_Q * ln1_b[:, None]).sum(dim=0)
-                b_K_new = b_K + (W_K * ln1_b[:, None]).sum(dim=0)
-                b_V_new = b_V + (W_V * ln1_b[:, None]).sum(dim=0)
-                
-                # Combine back into single QKV bias
-                new_qkv_bias = torch.cat([b_Q_new, b_K_new, b_V_new])
-                state_dict[b_Q_key] = new_qkv_bias
-                del state_dict[ln1_b_key]
+            # Split combined QKV bias: [3*d_model] -> [n_heads, d_head] for each
+            b_Q_hf, b_K_hf, b_V_hf = torch.tensor_split(qkv_bias, 3, dim=0)  # Each: [d_model]
+            b_Q_tl = b_Q_hf.reshape(n_heads, d_head)  # [n_heads, d_head]
+            b_K_tl = b_K_hf.reshape(n_heads, d_head)  # [n_heads, d_head]
+            b_V_tl = b_V_hf.reshape(n_heads, d_head)  # [n_heads, d_head]
             
-            # Fold ln1 weight into QKV weights
-            W_Q_new = W_Q * ln1_w[:, None]
-            W_K_new = W_K * ln1_w[:, None]
-            W_V_new = W_V * ln1_w[:, None]
-            
-            # Combine back into single QKV weight
-            new_qkv_weight = torch.cat([W_Q_new, W_K_new, W_V_new], dim=1)
-            state_dict[W_Q_key] = new_qkv_weight
-            del state_dict[ln1_w_key]
-            
-            # Center the weights if requested
+            # Now use the same logic as the no-adapter case (TransformerLens format)
+            # Check if LayerNorm parameters exist
+            if ln1_b_key in state_dict and ln1_w_key in state_dict:
+                # Fold ln1 into attention - same logic as no-adapter case
+                if fold_biases:
+                    b_Q_tl = b_Q_tl + (W_Q_tl * ln1_b[None, :, None]).sum(-2)
+                    b_K_tl = b_K_tl + (W_K_tl * ln1_b[None, :, None]).sum(-2)
+                    b_V_tl = b_V_tl + (W_V_tl * ln1_b[None, :, None]).sum(-2)
+                    del state_dict[ln1_b_key]
+
+                W_Q_tl = W_Q_tl * ln1_w[None, :, None]
+                W_K_tl = W_K_tl * ln1_w[None, :, None]
+                W_V_tl = W_V_tl * ln1_w[None, :, None]
+                del state_dict[ln1_w_key]
+
+            # Center the weights if requested - same logic as no-adapter case
             if center_weights:
-                # Center each of Q, K, V weights along the d_model dimension (dim=0)
-                # This matches the TransformerLens format centering: "head_index d_model d_head -> head_index 1 d_head"
-                # For HuggingFace format [d_model, d_model], we center along dim=0 (d_model)
-                W_Q_centered = W_Q_new - W_Q_new.mean(dim=0, keepdim=True)
-                W_K_centered = W_K_new - W_K_new.mean(dim=0, keepdim=True)
-                W_V_centered = W_V_new - W_V_new.mean(dim=0, keepdim=True)
-                
-                # Combine back into single QKV weight
-                centered_qkv_weight = torch.cat([W_Q_centered, W_K_centered, W_V_centered], dim=1)
-                state_dict[W_Q_key] = centered_qkv_weight
+                W_Q_tl -= einops.reduce(W_Q_tl, "head_index d_model d_head -> head_index 1 d_head", "mean")
+                W_K_tl -= einops.reduce(W_K_tl, "head_index d_model d_head -> head_index 1 d_head", "mean")
+                W_V_tl -= einops.reduce(W_V_tl, "head_index d_model d_head -> head_index 1 d_head", "mean")
+            
+            # Convert back to HuggingFace format
+            # Convert weights: [n_heads, d_model, d_head] -> [d_model, d_model]
+            W_Q_hf = W_Q_tl.reshape(d_model, d_model).T  # [d_model, d_model]
+            W_K_hf = W_K_tl.reshape(d_model, d_model).T  # [d_model, d_model]
+            W_V_hf = W_V_tl.reshape(d_model, d_model).T  # [d_model, d_model]
+            
+            # Convert biases: [n_heads, d_head] -> [d_model]
+            b_Q_hf = b_Q_tl.reshape(d_model)  # [d_model]
+            b_K_hf = b_K_tl.reshape(d_model)  # [d_model]
+            b_V_hf = b_V_tl.reshape(d_model)  # [d_model]
+            
+            # Combine back into HuggingFace format
+            new_qkv_weight = torch.cat([W_Q_hf, W_K_hf, W_V_hf], dim=1)  # [d_model, 3*d_model]
+            new_qkv_bias = torch.cat([b_Q_hf, b_K_hf, b_V_hf])  # [3*d_model]
+            
+            # Update state dict
+            state_dict[W_Q_key] = new_qkv_weight
+            state_dict[b_Q_key] = new_qkv_bias
                 
         else:
             # TransformerLens format: separate Q, K, V weights and biases
@@ -293,7 +305,6 @@ class ProcessWeights:
         # so we just add the underscore if GQA is used (i.e. if `cfg.n_key_value_heads is specified`).
         gqa = "" if getattr(cfg, "n_key_value_heads", None) is None else "_"
 
-        print("n layers", cfg.n_layers)
         for l in range(cfg.n_layers):
             ProcessWeights._fold_layer(
                 state_dict, cfg, l, fold_biases, center_weights, adapter, gqa

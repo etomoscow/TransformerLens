@@ -10,6 +10,7 @@ This test verifies that the _fold_layer function works correctly with:
 4. Both TransformerLens format (no adapter) and HuggingFace format (with adapter) processing
 """
 
+import einops
 import pytest
 import torch
 from transformers import GPT2Config, GPT2LMHeadModel
@@ -181,9 +182,21 @@ class TestFoldLayerIntegration:
         w_q, w_k, w_v = torch.tensor_split(qkv_weight, 3, dim=1)
         
         # Check that weights are centered (mean should be zero across d_model dimension)
-        w_q_mean = torch.mean(w_q, dim=0, keepdim=True)  # [1, d_model]
-        w_k_mean = torch.mean(w_k, dim=0, keepdim=True)
-        w_v_mean = torch.mean(w_v, dim=0, keepdim=True)
+        # Note: After our fix, centering is done in TransformerLens format (per head) and then converted back
+        # So we need to check centering by converting back to TransformerLens format
+        n_heads = cfg.n_heads
+        d_head = cfg.d_head
+        d_model = cfg.d_model
+        
+        # Convert back to TransformerLens format to check centering
+        w_q_tl = w_q.T.reshape(n_heads, d_model, d_head)  # [n_heads, d_model, d_head]
+        w_k_tl = w_k.T.reshape(n_heads, d_model, d_head)  # [n_heads, d_model, d_head]
+        w_v_tl = w_v.T.reshape(n_heads, d_model, d_head)  # [n_heads, d_model, d_head]
+        
+        # Check that weights are centered per head (TransformerLens format centering)
+        w_q_mean = einops.reduce(w_q_tl, "head_index d_model d_head -> head_index 1 d_head", "mean")
+        w_k_mean = einops.reduce(w_k_tl, "head_index d_model d_head -> head_index 1 d_head", "mean")
+        w_v_mean = einops.reduce(w_v_tl, "head_index d_model d_head -> head_index 1 d_head", "mean")
         
         assert torch.allclose(w_q_mean, torch.zeros_like(w_q_mean), atol=1e-6)
         assert torch.allclose(w_k_mean, torch.zeros_like(w_k_mean), atol=1e-6)
@@ -205,7 +218,7 @@ class TestFoldLayerIntegration:
             assert torch.equal(v, original_state_dict[k])
 
     def test_fold_layer_equivalence_between_formats(self, gpt2_model_and_config):
-        """Test that _fold_layer produces equivalent results for both formats."""
+        """Test that _fold_layer produces equivalent results for both formats with the same input."""
         hf_model = gpt2_model_and_config["hf_model"]
         tl_model = gpt2_model_and_config["tl_model"]
         adapter = gpt2_model_and_config["adapter"]
@@ -213,40 +226,139 @@ class TestFoldLayerIntegration:
         
         layer_idx = 0
         
-        # Get state dicts from both models
-        tl_state_dict = tl_model.state_dict()
+        # Start with the same unprocessed HuggingFace model state dict
         hf_state_dict = hf_model.state_dict()
         
-        # Process TransformerLens format
-        tl_processed = {k: v.clone() for k, v in tl_state_dict.items()}
+        # Create a TransformerLens format state dict from the HuggingFace one
+        # This simulates what would happen when converting HF to TL format
+        tl_state_dict = {}
+        
+        # Convert HuggingFace keys to TransformerLens keys
+        for hf_key, tensor in hf_state_dict.items():
+            if f"transformer.h.{layer_idx}" in hf_key:
+                if "attn.c_attn.weight" in hf_key:
+                    # Split combined QKV weight into separate Q, K, V weights
+                    # HuggingFace: [d_model, 3*d_model] -> TransformerLens: [n_heads, d_model, d_head] for each
+                    n_heads = cfg.n_heads
+                    d_head = cfg.d_head
+                    d_model = cfg.d_model
+                    
+                    # Split the combined weight
+                    qkv_weight = tensor  # [d_model, 3*d_model]
+                    w_q_hf, w_k_hf, w_v_hf = torch.tensor_split(qkv_weight, 3, dim=1)  # Each: [d_model, d_model]
+                    
+                    # Reshape to TransformerLens format: [d_model, d_model] -> [n_heads, d_model, d_head]
+                    w_q_tl = w_q_hf.T.reshape(n_heads, d_model, d_head)
+                    w_k_tl = w_k_hf.T.reshape(n_heads, d_model, d_head)
+                    w_v_tl = w_v_hf.T.reshape(n_heads, d_model, d_head)
+                    
+                    tl_state_dict[f"blocks.{layer_idx}.attn.W_Q"] = w_q_tl
+                    tl_state_dict[f"blocks.{layer_idx}.attn.W_K"] = w_k_tl
+                    tl_state_dict[f"blocks.{layer_idx}.attn.W_V"] = w_v_tl
+                    
+                elif "attn.c_attn.bias" in hf_key:
+                    # Split combined QKV bias into separate Q, K, V biases
+                    qkv_bias = tensor  # [3*d_model]
+                    b_q_hf, b_k_hf, b_v_hf = torch.tensor_split(qkv_bias, 3, dim=0)  # Each: [d_model]
+                    
+                    # Reshape to TransformerLens format: [d_model] -> [n_heads, d_head]
+                    b_q_tl = b_q_hf.reshape(n_heads, d_head)
+                    b_k_tl = b_k_hf.reshape(n_heads, d_head)
+                    b_v_tl = b_v_hf.reshape(n_heads, d_head)
+                    
+                    tl_state_dict[f"blocks.{layer_idx}.attn.b_Q"] = b_q_tl
+                    tl_state_dict[f"blocks.{layer_idx}.attn.b_K"] = b_k_tl
+                    tl_state_dict[f"blocks.{layer_idx}.attn.b_V"] = b_v_tl
+                    
+                elif "ln_1.weight" in hf_key:
+                    tl_state_dict[f"blocks.{layer_idx}.ln1.w"] = tensor
+                elif "ln_1.bias" in hf_key:
+                    tl_state_dict[f"blocks.{layer_idx}.ln1.b"] = tensor
+                elif "ln_2.weight" in hf_key:
+                    tl_state_dict[f"blocks.{layer_idx}.ln2.w"] = tensor
+                elif "ln_2.bias" in hf_key:
+                    tl_state_dict[f"blocks.{layer_idx}.ln2.b"] = tensor
+                elif "mlp.c_fc.weight" in hf_key:
+                    tl_state_dict[f"blocks.{layer_idx}.mlp.W_in"] = tensor
+                elif "mlp.c_fc.bias" in hf_key:
+                    tl_state_dict[f"blocks.{layer_idx}.mlp.b_in"] = tensor
+        
+        # Now we have the same data in both formats - test equivalence
+        # Test without centering first to isolate the issue
+        print("Testing without centering...")
+        
+        # Process HuggingFace format (no centering)
+        hf_processed_no_center = {k: v.clone() for k, v in hf_state_dict.items()}
         ProcessWeights._fold_layer(
-            tl_processed, cfg, layer_idx=layer_idx, fold_biases=True, center_weights=True, adapter=None, gqa=""
+            hf_processed_no_center, cfg, layer_idx=layer_idx, fold_biases=True, center_weights=False, adapter=adapter, gqa=""
         )
         
-        # Process HuggingFace format
+        # Process TransformerLens format (no centering)
+        tl_processed_no_center = {k: v.clone() for k, v in tl_state_dict.items()}
+        ProcessWeights._fold_layer(
+            tl_processed_no_center, cfg, layer_idx=layer_idx, fold_biases=True, center_weights=False, adapter=None, gqa=""
+        )
+        
+        # Compare without centering
+        hf_qkv_weight_no_center = hf_processed_no_center[f"transformer.h.{layer_idx}.attn.c_attn.weight"]
+        hf_w_q_no_center, _, _ = torch.tensor_split(hf_qkv_weight_no_center, 3, dim=1)
+        tl_w_q_no_center = tl_processed_no_center[f"blocks.{layer_idx}.attn.W_Q"]
+        tl_w_q_hf_format_no_center = tl_w_q_no_center.reshape(d_model, d_model).T
+        
+        diff_no_center = torch.max(torch.abs(hf_w_q_no_center - tl_w_q_hf_format_no_center))
+        print(f"Difference without centering: {diff_no_center:.6f}")
+        
+        # Now test with centering
+        print("Testing with centering...")
+        
+        # Process HuggingFace format (with centering)
         hf_processed = {k: v.clone() for k, v in hf_state_dict.items()}
         ProcessWeights._fold_layer(
             hf_processed, cfg, layer_idx=layer_idx, fold_biases=True, center_weights=True, adapter=adapter, gqa=""
         )
         
-        # Compare the results by checking that both formats produce the same mathematical transformations
-        # We can't directly compare the tensors since they have different shapes and keys,
-        # but we can verify that both produce centered weights
+        # Process TransformerLens format (with centering)
+        tl_processed = {k: v.clone() for k, v in tl_state_dict.items()}
+        ProcessWeights._fold_layer(
+            tl_processed, cfg, layer_idx=layer_idx, fold_biases=True, center_weights=True, adapter=None, gqa=""
+        )
         
-        # Check TransformerLens format centering
-        tl_w_q = tl_processed[f"blocks.{layer_idx}.attn.W_Q"]
-        tl_w_q_mean = torch.mean(tl_w_q, dim=1, keepdim=True)
-        assert torch.allclose(tl_w_q_mean, torch.zeros_like(tl_w_q_mean), atol=1e-6)
-        
-        # Check HuggingFace format centering
+        # Compare the results by converting back to the same format
+        # Extract Q weights from both formats and compare
         hf_qkv_weight = hf_processed[f"transformer.h.{layer_idx}.attn.c_attn.weight"]
-        hf_w_q, hf_w_k, hf_w_v = torch.tensor_split(hf_qkv_weight, 3, dim=1)
-        hf_w_q_mean = torch.mean(hf_w_q, dim=0, keepdim=True)
-        assert torch.allclose(hf_w_q_mean, torch.zeros_like(hf_w_q_mean), atol=1e-6)
+        hf_w_q, hf_w_k, hf_w_v = torch.tensor_split(hf_qkv_weight, 3, dim=1)  # Each: [d_model, d_model]
+        
+        tl_w_q = tl_processed[f"blocks.{layer_idx}.attn.W_Q"]  # [n_heads, d_model, d_head]
+        
+        # Convert TL format back to HF format for comparison
+        n_heads = cfg.n_heads
+        d_head = cfg.d_head
+        d_model = cfg.d_model
+        tl_w_q_hf_format = tl_w_q.reshape(d_model, d_model).T  # [d_model, d_model]
+        
+        # Compare with centering
+        diff_with_center = torch.max(torch.abs(hf_w_q - tl_w_q_hf_format))
+        print(f"Difference with centering: {diff_with_center:.6f}")
+        
+        # The Q weights should be identical (within numerical precision)
+        if diff_no_center < 1e-6:
+            print("✅ LayerNorm folding is equivalent between formats")
+        else:
+            print(f"❌ LayerNorm folding differs between formats (diff: {diff_no_center:.6f})")
+            
+        if diff_with_center < 1e-6:
+            print("✅ Centering is equivalent between formats")
+        else:
+            print(f"❌ Centering differs between formats (diff: {diff_with_center:.6f})")
         
         # Both should have LayerNorm weights removed
         assert f"blocks.{layer_idx}.ln1.w" not in tl_processed
         assert f"transformer.h.{layer_idx}.ln_1.weight" not in hf_processed
+        
+        # The Q weights should be identical (within numerical precision)
+        assert torch.allclose(hf_w_q, tl_w_q_hf_format, atol=1e-6), f"Q weights don't match: max diff = {torch.max(torch.abs(hf_w_q - tl_w_q_hf_format))}"
+        
+        print(f"✅ Equivalence test passed: Q weights match exactly (max diff: {diff_with_center:.2e})")
 
     def test_fold_layer_with_different_layers(self, gpt2_model_and_config):
         """Test _fold_layer with different layers to ensure it works across all layers."""
