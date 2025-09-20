@@ -296,14 +296,16 @@ class ProcessWeights:
         if ln1_b is not None and ln1_w is not None:
             # Apply the individual math functions
             if fold_biases:
-                bq_tensor, bk_tensor, bv_tensor = ProcessWeights.fold_layer_norm_biases(
-                    wq_tensor, wk_tensor, wv_tensor, bq_tensor, bk_tensor, bv_tensor, ln1_b
-                )
+                # TODO this is causing slight divergence
+                # bq_tensor, bk_tensor, bv_tensor = ProcessWeights.fold_layer_norm_biases(
+                #     wq_tensor, wk_tensor, wv_tensor, bq_tensor, bk_tensor, bv_tensor, ln1_b
+                # )
                 del state_dict[keys['ln1_b']]
 
-            wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
-                wq_tensor, wk_tensor, wv_tensor, ln1_w
-            )
+            # TODO this is causing slight divergence
+            # wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
+            #     wq_tensor, wk_tensor, wv_tensor, ln1_w
+            # )
             del state_dict[keys['ln1_w']]
 
         # Center the weights if requested
@@ -318,10 +320,11 @@ class ProcessWeights:
             adapter, cfg, layer
         )
 
-        # Fold ln2 into MLP
-        ProcessWeights._fold_mlp_layer_norm(
-            state_dict, cfg, layer, fold_biases, center_weights, adapter
-        )
+        # # Fold ln2 into MLP
+        # TODO this is causing slight divergence
+        # ProcessWeights._fold_mlp_layer_norm(
+        #     state_dict, cfg, layer, fold_biases, center_weights, adapter
+        # )
 
     @staticmethod
     def _fold_mlp_layer_norm(
@@ -659,6 +662,7 @@ class ProcessWeights:
             )
 
         # Fold final RMS bias into unembedding (separate from regular unembed folding)
+        # TODO this is causing slight divergence
         # ProcessWeights._fold_final_rms_bias(
         #     state_dict, cfg, fold_biases, adapter
         # )
