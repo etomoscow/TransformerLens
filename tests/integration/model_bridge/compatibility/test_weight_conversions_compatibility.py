@@ -10,10 +10,9 @@ between the two model implementations.
 
 The test:
 1. Instantiates both HookedTransformer and TransformerBridge models
-2. Tests conversion in both directions (TL->HF and HF->TL)
+2. Tests conversion in both directions (TL->HF and HF->TL) and bidirectional conversion (TL->HF->TL)
 3. Compares all weights and biases between the two models
-4. Verifies that the conversion maintains mathematical equivalence
-5. Tests multiple model architectures
+4. Tests multiple model architectures
 """
 
 from typing import Tuple
@@ -49,25 +48,30 @@ class TestWeightConversionCompatibility:
         return model
 
     @pytest.fixture(scope="class")
+    def device(self):
+        """Device to use for testing."""
+        return "cpu"
+
+    @pytest.fixture(scope="class")
     def tolerance(self):
         """Numerical tolerance for weight comparisons."""
         return 1e-6
 
     @pytest.fixture(scope="class")
-    def hooked_transformer(self, model_name):
+    def hooked_transformer(self, model_name, device):
         """Load HookedTransformer without processing."""
         print(f"Loading HookedTransformer without processing for {model_name}...")
         try:
-            return HookedTransformer.from_pretrained_no_processing(model_name)
+            return HookedTransformer.from_pretrained_no_processing(model_name, device=device)
         except Exception as e:
             pytest.skip(f"Failed to load HookedTransformer for {model_name}: {e}")
 
     @pytest.fixture(scope="class")
-    def transformer_bridge(self, model_name):
+    def transformer_bridge(self, model_name, device):
         """Load TransformerBridge without processing."""
         print(f"Loading TransformerBridge without processing for {model_name}...")
         try:
-            bridge = TransformerBridge.boot_transformers(model_name)
+            bridge = TransformerBridge.boot_transformers(model_name, device=device)
             bridge.enable_compatibility_mode(no_processing=True)
             return bridge
         except Exception as e:
@@ -113,34 +117,20 @@ class TestWeightConversionCompatibility:
         hooked_tensors = hooked_transformer.state_dict()
         bridge_tensors = transformer_bridge.state_dict()
 
-        hooked_tensor_names = hooked_tensors.keys()
-        bridge_tensor_names = bridge_tensors.keys()
+        hooked_tensor_names = set(hooked_tensors.keys())
+        bridge_tensor_names = set(bridge_tensors.keys())
 
         print(f"HookedTransformer has {len(hooked_tensor_names)} parameters")
         print(f"TransformerBridge has {len(bridge_tensor_names)} parameters")
 
-        # Find common parameters
-        common_tensor_names = hooked_tensor_names.intersection(bridge_tensor_names)
-        hooked_only = hooked_tensor_names - bridge_tensor_names
-        bridge_only = bridge_tensor_names - hooked_tensor_names
-
-        print(f"Common parameters: {len(common_tensor_names)}")
-        print(f"HookedTransformer only: {len(hooked_only)}")
-        print(f"TransformerBridge only: {len(bridge_only)}")
-
-        # Report any parameters that exist in only one model
-        if hooked_only:
-            print(f"Parameters only in HookedTransformer: {sorted(hooked_only)}")
-        if bridge_only:
-            print(f"Parameters only in TransformerBridge: {sorted(bridge_only)}")
-
         # Compare all common parameters
         mismatched_params = []
-        total_params = len(common_tensor_names)
+        total_params = len(hooked_tensor_names)
         matched_params = 0
 
-        for key in sorted(common_tensor_names):
+        for key in sorted(hooked_tensor_names):
             hooked_tensor = hooked_tensors[key]
+
             # Convert bridge tensor from HF format to TL format
             try:
                 bridge_tensor = ProcessWeights.convert_tensor_to_tl_format(
@@ -195,22 +185,19 @@ class TestWeightConversionCompatibility:
         hooked_tensors = hooked_transformer.state_dict()
         bridge_tensors = transformer_bridge.state_dict()
 
-        hooked_tensor_names = hooked_tensors.keys()
-        bridge_tensor_names = bridge_tensors.keys()
+        hooked_tensor_names = set(hooked_tensors.keys())
+        bridge_tensor_names = set(bridge_tensors.keys())
 
-        # Find common parameters
-        common_tensor_names = hooked_tensor_names.intersection(bridge_tensor_names)
-
-        print(f"Testing TL->HF conversion for {len(common_tensor_names)} common parameters")
+        print(f"Testing TL->HF conversion for {len(hooked_tensor_names)} parameters")
 
         # Compare all common parameters
         mismatched_params = []
-        total_params = len(common_tensor_names)
+        total_params = len(hooked_tensor_names)
         matched_params = 0
 
-        for key in sorted(common_tensor_names):
+        for key in sorted(hooked_tensor_names):
             hooked_tensor = hooked_tensors[key]
-            bridge_tensor = bridge_tensors[key]
+            bridge_tensor = getattr(transformer_bridge, key)
 
             # Convert hooked tensor from TL format to HF format
             try:
@@ -266,20 +253,17 @@ class TestWeightConversionCompatibility:
         hooked_tensors = hooked_transformer.state_dict()
         bridge_tensors = transformer_bridge.state_dict()
 
-        hooked_tensor_names = hooked_tensors.keys()
-        bridge_tensor_names = bridge_tensors.keys()
+        hooked_tensor_names = set(hooked_tensors.keys())
+        bridge_tensor_names = set(bridge_tensors.keys())
 
-        # Find common parameters
-        common_tensor_names = hooked_tensor_names.intersection(bridge_tensor_names)
-
-        print(f"Testing bidirectional conversion for {len(common_tensor_names)} common parameters")
+        print(f"Testing bidirectional conversion for {len(hooked_tensor_names)} parameters")
 
         # Test bidirectional conversion
         mismatched_params = []
-        total_params = len(common_tensor_names)
+        total_params = len(hooked_tensor_names)
         matched_params = 0
 
-        for key in sorted(common_tensor_names):
+        for key in sorted(hooked_tensor_names):
             original_tensor = hooked_tensors[key]
 
             try:
