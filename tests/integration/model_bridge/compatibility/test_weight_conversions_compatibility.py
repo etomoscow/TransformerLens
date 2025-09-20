@@ -28,9 +28,9 @@ from transformer_lens.weight_processing import ProcessWeights
 # Test models - using smaller models for faster testing
 TEST_MODELS = [
     "gpt2",  # GPT-2 architecture
-    "opt-125m",  # OPT architecture
-    "gpt-neo-125M",  # GPT-Neo architecture
-    "pythia-70m",  # Pythia architecture
+    "google/gemma-2-2b-it",  # Gemma-2 architecture
+    "EleutherAI/gpt-neo-125M",  # GPT-Neo architecture
+    "EleutherAI/pythia-70m",  # Pythia architecture
 ]
 
 # Skip models that might not be available in all environments
