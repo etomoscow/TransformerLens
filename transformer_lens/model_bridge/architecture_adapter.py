@@ -183,6 +183,110 @@ class ArchitectureAdapter:
                     f"Component {subcomponent_name} not found in {parts[0]} components"
                 )
 
+    def get_generalized_component(self, path: TransformerLensPath) -> GeneralizedComponent:
+        """Get the generalized component (bridge component) for a given TransformerLens path.
+
+        Args:
+            path: The TransformerLens path to get the component for
+
+        Returns:
+            The generalized component that handles this path
+
+        Raises:
+            ValueError: If component_mapping is not set or if the component is not found
+
+        Examples:
+            Get the embedding bridge component:
+
+            >>> # adapter.get_generalized_component("embed")
+            >>> # <EmbeddingBridge>
+
+            Get the attention bridge component:
+
+            >>> # adapter.get_generalized_component("blocks.0.attn")
+            >>> # <AttentionBridge>
+        """
+        if self.component_mapping is None:
+            raise ValueError(
+                "component_mapping must be set before calling get_generalized_component"
+            )
+
+        # Strip parameter suffixes to get the component path
+        component_path, _ = self._preprocess_parameter_path(path)
+        parts = component_path.split(".")
+        if not parts:
+            raise ValueError("Empty path")
+
+        # Get the top-level component from the mapping
+        if parts[0] not in self.component_mapping:
+            raise ValueError(f"Component {parts[0]} not found in component mapping")
+
+        bridge_component = self.component_mapping[parts[0]]
+
+        if len(parts) == 1:
+            # Simple case: just return the top-level component
+            return bridge_component
+
+        # For nested paths, navigate through the component hierarchy
+        current_component = bridge_component
+        for i in range(1, len(parts)):
+            part = parts[i]
+
+            # Handle list item indexing (like blocks.0)
+            if part.isdigit():
+                # For list items, we return the bridge component itself
+                # since the indexing is handled at the model level
+                continue
+
+            # Navigate to subcomponent
+            if hasattr(current_component, "submodules") and part in current_component.submodules:
+                current_component = current_component.submodules[part]
+            else:
+                # Check if this is an attention parameter (q, k, v, o) that should map to the attention component
+                # This handles cases like "blocks.0.attn.W_Q" -> "blocks.0.attn.q" -> return attention component
+                if (
+                    hasattr(current_component, "__class__")
+                    and "AttentionBridge" in current_component.__class__.__name__
+                    and part in ["q", "k", "v", "o"]
+                ):
+                    # Check if this is a JointQKVAttentionBridge (like GPT-2) or regular AttentionBridge (like Gemma3)
+                    if "JointQKV" in current_component.__class__.__name__:
+                        # For joint QKV attention, return the attention component itself
+                        # since the individual q, k, v, o are handled as attributes, not submodules
+                        continue
+                    else:
+                        # For separate Q, K, V attention (like Gemma3), navigate to the subcomponent
+                        if (
+                            hasattr(current_component, "submodules")
+                            and part in current_component.submodules
+                        ):
+                            current_component = current_component.submodules[part]
+                            continue
+                # Check if this is an MLP parameter (in, out, gate) that should map to the MLP component
+                # This handles cases like "blocks.0.mlp.W_in" -> "blocks.0.mlp.in" -> return MLP component
+                elif (
+                    hasattr(current_component, "__class__")
+                    and "MLPBridge" in current_component.__class__.__name__
+                    and part in ["in", "out", "gate"]
+                ):
+                    # Check if this MLP has separate subcomponents (like Gemma3) or property aliases (like GPT-2)
+                    if (
+                        hasattr(current_component, "submodules")
+                        and part in current_component.submodules
+                    ):
+                        # For separate MLP components (like Gemma3), navigate to the subcomponent
+                        current_component = current_component.submodules[part]
+                        continue
+                    else:
+                        # For property alias MLP (like GPT-2), return the MLP component itself
+                        continue
+                else:
+                    raise ValueError(
+                        f"Component {part} not found in {'.'.join(parts[:i])} components"
+                    )
+
+        return current_component
+
     def get_component(self, model: RemoteModel, path: TransformerLensPath) -> RemoteComponent:
         """Get a component from the model using the component_mapping.
 

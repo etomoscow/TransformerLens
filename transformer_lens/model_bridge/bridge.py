@@ -99,7 +99,7 @@ class TransformerBridge(nn.Module):
         """
         super().__init__()
         # Set original_model directly in __dict__ to avoid any property issues
-        self.__dict__['original_model'] = model
+        self.__dict__["original_model"] = model
         self.adapter = adapter
         self.cfg = adapter.cfg
 
@@ -123,7 +123,7 @@ class TransformerBridge(nn.Module):
 
         # Set original components on the pre-created bridge components
         # Access original_model directly from __dict__ to avoid __getattr__ issues
-        original_model = self.__dict__['original_model']
+        original_model = self.__dict__["original_model"]
         set_original_components(self, self.adapter, original_model)
 
         # Initialize hook registry after components are set up
@@ -292,14 +292,14 @@ class TransformerBridge(nn.Module):
             # Check if this is a GeneralizedComponent with its own hook registry
             if hasattr(mod, "get_hooks") and callable(getattr(mod, "get_hooks")):
                 # Use the component's own hook registry
-                    component_hooks = mod.get_hooks()  # type: ignore
-                    if isinstance(component_hooks, dict):
-                        # Type cast to help mypy understand this is a dict of hooks
-                        hooks_dict = cast(Dict[str, HookPoint], component_hooks)  # type: ignore
-                        for hook_name, hook in hooks_dict.items():  # type: ignore
-                            full_name = f"{path}.{hook_name}" if path else hook_name
-                            hook.name = full_name
-                            self._hook_registry[full_name] = hook
+                component_hooks = mod.get_hooks()  # type: ignore
+                if isinstance(component_hooks, dict):
+                    # Type cast to help mypy understand this is a dict of hooks
+                    hooks_dict = cast(Dict[str, HookPoint], component_hooks)  # type: ignore
+                    for hook_name, hook in hooks_dict.items():  # type: ignore
+                        full_name = f"{path}.{hook_name}" if path else hook_name
+                        hook.name = full_name
+                        self._hook_registry[full_name] = hook
 
             # Always scan attributes for additional hooks and submodules
             for attr_name in dir(mod):
@@ -307,10 +307,25 @@ class TransformerBridge(nn.Module):
                     continue
                 if attr_name == "original_component" or attr_name == "original_model":
                     continue
-                
+
                 # Skip properties that might not be ready during initialization
-                if attr_name in ["OV", "QK", "W_V", "W_O", "W_Q", "W_K", "W_in", "W_gate", "W_out", 
-                                "b_V", "b_O", "b_Q", "b_K", "b_in", "b_out"]:
+                if attr_name in [
+                    "OV",
+                    "QK",
+                    "W_V",
+                    "W_O",
+                    "W_Q",
+                    "W_K",
+                    "W_in",
+                    "W_gate",
+                    "W_out",
+                    "b_V",
+                    "b_O",
+                    "b_Q",
+                    "b_K",
+                    "b_in",
+                    "b_out",
+                ]:
                     continue
 
                 try:
@@ -484,16 +499,16 @@ class TransformerBridge(nn.Module):
                 return resolved_hook
 
         # Try to get from original_model if it exists
-        if 'original_model' in self.__dict__ and self.__dict__['original_model'] is not None:
+        if "original_model" in self.__dict__ and self.__dict__["original_model"] is not None:
             try:
                 name_split = name.split(".")
                 if len(name_split) > 1:
-                    current = getattr(self.__dict__['original_model'], name_split[0])
+                    current = getattr(self.__dict__["original_model"], name_split[0])
                     for part in name_split[1:]:
                         current = getattr(current, part)
                     return current
                 else:
-                    return getattr(self.__dict__['original_model'], name)
+                    return getattr(self.__dict__["original_model"], name)
             except AttributeError:
                 pass
 
@@ -664,13 +679,13 @@ class TransformerBridge(nn.Module):
         """Extract weights from the original HuggingFace model."""
         # Use the bridge's clean state_dict method which automatically filters out _original_component
         hf_state_dict = self.state_dict()
-        
+
         # Remove separate Q, K, V weights if combined QKV weights exist
         # This prevents the adapter from processing the same combined weight multiple times
         for layer_idx in range(self.cfg.n_layers):
             combined_qkv_key = f"transformer.h.{layer_idx}.attn.c_attn.weight"
             combined_qkv_bias_key = f"transformer.h.{layer_idx}.attn.c_attn.bias"
-            
+
             if combined_qkv_key in hf_state_dict:
                 # Remove separate Q, K, V weights since we have combined QKV
                 separate_keys_to_remove = [
@@ -681,14 +696,12 @@ class TransformerBridge(nn.Module):
                     f"transformer.h.{layer_idx}.attn.v.weight",
                     f"transformer.h.{layer_idx}.attn.v.bias",
                 ]
-                
+
                 for key_to_remove in separate_keys_to_remove:
                     if key_to_remove in hf_state_dict:
                         del hf_state_dict[key_to_remove]
-        
+
         return hf_state_dict
-
-
 
     def _add_identity_layer_norm_params(self, processed_hf_state_dict):
         """Add identity LayerNorm parameters after folding.
@@ -719,36 +732,34 @@ class TransformerBridge(nn.Module):
 
     def _replace_layer_norm_with_identity(self, model):
         """Replace LayerNorm components with LayerNormPre-like operations to maintain mathematical equivalence.
-        
+
         After folding LayerNorm into other layers, we need to replace the LayerNorm components
         with operations that only apply normalization (centering and scaling) without learnable parameters.
         This is equivalent to what HookedTransformer does when it replaces LayerNorm with LayerNormPre components.
         """
         import torch.nn as nn
-        
+
         class LayerNormPre(nn.Module):
             """LayerNormPre - the 'center and normalise' part of LayerNorm without learnable parameters."""
+
             def __init__(self, eps=1e-5):
                 super().__init__()
                 self.eps = eps
-            
+
             def forward(self, x):
                 # Apply centering and normalization without learnable parameters
                 x = x - x.mean(-1, keepdim=True)  # Center
                 scale = (x.pow(2).mean(-1, keepdim=True) + self.eps).sqrt()  # Calculate scale
                 return x / scale  # Normalize
-        
+
         # Replace LayerNorm components in each layer
         for layer_idx in range(self.cfg.n_layers):
             # Replace ln_1 and ln_2 with LayerNormPre
             model.transformer.h[layer_idx].ln_1 = LayerNormPre(eps=self.cfg.eps)
             model.transformer.h[layer_idx].ln_2 = LayerNormPre(eps=self.cfg.eps)
-        
+
         # Replace final LayerNorm with LayerNormPre
         model.transformer.ln_f = LayerNormPre(eps=self.cfg.eps)
-
-
-
 
     def _load_processed_weights(self, processed_state_dict):
         """Load processed weights back into the TransformerBridge.
@@ -2026,23 +2037,23 @@ class TransformerBridge(nn.Module):
         """
         self.cfg.use_split_qkv_input = use_split_qkv_input
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
         """Get state dict with _original_component references filtered out.
-        
+
         This method provides a clean state dict without the internal _original_component
         references that are used internally by the bridge architecture.
-        
+
         Args:
             destination: Optional dict to store state dict in
             prefix: Optional prefix to add to all keys
             keep_vars: Whether to keep variables as Variables instead of tensors
-            
+
         Returns:
             Dict containing the state dict with clean parameter names
         """
         # Get the raw state dict from the original model
         raw_state_dict = self.original_model.state_dict(destination, prefix, keep_vars)
-        
+
         # Filter out _original_component references
         clean_state_dict = {}
         for key, value in raw_state_dict.items():
@@ -2050,11 +2061,11 @@ class TransformerBridge(nn.Module):
             # This allows submodules like "attn._original_component.OV.weight" to be included
             if key == "_original_component" or key.startswith("_original_component."):
                 continue
-            
+
             # Remove any ._original_component patterns from the key
             clean_key = key.replace("._original_component", "")
             clean_state_dict[clean_key] = value
-            
+
         return clean_state_dict
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
@@ -2070,7 +2081,7 @@ class TransformerBridge(nn.Module):
         """
         # Get the current state dict to understand the mapping
         current_state_dict = self.original_model.state_dict()
-        
+
         # Create mappings for both directions
         clean_to_actual = {}
         actual_to_clean = {}
@@ -2081,7 +2092,7 @@ class TransformerBridge(nn.Module):
                 clean_key = actual_key.replace("._original_component", "")
                 clean_to_actual[clean_key] = actual_key
                 actual_to_clean[actual_key] = clean_key
-        
+
         # Map the input state dict keys to the actual keys
         mapped_state_dict = {}
         for input_key, value in state_dict.items():
@@ -2096,8 +2107,7 @@ class TransformerBridge(nn.Module):
             else:
                 # No mapping found - use as-is (for backward compatibility)
                 mapped_state_dict[input_key] = value
-        
-        
+
         # Forward the load_state_dict call to the original model with mapped keys
         return self.original_model.load_state_dict(mapped_state_dict, strict=strict, assign=assign)
 

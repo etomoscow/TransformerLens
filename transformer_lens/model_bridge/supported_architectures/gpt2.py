@@ -5,6 +5,7 @@ from typing import Any
 import torch
 
 from transformer_lens.conversion_utils.conversion_steps import (
+    BaseHookConversion,
     HookConversionSet,
     RearrangeHookConversion,
 )
@@ -20,6 +21,94 @@ from transformer_lens.model_bridge.generalized_components import (
 )
 
 
+class QKVSplitRearrangeConversion(BaseHookConversion):
+    """Custom conversion that splits QKV tensor and then rearranges."""
+
+    def __init__(self, qkv_index: int, rearrange_pattern: str, **axes_lengths):
+        """Initialize the conversion.
+
+        Args:
+            qkv_index: Index of Q (0), K (1), or V (2) in the QKV tensor
+            rearrange_pattern: Einops pattern for rearrangement
+            **axes_lengths: Additional axes lengths for einops
+        """
+        super().__init__()
+        self.qkv_index = qkv_index
+        self.rearrange_pattern = rearrange_pattern
+        self.axes_lengths = axes_lengths
+
+    def handle_conversion(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
+        """Split QKV tensor and rearrange the selected part."""
+        # Determine the split dimension based on tensor shape
+        if len(input_value.shape) == 2:
+            # Weight tensor: [d_model, 3*d_model] -> split along dim=1
+            split_dim = 1
+        elif len(input_value.shape) == 1:
+            # Bias tensor: [3*n_heads*d_head] -> split along dim=0
+            split_dim = 0
+        else:
+            raise ValueError(f"Unexpected tensor shape: {input_value.shape}")
+
+        # Split the QKV tensor
+        qkv_parts = torch.chunk(input_value, 3, dim=split_dim)
+        selected_part = qkv_parts[self.qkv_index]
+
+        # Apply rearrangement
+        import einops
+
+        return einops.rearrange(selected_part, self.rearrange_pattern, **self.axes_lengths)
+
+    def revert(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
+        """Revert the conversion (not fully implemented for QKV case)."""
+        # This is complex for QKV case since we need to reconstruct the full tensor
+        # For now, just return the input
+        return input_value
+
+    def __repr__(self):
+        return f'QKVSplitRearrangeConversion(qkv_index={self.qkv_index}, pattern="{self.rearrange_pattern}")'
+
+
+class QKVBiasConversion(BaseHookConversion):
+    """Custom conversion for QKV biases that matches the original GPT-2 logic."""
+
+    def __init__(self, qkv_index: int, n_heads: int, d_head: int):
+        """Initialize the conversion.
+
+        Args:
+            qkv_index: Index of Q (0), K (1), or V (2) in the QKV tensor
+            n_heads: Number of attention heads
+            d_head: Dimension of each head
+        """
+        super().__init__()
+        self.qkv_index = qkv_index
+        self.n_heads = n_heads
+        self.d_head = d_head
+
+    def handle_conversion(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
+        """Convert QKV bias following the original GPT-2 logic."""
+        import einops
+
+        # Original logic: rearrange the entire bias tensor first, then split by QKV
+        qkv_bias = einops.rearrange(
+            input_value,
+            "(qkv index head)->qkv index head",
+            qkv=3,
+            index=self.n_heads,
+            head=self.d_head,
+        )
+        # Return the selected QKV part
+        return qkv_bias[self.qkv_index]
+
+    def revert(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
+        """Revert the conversion (not fully implemented for QKV case)."""
+        # This is complex for QKV case since we need to reconstruct the full tensor
+        # For now, just return the input
+        return input_value
+
+    def __repr__(self):
+        return f"QKVBiasConversion(qkv_index={self.qkv_index}, n_heads={self.n_heads}, d_head={self.d_head})"
+
+
 class GPT2ArchitectureAdapter(ArchitectureAdapter):
     """Architecture adapter for GPT2 models."""
 
@@ -31,15 +120,16 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
         self.default_cfg = {
             "default_prepend_bos": True,  # Default for GPT-2 style models
         }
-        
+
         # GPT-2 uses combined QKV weights in HuggingFace format
         self.uses_combined_qkv = True
-        
+
         # Set config variable to indicate that attention weights are split (use TransformerLens format processing)
         self.cfg.split_attention_weights = True
 
         self.conversion_rules = HookConversionSet(
             {
+                # Original parameter names (for compatibility)
                 "pos_embed.pos": "transformer.wpe.weight",
                 "embed.e": "transformer.wte.weight",
                 "blocks.{i}.ln1.weight": "transformer.h.{i}.ln_1.weight",
@@ -95,6 +185,75 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                     RearrangeHookConversion("d_model d_vocab -> d_vocab d_model"),
                 ),
                 "unembed.bias": "lm_head.bias",
+                # TransformerLens parameter names (for weight processing functions)
+                "blocks.{i}.attn.W_Q": (
+                    "transformer.h.{i}.attn.c_attn.weight",
+                    QKVSplitRearrangeConversion(
+                        qkv_index=0,  # Q is the first part
+                        rearrange_pattern="m (i h) -> i m h",
+                        i=self.cfg.n_heads,
+                    ),
+                ),
+                "blocks.{i}.attn.W_K": (
+                    "transformer.h.{i}.attn.c_attn.weight",
+                    QKVSplitRearrangeConversion(
+                        qkv_index=1,  # K is the second part
+                        rearrange_pattern="m (i h) -> i m h",
+                        i=self.cfg.n_heads,
+                    ),
+                ),
+                "blocks.{i}.attn.W_V": (
+                    "transformer.h.{i}.attn.c_attn.weight",
+                    QKVSplitRearrangeConversion(
+                        qkv_index=2,  # V is the third part
+                        rearrange_pattern="m (i h) -> i m h",
+                        i=self.cfg.n_heads,
+                    ),
+                ),
+                "blocks.{i}.attn.W_O": (
+                    "transformer.h.{i}.attn.c_proj.weight",
+                    RearrangeHookConversion("(i h) m -> i h m", i=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.b_Q": (
+                    "transformer.h.{i}.attn.c_attn.bias",
+                    QKVBiasConversion(
+                        qkv_index=0,  # Q bias is the first part
+                        n_heads=self.cfg.n_heads,
+                        d_head=self.cfg.d_head,
+                    ),
+                ),
+                "blocks.{i}.attn.b_K": (
+                    "transformer.h.{i}.attn.c_attn.bias",
+                    QKVBiasConversion(
+                        qkv_index=1,  # K bias is the second part
+                        n_heads=self.cfg.n_heads,
+                        d_head=self.cfg.d_head,
+                    ),
+                ),
+                "blocks.{i}.attn.b_V": (
+                    "transformer.h.{i}.attn.c_attn.bias",
+                    QKVBiasConversion(
+                        qkv_index=2,  # V bias is the third part
+                        n_heads=self.cfg.n_heads,
+                        d_head=self.cfg.d_head,
+                    ),
+                ),
+                "blocks.{i}.attn.b_O": "transformer.h.{i}.attn.c_proj.bias",
+                "blocks.{i}.ln1.w": "transformer.h.{i}.ln_1.weight",
+                "blocks.{i}.ln1.b": "transformer.h.{i}.ln_1.bias",
+                "blocks.{i}.ln2.w": "transformer.h.{i}.ln_2.weight",
+                "blocks.{i}.ln2.b": "transformer.h.{i}.ln_2.bias",
+                "blocks.{i}.mlp.W_in": "transformer.h.{i}.mlp.c_fc.weight",
+                "blocks.{i}.mlp.W_out": "transformer.h.{i}.mlp.c_proj.weight",
+                "blocks.{i}.mlp.b_in": "transformer.h.{i}.mlp.c_fc.bias",
+                "blocks.{i}.mlp.b_out": "transformer.h.{i}.mlp.c_proj.bias",
+                "ln_final.w": "transformer.ln_f.weight",
+                "ln_final.b": "transformer.ln_f.bias",
+                "unembed.W_U": (
+                    "lm_head.weight",
+                    RearrangeHookConversion("d_model d_vocab -> d_vocab d_model"),
+                ),
+                "unembed.b_U": "lm_head.bias",
             }
         )
 

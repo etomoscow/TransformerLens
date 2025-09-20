@@ -10,6 +10,15 @@ from tests.mocks.architecture_adapter import (
 )
 from tests.mocks.models import MockGemma3Model
 from transformer_lens.config import TransformerBridgeConfig
+from transformer_lens.model_bridge.generalized_components import (
+    AttentionBridge,
+    BlockBridge,
+    EmbeddingBridge,
+    LinearBridge,
+    MLPBridge,
+    NormalizationBridge,
+    UnembeddingBridge,
+)
 from transformer_lens.model_bridge.supported_architectures.gemma3 import (
     Gemma3ArchitectureAdapter,
 )
@@ -436,3 +445,227 @@ def test_translate_weight_processing_solu_paths(adapter: Gemma3ArchitectureAdapt
             adapter.translate_transformer_lens_path(f"blocks.{layer}.mlp.ln.b")
             == f"model.layers.{layer}.mlp.ln.bias"
         )
+
+
+def test_get_generalized_component_top_level(adapter: Gemma3ArchitectureAdapter) -> None:
+    """Test getting top-level components."""
+    # Test top-level components
+    embed_component = adapter.get_generalized_component("embed")
+    assert isinstance(embed_component, EmbeddingBridge)
+    assert embed_component.name == "model.embed_tokens"
+
+    blocks_component = adapter.get_generalized_component("blocks")
+    assert isinstance(blocks_component, BlockBridge)
+    assert blocks_component.name == "model.layers"
+
+    ln_final_component = adapter.get_generalized_component("ln_final")
+    assert isinstance(ln_final_component, NormalizationBridge)
+    assert ln_final_component.name == "model.norm"
+
+    unembed_component = adapter.get_generalized_component("unembed")
+    assert isinstance(unembed_component, UnembeddingBridge)
+    assert unembed_component.name == "lm_head"
+
+
+def test_get_generalized_component_with_parameters(adapter: Gemma3ArchitectureAdapter) -> None:
+    """Test getting components with parameter suffixes."""
+    # Test that parameter suffixes are stripped correctly
+    embed_component = adapter.get_generalized_component("embed.W_E")
+    assert isinstance(embed_component, EmbeddingBridge)
+    assert embed_component.name == "model.embed_tokens"
+
+    embed_component = adapter.get_generalized_component("embed.b_E")
+    assert isinstance(embed_component, EmbeddingBridge)
+    assert embed_component.name == "model.embed_tokens"
+
+    ln_final_component = adapter.get_generalized_component("ln_final.w")
+    assert isinstance(ln_final_component, NormalizationBridge)
+    assert ln_final_component.name == "model.norm"
+
+    ln_final_component = adapter.get_generalized_component("ln_final.b")
+    assert isinstance(ln_final_component, NormalizationBridge)
+    assert ln_final_component.name == "model.norm"
+
+
+def test_get_generalized_component_nested_with_indexing(adapter: Gemma3ArchitectureAdapter) -> None:
+    """Test getting nested components with layer indexing."""
+    # Test nested components with layer indexing
+    # Note: For list items, we return the bridge component itself
+    # since indexing is handled at the model level
+    blocks_component = adapter.get_generalized_component("blocks.0")
+    assert isinstance(blocks_component, BlockBridge)
+    assert blocks_component.name == "model.layers"
+
+    # Test deeper nesting
+    ln1_component = adapter.get_generalized_component("blocks.0.ln1")
+    assert isinstance(ln1_component, NormalizationBridge)
+    assert ln1_component.name == "input_layernorm"
+
+    ln2_component = adapter.get_generalized_component("blocks.0.ln2")
+    assert isinstance(ln2_component, NormalizationBridge)
+    assert ln2_component.name == "pre_feedforward_layernorm"
+
+    attn_component = adapter.get_generalized_component("blocks.0.attn")
+    assert isinstance(attn_component, AttentionBridge)
+    assert attn_component.name == "self_attn"
+
+    mlp_component = adapter.get_generalized_component("blocks.0.mlp")
+    assert isinstance(mlp_component, MLPBridge)
+    assert mlp_component.name == "mlp"
+
+
+def test_get_generalized_component_nested_with_parameters(
+    adapter: Gemma3ArchitectureAdapter,
+) -> None:
+    """Test getting nested components with parameter suffixes."""
+    # Test nested components with parameter suffixes
+    ln1_component = adapter.get_generalized_component("blocks.0.ln1.w")
+    assert isinstance(ln1_component, NormalizationBridge)
+    assert ln1_component.name == "input_layernorm"
+
+    ln1_component = adapter.get_generalized_component("blocks.0.ln1.b")
+    assert isinstance(ln1_component, NormalizationBridge)
+    assert ln1_component.name == "input_layernorm"
+
+    # For attention parameters, the method should return the specific subcomponent
+    # since Gemma3 has separate Q, K, V components
+    q_component = adapter.get_generalized_component("blocks.0.attn.W_Q")
+    assert isinstance(q_component, LinearBridge)
+    assert q_component.name == "q_proj"
+
+    q_component = adapter.get_generalized_component("blocks.0.attn.b_Q")
+    assert isinstance(q_component, LinearBridge)
+    assert q_component.name == "q_proj"
+
+    # For MLP parameters, the method should return the specific subcomponent
+    # since Gemma3 has separate in, out, gate components
+    in_component = adapter.get_generalized_component("blocks.0.mlp.W_in")
+    assert isinstance(in_component, LinearBridge)
+    assert in_component.name == "up_proj"
+
+    in_component = adapter.get_generalized_component("blocks.0.mlp.b_in")
+    assert isinstance(in_component, LinearBridge)
+    assert in_component.name == "up_proj"
+
+
+def test_get_generalized_component_deeply_nested(adapter: Gemma3ArchitectureAdapter) -> None:
+    """Test getting deeply nested components."""
+    # Test deeply nested components
+    q_component = adapter.get_generalized_component("blocks.0.attn.q")
+    assert isinstance(q_component, LinearBridge)
+    assert q_component.name == "q_proj"
+
+    k_component = adapter.get_generalized_component("blocks.0.attn.k")
+    assert isinstance(k_component, LinearBridge)
+    assert k_component.name == "k_proj"
+
+    v_component = adapter.get_generalized_component("blocks.0.attn.v")
+    assert isinstance(v_component, LinearBridge)
+    assert v_component.name == "v_proj"
+
+    o_component = adapter.get_generalized_component("blocks.0.attn.o")
+    assert isinstance(o_component, LinearBridge)
+    assert o_component.name == "o_proj"
+
+    gate_component = adapter.get_generalized_component("blocks.0.mlp.gate")
+    assert isinstance(gate_component, LinearBridge)
+    assert gate_component.name == "gate_proj"
+
+    in_component = adapter.get_generalized_component("blocks.0.mlp.in")
+    assert isinstance(in_component, LinearBridge)
+    assert in_component.name == "up_proj"
+
+    out_component = adapter.get_generalized_component("blocks.0.mlp.out")
+    assert isinstance(out_component, LinearBridge)
+    assert out_component.name == "down_proj"
+
+
+def test_get_generalized_component_deeply_nested_with_parameters(
+    adapter: Gemma3ArchitectureAdapter,
+) -> None:
+    """Test getting deeply nested components with parameter suffixes."""
+    # Test deeply nested components with parameter suffixes
+    # Note: The parameter suffixes (.weight, .bias) are stripped by _preprocess_parameter_path
+    # so these should return the same components as without the suffixes
+    # However, the _preprocess_parameter_path method only handles TransformerLens-specific parameter names
+    # like W_Q, b_Q, etc., not generic PyTorch parameter names like .weight, .bias
+
+    # Test with TransformerLens parameter names (these should work)
+    q_component = adapter.get_generalized_component("blocks.0.attn.W_Q")
+    assert isinstance(q_component, LinearBridge)
+    assert q_component.name == "q_proj"
+
+    q_component = adapter.get_generalized_component("blocks.0.attn.b_Q")
+    assert isinstance(q_component, LinearBridge)
+    assert q_component.name == "q_proj"
+
+    gate_component = adapter.get_generalized_component("blocks.0.mlp.W_gate")
+    assert isinstance(gate_component, LinearBridge)
+    assert gate_component.name == "gate_proj"
+
+    in_component = adapter.get_generalized_component("blocks.0.mlp.W_in")
+    assert isinstance(in_component, LinearBridge)
+    assert in_component.name == "up_proj"
+
+
+def test_get_generalized_component_error_cases(adapter: Gemma3ArchitectureAdapter) -> None:
+    """Test error cases for get_generalized_component."""
+    # Test empty path - this will be processed by _preprocess_parameter_path and result in empty component mapping lookup
+    with pytest.raises(ValueError, match="Component  not found in component mapping"):
+        adapter.get_generalized_component("")
+
+    # Test non-existent top-level component
+    with pytest.raises(ValueError, match="Component nonexistent not found in component mapping"):
+        adapter.get_generalized_component("nonexistent")
+
+    # Test non-existent nested component
+    with pytest.raises(ValueError, match="Component nonexistent not found in blocks.0 components"):
+        adapter.get_generalized_component("blocks.0.nonexistent")
+
+    # Test non-existent deeply nested component
+    with pytest.raises(
+        ValueError, match="Component nonexistent not found in blocks.0.attn components"
+    ):
+        adapter.get_generalized_component("blocks.0.attn.nonexistent")
+
+
+def test_get_generalized_component_no_component_mapping() -> None:
+    """Test error when component_mapping is None."""
+    cfg = TransformerBridgeConfig(
+        d_model=128,
+        d_head=16,
+        n_layers=2,
+        n_ctx=1024,
+        n_heads=8,
+        d_vocab=1000,
+        d_mlp=512,
+        n_key_value_heads=8,
+        default_prepend_bos=True,
+        architecture="Gemma3ForCausalLM",
+    )
+    adapter = Gemma3ArchitectureAdapter(cfg)
+    adapter.component_mapping = None
+
+    with pytest.raises(
+        ValueError, match="component_mapping must be set before calling get_generalized_component"
+    ):
+        adapter.get_generalized_component("embed")
+
+
+def test_get_generalized_component_various_layer_indices(
+    adapter: Gemma3ArchitectureAdapter,
+) -> None:
+    """Test getting components for various layer indices."""
+    # Test different layer indices
+    for layer_idx in [0, 1]:
+        ln1_component = adapter.get_generalized_component(f"blocks.{layer_idx}.ln1")
+        assert isinstance(ln1_component, NormalizationBridge)
+        assert ln1_component.name == "input_layernorm"
+
+        attn_component = adapter.get_generalized_component(f"blocks.{layer_idx}.attn")
+        assert isinstance(attn_component, AttentionBridge)
+        assert attn_component.name == "self_attn"
+
+        mlp_component = adapter.get_generalized_component(f"blocks.{layer_idx}.mlp")
+        assert isinstance(mlp_component, MLPBridge)
+        assert mlp_component.name == "mlp"

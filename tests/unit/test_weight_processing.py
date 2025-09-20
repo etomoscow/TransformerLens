@@ -692,38 +692,40 @@ class TestProcessWeights:
                 self.linear1 = nn.Linear(4, 8)
                 self.linear2 = nn.Linear(8, 4)
                 self.embedding = nn.Embedding(10, 4)
-                
+
         model = SmallTestModel()
-        
+
         # Extract state dict using the new function
         extracted_dict = ProcessWeights.extract_state_dict(model)
-        
+
         # Check that we get the expected keys
         expected_keys = {
-            'linear1.weight', 'linear1.bias',
-            'linear2.weight', 'linear2.bias', 
-            'embedding.weight'
+            "linear1.weight",
+            "linear1.bias",
+            "linear2.weight",
+            "linear2.bias",
+            "embedding.weight",
         }
         assert set(extracted_dict.keys()) == expected_keys
-        
+
         # Check that no _original_component references are present
         for key in extracted_dict.keys():
-            assert '_original_component' not in key, f"Found _original_component in key: {key}"
-        
+            assert "_original_component" not in key, f"Found _original_component in key: {key}"
+
         # Check that tensor shapes are correct
-        assert extracted_dict['linear1.weight'].shape == (8, 4)
-        assert extracted_dict['linear1.bias'].shape == (8,)
-        assert extracted_dict['linear2.weight'].shape == (4, 8)
-        assert extracted_dict['linear2.bias'].shape == (4,)
-        assert extracted_dict['embedding.weight'].shape == (10, 4)
-        
+        assert extracted_dict["linear1.weight"].shape == (8, 4)
+        assert extracted_dict["linear1.bias"].shape == (8,)
+        assert extracted_dict["linear2.weight"].shape == (4, 8)
+        assert extracted_dict["linear2.bias"].shape == (4,)
+        assert extracted_dict["embedding.weight"].shape == (10, 4)
+
         # Check that tensors are cloned (not references to original model parameters)
         original_linear1_weight = model.linear1.weight.data
-        extracted_linear1_weight = extracted_dict['linear1.weight']
-        
+        extracted_linear1_weight = extracted_dict["linear1.weight"]
+
         # They should have the same values
         assert torch.equal(original_linear1_weight, extracted_linear1_weight)
-        
+
         # But they should be different objects (cloned)
         assert extracted_linear1_weight is not original_linear1_weight
 
@@ -737,30 +739,30 @@ class TestProcessWeights:
             def __init__(self):
                 super().__init__()
                 self.linear1 = nn.Linear(4, 8)
-                
+
             def state_dict(self):
                 # Simulate a bridge model state dict with _original_component suffixes
                 return {
-                    'linear1.weight._original_component': self.linear1.weight.data,
-                    'linear1.bias._original_component': self.linear1.bias.data,
+                    "linear1.weight._original_component": self.linear1.weight.data,
+                    "linear1.bias._original_component": self.linear1.bias.data,
                 }
-        
+
         model = MockBridgeModel()
-        
+
         # Extract state dict using the new function
         extracted_dict = ProcessWeights.extract_state_dict(model)
-        
+
         # Check that _original_component suffixes are removed
-        expected_keys = {'linear1.weight', 'linear1.bias'}
+        expected_keys = {"linear1.weight", "linear1.bias"}
         assert set(extracted_dict.keys()) == expected_keys
-        
+
         # Verify no _original_component references remain
         for key in extracted_dict.keys():
-            assert '_original_component' not in key, f"Found _original_component in key: {key}"
-        
+            assert "_original_component" not in key, f"Found _original_component in key: {key}"
+
         # Check that the values are correct
-        assert torch.equal(extracted_dict['linear1.weight'], model.linear1.weight.data)
-        assert torch.equal(extracted_dict['linear1.bias'], model.linear1.bias.data)
+        assert torch.equal(extracted_dict["linear1.weight"], model.linear1.weight.data)
+        assert torch.equal(extracted_dict["linear1.bias"], model.linear1.bias.data)
 
     def test_load_processed_weights_into_module(self):
         """Test loading processed weights into an nn.Module."""
@@ -773,75 +775,93 @@ class TestProcessWeights:
                 super().__init__()
                 self.linear1 = nn.Linear(3, 2)
                 self.linear2 = nn.Linear(2, 1)
-        
+
         model = SimpleModel()
-        
+
         # Create processed state dict (simulating processed weights)
         processed_state_dict = {
-            'linear1.weight': torch.randn(2, 3),
-            'linear1.bias': torch.randn(2),
-            'linear2.weight': torch.randn(1, 2),
-            'linear2.bias': torch.randn(1),
+            "linear1.weight": torch.randn(2, 3),
+            "linear1.bias": torch.randn(2),
+            "linear2.weight": torch.randn(1, 2),
+            "linear2.bias": torch.randn(1),
         }
-        
+
         # Store original weights for comparison
         original_linear1_weight = model.linear1.weight.data.clone()
         original_linear1_bias = model.linear1.bias.data.clone()
-        
+
         # Load processed weights
-        updated_model = ProcessWeights.load_processed_weights_into_module(processed_state_dict, model)
-        
+        updated_model = ProcessWeights.load_processed_weights_into_module(
+            processed_state_dict, model
+        )
+
         # Check that the model is the same object (returned reference)
         assert updated_model is model
-        
+
         # Check that weights were updated
-        assert torch.equal(model.linear1.weight.data, processed_state_dict['linear1.weight'])
-        assert torch.equal(model.linear1.bias.data, processed_state_dict['linear1.bias'])
-        assert torch.equal(model.linear2.weight.data, processed_state_dict['linear2.weight'])
-        assert torch.equal(model.linear2.bias.data, processed_state_dict['linear2.bias'])
-        
+        assert torch.equal(model.linear1.weight.data, processed_state_dict["linear1.weight"])
+        assert torch.equal(model.linear1.bias.data, processed_state_dict["linear1.bias"])
+        assert torch.equal(model.linear2.weight.data, processed_state_dict["linear2.weight"])
+        assert torch.equal(model.linear2.bias.data, processed_state_dict["linear2.bias"])
+
         # Check that weights are different from original
         assert not torch.equal(model.linear1.weight.data, original_linear1_weight)
         assert not torch.equal(model.linear1.bias.data, original_linear1_bias)
 
     def test_fold_layer_no_adapter_transformer_lens_format(self, basic_config):
         """Test _fold_layer function with no adapter (TransformerLens format).
-        
+
         This test locks in the current behavior of _fold_layer when no adapter is provided,
         ensuring that HookedTransformer models continue to work correctly.
         """
         cfg = basic_config
         cfg.n_layers = 1  # Test with single layer for simplicity
-        
+
         # Create a state dict with known values for deterministic testing
         state_dict = {}
-        
+
         # Layer 0 weights with known values
         ln1_w = torch.tensor([2.0, 3.0, 1.0, 0.5])  # d_model = 4
         ln1_b = torch.tensor([0.1, 0.2, 0.3, 0.4])
         ln2_w = torch.tensor([1.5, 2.5, 0.8, 1.2])
         ln2_b = torch.tensor([0.05, 0.15, 0.25, 0.35])
-        
+
         # Attention weights: [n_heads, d_model, d_head]
-        w_q = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]],  # head 0
-                           [[2.0, 3.0], [4.0, 5.0], [6.0, 7.0], [8.0, 9.0]]])  # head 1
-        w_k = torch.tensor([[[0.5, 1.0], [1.5, 2.0], [2.5, 3.0], [3.5, 4.0]],  # head 0
-                           [[1.0, 1.5], [2.0, 2.5], [3.0, 3.5], [4.0, 4.5]]])  # head 1
-        w_v = torch.tensor([[[0.8, 1.2], [1.6, 2.0], [2.4, 2.8], [3.2, 3.6]],  # head 0
-                           [[1.2, 1.6], [2.0, 2.4], [2.8, 3.2], [3.6, 4.0]]])  # head 1
-        
+        w_q = torch.tensor(
+            [
+                [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]],  # head 0
+                [[2.0, 3.0], [4.0, 5.0], [6.0, 7.0], [8.0, 9.0]],
+            ]
+        )  # head 1
+        w_k = torch.tensor(
+            [
+                [[0.5, 1.0], [1.5, 2.0], [2.5, 3.0], [3.5, 4.0]],  # head 0
+                [[1.0, 1.5], [2.0, 2.5], [3.0, 3.5], [4.0, 4.5]],
+            ]
+        )  # head 1
+        w_v = torch.tensor(
+            [
+                [[0.8, 1.2], [1.6, 2.0], [2.4, 2.8], [3.2, 3.6]],  # head 0
+                [[1.2, 1.6], [2.0, 2.4], [2.8, 3.2], [3.6, 4.0]],
+            ]
+        )  # head 1
+
         # Attention biases: [n_heads, d_head]
         b_q = torch.tensor([[0.1, 0.2], [0.3, 0.4]])
         b_k = torch.tensor([[0.05, 0.15], [0.25, 0.35]])
         b_v = torch.tensor([[0.08, 0.12], [0.16, 0.20]])
-        
+
         # MLP weights
-        w_in = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],   # d_model=4, d_mlp=8
-                            [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
-                            [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
-                            [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]])
+        w_in = torch.tensor(
+            [
+                [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],  # d_model=4, d_mlp=8
+                [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+                [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+                [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+            ]
+        )
         b_in = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
-        
+
         # Store in state dict
         state_dict["blocks.0.ln1.w"] = ln1_w
         state_dict["blocks.0.ln1.b"] = ln1_b
@@ -855,58 +875,70 @@ class TestProcessWeights:
         state_dict["blocks.0.attn.b_V"] = b_v
         state_dict["blocks.0.mlp.W_in"] = w_in
         state_dict["blocks.0.mlp.b_in"] = b_in
-        
+
         # Make a copy for comparison
         original_state_dict = {k: v.clone() for k, v in state_dict.items()}
-        
+
         # Test _fold_layer with no adapter (TransformerLens format)
         ProcessWeights._fold_layer(
-            state_dict, cfg, layer_idx=0, fold_biases=True, center_weights=True, adapter=None, gqa=""
+            state_dict,
+            cfg,
+            layer_idx=0,
+            fold_biases=True,
+            center_weights=True,
+            adapter=None,
+            gqa="",
         )
-        
+
         # Verify LayerNorm weights are removed
         assert "blocks.0.ln1.w" not in state_dict
         assert "blocks.0.ln1.b" not in state_dict
         assert "blocks.0.ln2.w" not in state_dict
         assert "blocks.0.ln2.b" not in state_dict
-        
+
         # Verify attention weights are modified (folded and centered)
         w_q_processed = state_dict["blocks.0.attn.W_Q"]
         w_k_processed = state_dict["blocks.0.attn.W_K"]
         w_v_processed = state_dict["blocks.0.attn.W_V"]
-        
+
         # Check that weights are folded (multiplied by ln1_w)
         expected_w_q_folded = w_q * ln1_w[None, :, None]
         expected_w_k_folded = w_k * ln1_w[None, :, None]
         expected_w_v_folded = w_v * ln1_w[None, :, None]
-        
+
         # Check that weights are centered (mean should be zero across d_model dimension)
-        w_q_mean = einops.reduce(w_q_processed, "head_index d_model d_head -> head_index 1 d_head", "mean")
-        w_k_mean = einops.reduce(w_k_processed, "head_index d_model d_head -> head_index 1 d_head", "mean")
-        w_v_mean = einops.reduce(w_v_processed, "head_index d_model d_head -> head_index 1 d_head", "mean")
-        
+        w_q_mean = einops.reduce(
+            w_q_processed, "head_index d_model d_head -> head_index 1 d_head", "mean"
+        )
+        w_k_mean = einops.reduce(
+            w_k_processed, "head_index d_model d_head -> head_index 1 d_head", "mean"
+        )
+        w_v_mean = einops.reduce(
+            w_v_processed, "head_index d_model d_head -> head_index 1 d_head", "mean"
+        )
+
         assert torch.allclose(w_q_mean, torch.zeros_like(w_q_mean), atol=1e-6)
         assert torch.allclose(w_k_mean, torch.zeros_like(w_k_mean), atol=1e-6)
         assert torch.allclose(w_v_mean, torch.zeros_like(w_v_mean), atol=1e-6)
-        
+
         # Verify attention biases are folded
         b_q_processed = state_dict["blocks.0.attn.b_Q"]
         b_k_processed = state_dict["blocks.0.attn.b_K"]
         b_v_processed = state_dict["blocks.0.attn.b_V"]
-        
+
         # Check that biases are folded (bias folding formula)
         expected_b_q_folded = b_q + (w_q * ln1_b[None, :, None]).sum(-2)
         expected_b_k_folded = b_k + (w_k * ln1_b[None, :, None]).sum(-2)
         expected_b_v_folded = b_v + (w_v * ln1_b[None, :, None]).sum(-2)
-        
+
         assert torch.allclose(b_q_processed, expected_b_q_folded, atol=1e-6)
         assert torch.allclose(b_k_processed, expected_b_k_folded, atol=1e-6)
         assert torch.allclose(b_v_processed, expected_b_v_folded, atol=1e-6)
-        
+
         # Verify MLP weights are folded
         w_in_processed = state_dict["blocks.0.mlp.W_in"]
         b_in_processed = state_dict["blocks.0.mlp.b_in"]
-        
+
         # Check that MLP weights are folded (multiplied by ln2_w) and then centered
         expected_w_in_folded = w_in * ln2_w[:, None]
         # After centering, the mean across d_model dimension should be zero
@@ -914,15 +946,15 @@ class TestProcessWeights:
             expected_w_in_folded, "d_model d_mlp -> 1 d_mlp", "mean"
         )
         assert torch.allclose(w_in_processed, expected_w_in_centered, atol=1e-6)
-        
+
         # Check that MLP biases are folded
         expected_b_in_folded = b_in + (w_in * ln2_b[:, None]).sum(-2)
         assert torch.allclose(b_in_processed, expected_b_in_folded, atol=1e-6)
-        
+
         # Verify MLP weights are centered
         w_in_mean = einops.reduce(w_in_processed, "d_model d_mlp -> 1 d_mlp", "mean")
         assert torch.allclose(w_in_mean, torch.zeros_like(w_in_mean), atol=1e-6)
-        
+
         # Verify original state dict is unchanged
         for k, v in original_state_dict.items():
             assert torch.equal(v, original_state_dict[k])
@@ -931,19 +963,19 @@ class TestProcessWeights:
         """Test _fold_layer function without weight centering to verify pure folding behavior."""
         cfg = basic_config
         cfg.n_layers = 1
-        
+
         # Create simple test case
         state_dict = {}
         ln1_w = torch.tensor([2.0, 3.0, 1.0, 0.5])
         ln1_b = torch.tensor([0.1, 0.2, 0.3, 0.4])
         w_q = torch.ones(2, 4, 2)  # n_heads=2, d_model=4, d_head=2
         b_q = torch.zeros(2, 2)
-        
+
         state_dict["blocks.0.ln1.w"] = ln1_w
         state_dict["blocks.0.ln1.b"] = ln1_b
         state_dict["blocks.0.attn.W_Q"] = w_q
         state_dict["blocks.0.attn.b_Q"] = b_q
-        
+
         # Add minimal required weights
         state_dict["blocks.0.ln2.w"] = torch.ones(4)
         state_dict["blocks.0.ln2.b"] = torch.zeros(4)
@@ -953,19 +985,25 @@ class TestProcessWeights:
         state_dict["blocks.0.attn.b_V"] = torch.zeros(2, 2)
         state_dict["blocks.0.mlp.W_in"] = torch.ones(4, 8)
         state_dict["blocks.0.mlp.b_in"] = torch.zeros(8)
-        
+
         # Test without centering
         ProcessWeights._fold_layer(
-            state_dict, cfg, layer_idx=0, fold_biases=True, center_weights=False, adapter=None, gqa=""
+            state_dict,
+            cfg,
+            layer_idx=0,
+            fold_biases=True,
+            center_weights=False,
+            adapter=None,
+            gqa="",
         )
-        
+
         # Check pure mathematical folding (no centering)
         expected_w_q = w_q * ln1_w[None, :, None]
         expected_b_q = b_q + (w_q * ln1_b[None, :, None]).sum(-2)
-        
+
         assert torch.allclose(state_dict["blocks.0.attn.W_Q"], expected_w_q, atol=1e-6)
         assert torch.allclose(state_dict["blocks.0.attn.b_Q"], expected_b_q, atol=1e-6)
-        
+
         # Verify LayerNorm weights are removed
         assert "blocks.0.ln1.w" not in state_dict
         assert "blocks.0.ln1.b" not in state_dict
@@ -976,19 +1014,19 @@ class TestProcessWeights:
         """Test _fold_layer function without bias folding."""
         cfg = basic_config
         cfg.n_layers = 1
-        
+
         # Create simple test case
         state_dict = {}
         ln1_w = torch.tensor([2.0, 3.0, 1.0, 0.5])
         ln1_b = torch.tensor([0.1, 0.2, 0.3, 0.4])
         w_q = torch.ones(2, 4, 2)
         b_q = torch.zeros(2, 2)
-        
+
         state_dict["blocks.0.ln1.w"] = ln1_w
         state_dict["blocks.0.ln1.b"] = ln1_b
         state_dict["blocks.0.attn.W_Q"] = w_q
         state_dict["blocks.0.attn.b_Q"] = b_q
-        
+
         # Add minimal required weights
         state_dict["blocks.0.ln2.w"] = torch.ones(4)
         state_dict["blocks.0.ln2.b"] = torch.zeros(4)
@@ -998,22 +1036,28 @@ class TestProcessWeights:
         state_dict["blocks.0.attn.b_V"] = torch.zeros(2, 2)
         state_dict["blocks.0.mlp.W_in"] = torch.ones(4, 8)
         state_dict["blocks.0.mlp.b_in"] = torch.zeros(8)
-        
+
         # Test without bias folding
         ProcessWeights._fold_layer(
-            state_dict, cfg, layer_idx=0, fold_biases=False, center_weights=True, adapter=None, gqa=""
+            state_dict,
+            cfg,
+            layer_idx=0,
+            fold_biases=False,
+            center_weights=True,
+            adapter=None,
+            gqa="",
         )
-        
+
         # Check that weights are folded but biases are not
         expected_w_q_folded = w_q * ln1_w[None, :, None]
         # After centering, the mean across d_model dimension should be zero
         expected_w_q_centered = expected_w_q_folded - einops.reduce(
             expected_w_q_folded, "head_index d_model d_head -> head_index 1 d_head", "mean"
         )
-        
+
         assert torch.allclose(state_dict["blocks.0.attn.W_Q"], expected_w_q_centered, atol=1e-6)
         assert torch.allclose(state_dict["blocks.0.attn.b_Q"], b_q, atol=1e-6)  # Bias unchanged
-        
+
         # Verify LayerNorm weights are removed
         assert "blocks.0.ln1.w" not in state_dict
         assert "blocks.0.ln1.b" in state_dict  # Should still be present when fold_biases=False
@@ -1022,13 +1066,13 @@ class TestProcessWeights:
 
     def test_fold_layer_with_adapter_huggingface_format(self, basic_config):
         """Test _fold_layer function with adapter (HuggingFace format).
-        
+
         This test locks in the current behavior of _fold_layer when an adapter is provided,
         ensuring that HuggingFace models are processed correctly with combined QKV weights.
         """
         cfg = basic_config
         cfg.n_layers = 1  # Test with single layer for simplicity
-        
+
         # Create a mock adapter that translates TransformerLens keys to HuggingFace keys
         class MockAdapter:
             def translate_transformer_lens_path(self, tl_key):
@@ -1052,12 +1096,12 @@ class TestProcessWeights:
                     return "transformer.h.0.mlp.c_fc.bias"
                 else:
                     return tl_key
-        
+
         adapter = MockAdapter()
-        
+
         # Create a state dict with HuggingFace format (combined QKV weights)
         state_dict = {}
-        
+
         # Layer 0 weights with known values (using correct dimensions from MockConfig)
         # MockConfig: n_heads=4, d_model=8, d_head=2, d_mlp=16
         ln1_w = torch.tensor([2.0, 3.0, 1.0, 0.5, 1.5, 2.5, 0.8, 1.2])  # d_model = 8
@@ -1068,7 +1112,7 @@ class TestProcessWeights:
         # Create combined QKV weight: [d_model, 3 * d_model] = [8, 24]
         # Q: [8, 8], K: [8, 8], V: [8, 8] -> combined: [8, 24]
         w_q = torch.randn(8, 8) * 0.1  # Q weights
-        w_k = torch.randn(8, 8) * 0.1  # K weights  
+        w_k = torch.randn(8, 8) * 0.1  # K weights
         w_v = torch.randn(8, 8) * 0.1  # V weights
 
         # Combine QKV weights: [d_model, 3 * d_model]
@@ -1085,7 +1129,7 @@ class TestProcessWeights:
         # MLP weights: d_model=8, d_mlp=16
         w_in = torch.randn(8, 16) * 0.1
         b_in = torch.randn(16) * 0.1
-        
+
         # Store in state dict with HuggingFace keys
         state_dict["transformer.h.0.ln_1.weight"] = ln1_w
         state_dict["transformer.h.0.ln_1.bias"] = ln1_b
@@ -1095,66 +1139,76 @@ class TestProcessWeights:
         state_dict["transformer.h.0.attn.c_attn.bias"] = qkv_bias
         state_dict["transformer.h.0.mlp.c_fc.weight"] = w_in
         state_dict["transformer.h.0.mlp.c_fc.bias"] = b_in
-        
+
         # Make a copy for comparison
         original_state_dict = {k: v.clone() for k, v in state_dict.items()}
-        
+
         # Test _fold_layer with adapter (HuggingFace format)
         ProcessWeights._fold_layer(
-            state_dict, cfg, layer_idx=0, fold_biases=True, center_weights=True, adapter=adapter, gqa=""
+            state_dict,
+            cfg,
+            layer_idx=0,
+            fold_biases=True,
+            center_weights=True,
+            adapter=adapter,
+            gqa="",
         )
-        
+
         # Verify LayerNorm weights are removed
         assert "transformer.h.0.ln_1.weight" not in state_dict
         assert "transformer.h.0.ln_1.bias" not in state_dict
         assert "transformer.h.0.ln_2.weight" not in state_dict
         assert "transformer.h.0.ln_2.bias" not in state_dict
-        
+
         # Verify combined QKV weight is modified
         qkv_weight_processed = state_dict["transformer.h.0.attn.c_attn.weight"]
         qkv_bias_processed = state_dict["transformer.h.0.attn.c_attn.bias"]
-        
+
         # Split the processed QKV weight back into Q, K, V
-        w_q_processed, w_k_processed, w_v_processed = torch.tensor_split(qkv_weight_processed, 3, dim=1)
-        
+        w_q_processed, w_k_processed, w_v_processed = torch.tensor_split(
+            qkv_weight_processed, 3, dim=1
+        )
+
         # Verify that the weights have been processed (they should be different from original)
         # The exact values depend on the complex conversion between formats, so we just verify
         # that processing occurred by checking that weights are different from original
         assert not torch.allclose(w_q_processed, w_q, atol=1e-6)
         assert not torch.allclose(w_k_processed, w_k, atol=1e-6)
         assert not torch.allclose(w_v_processed, w_v, atol=1e-6)
-        
+
         # Verify that the processed weights have the correct shape
         assert w_q_processed.shape == w_q.shape
         assert w_k_processed.shape == w_k.shape
         assert w_v_processed.shape == w_v.shape
-        
+
         # Verify combined QKV bias is modified
         # Split the processed QKV bias back into Q, K, V
-        b_q_processed, b_k_processed, b_v_processed = torch.tensor_split(qkv_bias_processed, 3, dim=0)
-        
+        b_q_processed, b_k_processed, b_v_processed = torch.tensor_split(
+            qkv_bias_processed, 3, dim=0
+        )
+
         # Verify that the biases have been processed (they should be different from original)
         assert not torch.allclose(b_q_processed, b_q, atol=1e-6)
         assert not torch.allclose(b_k_processed, b_k, atol=1e-6)
         assert not torch.allclose(b_v_processed, b_v, atol=1e-6)
-        
+
         # Verify that the processed biases have the correct shape
         assert b_q_processed.shape == b_q.shape
         assert b_k_processed.shape == b_k.shape
         assert b_v_processed.shape == b_v.shape
-        
+
         # Verify MLP weights are folded and centered
         w_in_processed = state_dict["transformer.h.0.mlp.c_fc.weight"]
         b_in_processed = state_dict["transformer.h.0.mlp.c_fc.bias"]
-        
+
         # Verify that MLP weights have been processed (they should be different from original)
         assert not torch.allclose(w_in_processed, w_in, atol=1e-6)
         assert not torch.allclose(b_in_processed, b_in, atol=1e-6)
-        
+
         # Verify that the processed MLP weights have the correct shape
         assert w_in_processed.shape == w_in.shape
         assert b_in_processed.shape == b_in.shape
-        
+
         # Verify original state dict is unchanged
         for k, v in original_state_dict.items():
             assert torch.equal(v, original_state_dict[k])

@@ -84,7 +84,9 @@ class TestWeightProcessingCompatibility:
         """Load TransformerBridge without processing."""
         print("Loading TransformerBridge without processing...")
         bridge = TransformerBridge.boot_transformers(model_name, device=device)
-        bridge.enable_compatibility_mode(no_processing=True)  # Enable compatibility mode for hook aliases
+        bridge.enable_compatibility_mode(
+            no_processing=True
+        )  # Enable compatibility mode for hook aliases
         # No processing applied
         return bridge
 
