@@ -272,7 +272,10 @@ class TestWeightConversionCompatibility:
                     original_tensor, key, transformer_bridge.adapter, transformer_bridge.cfg
                 )
                 back_to_tl_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                    key, transformer_bridge.adapter, {key: hf_tensor}, transformer_bridge.cfg
+                    key,
+                    transformer_bridge.adapter,
+                    {transformer_bridge.adapter.translate_transformer_lens_path(key): hf_tensor},
+                    transformer_bridge.cfg,
                 )
             except Exception as e:
                 print(f"Failed bidirectional conversion for {key}: {e}")
