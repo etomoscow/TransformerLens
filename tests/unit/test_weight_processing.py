@@ -1076,11 +1076,19 @@ class TestProcessWeights:
         # Create a mock adapter that translates TransformerLens keys to HuggingFace keys
         class MockAdapter:
             def translate_transformer_lens_path(self, tl_key):
-                # Simple translation: blocks.X.attn.W_Q -> transformer.h.X.attn.c_attn.weight
-                # and blocks.X.attn.b_Q -> transformer.h.X.attn.c_attn.bias
-                if "blocks.0.attn.W_Q" in tl_key:
+                # Simple translation: blocks.X.attn.W_Q/W_K/W_V -> transformer.h.X.attn.c_attn.weight
+                # and blocks.X.attn.b_Q/b_K/b_V -> transformer.h.X.attn.c_attn.bias
+                if (
+                    "blocks.0.attn.W_Q" in tl_key
+                    or "blocks.0.attn.W_K" in tl_key
+                    or "blocks.0.attn.W_V" in tl_key
+                ):
                     return "transformer.h.0.attn.c_attn.weight"
-                elif "blocks.0.attn.b_Q" in tl_key:
+                elif (
+                    "blocks.0.attn.b_Q" in tl_key
+                    or "blocks.0.attn.b_K" in tl_key
+                    or "blocks.0.attn.b_V" in tl_key
+                ):
                     return "transformer.h.0.attn.c_attn.bias"
                 elif "blocks.0.ln1.w" in tl_key:
                     return "transformer.h.0.ln_1.weight"
