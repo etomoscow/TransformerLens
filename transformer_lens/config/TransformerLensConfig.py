@@ -89,6 +89,21 @@ class TransformerLensConfig:
     # Layer norm folding activated
     layer_norm_folding: bool = False
 
+    # Activation function
+    act_fn: str = "relu"
+
+    # Normalization type
+    normalization_type: str = "LN"
+
+    # Number of experts
+    num_experts: Optional[int] = None
+
+    # Number of experts per token
+    experts_per_token: Optional[int] = None
+
+    # Final RMS norm
+    final_rms: bool = False
+
     def __post_init__(self):
         """Post-initialization processing and validation."""
         # Set n_heads if not specified

@@ -83,6 +83,18 @@ def map_default_transformer_lens_config(hf_config):
     if hasattr(tl_config, "d_model") and hasattr(tl_config, "n_heads"):
         tl_config.d_head = tl_config.d_model // tl_config.n_heads
 
+    # Set activation function
+    if hasattr(hf_config, "activation_function"):
+        tl_config.act_fn = hf_config.activation_function
+
+    # Set number of experts
+    if hasattr(hf_config, "num_local_experts"):
+        tl_config.num_experts = hf_config.num_local_experts
+
+    # Set number of experts per token
+    if hasattr(hf_config, "num_experts_per_tok"):
+        tl_config.experts_per_token = hf_config.num_experts_per_tok
+
     # Set common defaults for transformer models
     tl_config.default_prepend_bos = True
 

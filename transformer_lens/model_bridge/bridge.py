@@ -622,6 +622,13 @@ class TransformerBridge(nn.Module):
         self._initialize_hook_registry()
 
         if not no_processing:
+            self.cfg.layer_norm_folding = True
+
+            if self.cfg.normalization_type == "RMS":
+                self.cfg.normalization_type = "RMSPre"
+            elif self.cfg.normalization_type == "LN":
+                self.cfg.normalization_type = "LNPre"
+
             # Apply weight processing using the centralized ProcessWeights class
             self.process_weights(
                 fold_ln=True,
@@ -758,7 +765,7 @@ class TransformerBridge(nn.Module):
             n_ctx=1024,  # Default context length
             device=self.cfg.device,
             act_fn="relu",  # GPT-2 uses ReLU activation
-            attn_only=getattr(self.cfg, 'attn_only', False),
+            attn_only=getattr(self.cfg, "attn_only", False),
         )
 
         # Replace LayerNorm components in each layer
@@ -2126,7 +2133,9 @@ class TransformerBridge(nn.Module):
         # Forward the load_state_dict call to the original model with mapped keys
         # For partial state dicts (like processed weights), use strict=False to allow partial loading
         effective_strict = strict and len(mapped_state_dict) == len(current_state_dict)
-        return self.original_model.load_state_dict(mapped_state_dict, strict=effective_strict, assign=assign)
+        return self.original_model.load_state_dict(
+            mapped_state_dict, strict=effective_strict, assign=assign
+        )
 
     def get_params(self):
         """Access to model parameters in the format expected by SVDInterpreter.
