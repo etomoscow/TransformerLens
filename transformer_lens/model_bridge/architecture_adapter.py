@@ -766,3 +766,84 @@ class ArchitectureAdapter:
             items[parent_key] = input
 
         return items
+
+    def convert_hf_key_to_bridge_key(self, hf_key: str) -> str:
+        """Convert a HuggingFace-style key to a bridge key with _original_component references.
+        
+        Args:
+            hf_key: The HuggingFace-style key (e.g., "transformer.h.0.attn.c_attn.weight")
+            
+        Returns:
+            The bridge key with _original_component references (e.g., "transformer.h.0._original_component.attn._original_component.c_attn._original_component.weight")
+        """
+        # Handle different key patterns
+        if "transformer.h." in hf_key:
+            parts = hf_key.split(".")
+            if len(parts) >= 4 and parts[2].isdigit():
+                layer = parts[2]
+                
+                # Pattern: transformer.h.X.attn.c_attn.weight -> transformer.h.X._original_component.attn._original_component.c_attn._original_component.weight
+                if "attn.c_attn" in hf_key:
+                    return f"transformer.h.{layer}._original_component.attn._original_component.c_attn._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.attn.c_proj.weight -> transformer.h.X._original_component.attn._original_component.c_proj._original_component.weight
+                elif "attn.c_proj" in hf_key:
+                    return f"transformer.h.{layer}._original_component.attn._original_component.c_proj._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.mlp.c_fc.weight -> transformer.h.X._original_component.mlp._original_component.c_fc._original_component.weight
+                elif "mlp.c_fc" in hf_key:
+                    return f"transformer.h.{layer}._original_component.mlp._original_component.c_fc._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.mlp.c_proj.weight -> transformer.h.X._original_component.mlp._original_component.c_proj._original_component.weight
+                elif "mlp.c_proj" in hf_key:
+                    return f"transformer.h.{layer}._original_component.mlp._original_component.c_proj._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.attn.qkv.weight -> transformer.h.X._original_component.attn.qkv._original_component.weight
+                elif "attn.qkv" in hf_key:
+                    return f"transformer.h.{layer}._original_component.attn.qkv._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.attn.o.weight -> transformer.h.X._original_component.attn.o._original_component.weight
+                elif "attn.o" in hf_key:
+                    return f"transformer.h.{layer}._original_component.attn.o._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.mlp.input.weight -> transformer.h.X._original_component.mlp.input._original_component.weight
+                elif "mlp.input" in hf_key:
+                    return f"transformer.h.{layer}._original_component.mlp.input._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.mlp.out.weight -> transformer.h.X._original_component.mlp.out._original_component.weight
+                elif "mlp.out" in hf_key:
+                    return f"transformer.h.{layer}._original_component.mlp.out._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.ln1.weight -> transformer.h.X._original_component.ln1._original_component.weight
+                elif "ln1" in hf_key:
+                    return f"transformer.h.{layer}._original_component.ln1._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.ln2.weight -> transformer.h.X._original_component.ln2._original_component.weight
+                elif "ln2" in hf_key:
+                    return f"transformer.h.{layer}._original_component.ln2._original_component.{parts[-1]}"
+                
+                # Pattern: transformer.h.X.ln_2.weight -> transformer.h.X._original_component.ln_2._original_component.weight
+                elif "ln_2" in hf_key:
+                    return f"transformer.h.{layer}._original_component.ln_2._original_component.{parts[-1]}"
+        
+        # Pattern: transformer.wte.weight -> transformer.wte._original_component.weight
+        elif hf_key == "transformer.wte.weight":
+            return "transformer.wte._original_component.weight"
+        
+        # Pattern: transformer.wpe.weight -> transformer.wpe._original_component.weight
+        elif hf_key == "transformer.wpe.weight":
+            return "transformer.wpe._original_component.weight"
+        
+        # Pattern: lm_head.weight -> lm_head._original_component.weight
+        elif hf_key == "lm_head.weight":
+            return "lm_head._original_component.weight"
+        
+        # Pattern: transformer.ln_f.bias -> transformer.ln_f._original_component.bias
+        elif "transformer.ln_f" in hf_key:
+            if "weight" in hf_key:
+                return "transformer.ln_f._original_component.weight"
+            elif "bias" in hf_key:
+                return "transformer.ln_f._original_component.bias"
+        
+        # If no pattern matches, return the original key
+        return hf_key

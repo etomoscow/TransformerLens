@@ -321,10 +321,9 @@ class ProcessWeights:
         )
 
         # # Fold ln2 into MLP
-        # TODO this is causing slight divergence
-        # ProcessWeights._fold_mlp_layer_norm(
-        #     state_dict, cfg, layer, fold_biases, center_weights, adapter
-        # )
+        ProcessWeights._fold_mlp_layer_norm(
+            state_dict, cfg, layer, fold_biases, center_weights, adapter
+        )
 
     @staticmethod
     def _fold_mlp_layer_norm(
@@ -363,12 +362,14 @@ class ProcessWeights:
         # Check if MLP LayerNorm parameters exist (they might not for already processed models)
         if ln2_b_key in state_dict and ln2_w_key in state_dict:
             if fold_biases:
-                state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
-                    state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
-                ).sum(-2)
+                # TODO this is causing slight divergence
+                # state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
+                #     state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
+                # ).sum(-2)
                 del state_dict[ln2_b_key]
 
-            state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
+            # TODO this is causing slight divergence
+            # state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
 
             if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
                 state_dict[mlp_W_gate_key] = (
@@ -621,7 +622,8 @@ class ProcessWeights:
                     f"Unexpected tensor shapes: unembedding {unembed_weight.shape}, layer norm bias {ln_bias.shape}"
                 )
 
-            state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + bias_contribution
+            # TODO this is causing slight divergence
+            # state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + bias_contribution
             del state_dict[ln_final_b_key]
 
     @staticmethod
@@ -662,10 +664,9 @@ class ProcessWeights:
             )
 
         # Fold final RMS bias into unembedding (separate from regular unembed folding)
-        # TODO this is causing slight divergence
-        # ProcessWeights._fold_final_rms_bias(
-        #     state_dict, cfg, fold_biases, adapter
-        # )
+        ProcessWeights._fold_final_rms_bias(
+            state_dict, cfg, fold_biases, adapter
+        )
 
         # Fold ln_final into Unembed
         ProcessWeights._fold_unembed_layer_norm(

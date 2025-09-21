@@ -628,6 +628,7 @@ class TransformerBridge(nn.Module):
                 center_writing_weights=True,
                 center_unembed=True,
                 fold_value_biases=True,
+                refactor_factored_attn_matrices=False,  # Keep unfactored format to match HuggingFace
             )
 
     def process_weights(
@@ -739,27 +740,35 @@ class TransformerBridge(nn.Module):
         """
         import torch.nn as nn
 
-        class LayerNormPre(nn.Module):
-            """LayerNormPre - the 'center and normalise' part of LayerNorm without learnable parameters."""
+        # Import the proper LayerNormPre from HookedTransformer
+        from transformer_lens.components.layer_norm_pre import LayerNormPre
+        from transformer_lens.config.HookedTransformerConfig import (
+            HookedTransformerConfig,
+        )
 
-            def __init__(self, eps=1e-5):
-                super().__init__()
-                self.eps = eps
-
-            def forward(self, x):
-                # Apply centering and normalization without learnable parameters
-                x = x - x.mean(-1, keepdim=True)  # Center
-                scale = (x.pow(2).mean(-1, keepdim=True) + self.eps).sqrt()  # Calculate scale
-                return x / scale  # Normalize
+        # Create a compatible HookedTransformerConfig from the bridge config
+        hooked_config = HookedTransformerConfig(
+            d_model=self.cfg.d_model,
+            d_vocab=self.cfg.d_vocab,
+            n_layers=self.cfg.n_layers,
+            n_heads=self.cfg.n_heads,
+            d_head=self.cfg.d_head,
+            d_mlp=self.cfg.d_mlp,
+            eps=self.cfg.eps,
+            n_ctx=1024,  # Default context length
+            device=self.cfg.device,
+            act_fn="relu",  # GPT-2 uses ReLU activation
+            attn_only=getattr(self.cfg, 'attn_only', False),
+        )
 
         # Replace LayerNorm components in each layer
         for layer_idx in range(self.cfg.n_layers):
-            # Replace ln_1 and ln_2 with LayerNormPre
-            model.transformer.h[layer_idx].ln_1 = LayerNormPre(eps=self.cfg.eps)
-            model.transformer.h[layer_idx].ln_2 = LayerNormPre(eps=self.cfg.eps)
+            # Replace ln_1 and ln_2 with LayerNormPre using proper constructor
+            model.transformer.h[layer_idx].ln_1 = LayerNormPre(hooked_config)
+            model.transformer.h[layer_idx].ln_2 = LayerNormPre(hooked_config)
 
         # Replace final LayerNorm with LayerNormPre
-        model.transformer.ln_f = LayerNormPre(eps=self.cfg.eps)
+        model.transformer.ln_f = LayerNormPre(hooked_config)
 
     def _load_processed_weights(self, processed_state_dict):
         """Load processed weights back into the TransformerBridge.
@@ -2093,23 +2102,31 @@ class TransformerBridge(nn.Module):
                 clean_to_actual[clean_key] = actual_key
                 actual_to_clean[actual_key] = clean_key
 
-        # Map the input state dict keys to the actual keys
+        # Map the input state dict keys to the actual keys using the architecture adapter
         mapped_state_dict = {}
         for input_key, value in state_dict.items():
             # Check if this is an original key (with _original_component)
             if input_key in current_state_dict:
                 # Direct match - use as-is
                 mapped_state_dict[input_key] = value
-            elif input_key in clean_to_actual:
-                # Clean key - map to actual key
-                actual_key = clean_to_actual[input_key]
-                mapped_state_dict[actual_key] = value
             else:
-                # No mapping found - use as-is (for backward compatibility)
-                mapped_state_dict[input_key] = value
+                # Use the architecture adapter to convert HuggingFace keys to bridge keys
+                bridge_key = self.adapter.convert_hf_key_to_bridge_key(input_key)
+                if bridge_key in current_state_dict:
+                    mapped_state_dict[bridge_key] = value
+                else:
+                    # Fallback: try the old clean key mapping
+                    if input_key in clean_to_actual:
+                        actual_key = clean_to_actual[input_key]
+                        mapped_state_dict[actual_key] = value
+                    else:
+                        # No mapping found - use as-is (for backward compatibility)
+                        mapped_state_dict[input_key] = value
 
         # Forward the load_state_dict call to the original model with mapped keys
-        return self.original_model.load_state_dict(mapped_state_dict, strict=strict, assign=assign)
+        # For partial state dicts (like processed weights), use strict=False to allow partial loading
+        effective_strict = strict and len(mapped_state_dict) == len(current_state_dict)
+        return self.original_model.load_state_dict(mapped_state_dict, strict=effective_strict, assign=assign)
 
     def get_params(self):
         """Access to model parameters in the format expected by SVDInterpreter.
