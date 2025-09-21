@@ -297,15 +297,15 @@ class ProcessWeights:
             # Apply the individual math functions
             if fold_biases:
                 # TODO this is causing slight divergence
-                # bq_tensor, bk_tensor, bv_tensor = ProcessWeights.fold_layer_norm_biases(
-                #     wq_tensor, wk_tensor, wv_tensor, bq_tensor, bk_tensor, bv_tensor, ln1_b
-                # )
+                bq_tensor, bk_tensor, bv_tensor = ProcessWeights.fold_layer_norm_biases(
+                    wq_tensor, wk_tensor, wv_tensor, bq_tensor, bk_tensor, bv_tensor, ln1_b
+                )
                 del state_dict[keys['ln1_b']]
 
             # TODO this is causing slight divergence
-            # wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
-            #     wq_tensor, wk_tensor, wv_tensor, ln1_w
-            # )
+            wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
+                wq_tensor, wk_tensor, wv_tensor, ln1_w
+            )
             del state_dict[keys['ln1_w']]
 
         # Center the weights if requested
@@ -363,13 +363,13 @@ class ProcessWeights:
         if ln2_b_key in state_dict and ln2_w_key in state_dict:
             if fold_biases:
                 # TODO this is causing slight divergence
-                # state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
-                #     state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
-                # ).sum(-2)
+                state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
+                    state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
+                ).sum(-2)
                 del state_dict[ln2_b_key]
 
             # TODO this is causing slight divergence
-            # state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
+            state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
 
             if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
                 state_dict[mlp_W_gate_key] = (
@@ -623,7 +623,7 @@ class ProcessWeights:
                 )
 
             # TODO this is causing slight divergence
-            # state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + bias_contribution
+            state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + bias_contribution
             del state_dict[ln_final_b_key]
 
     @staticmethod
