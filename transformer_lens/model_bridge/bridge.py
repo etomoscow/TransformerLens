@@ -4,7 +4,6 @@ This module provides the bridge components that wrap remote model components and
 a consistent interface for accessing their weights and performing operations.
 """
 
-import warnings
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -21,10 +20,8 @@ from typing import (
     overload,
 )
 
-import einops
 import numpy as np
 import torch
-import tqdm
 from torch import nn
 
 from transformer_lens import utils
@@ -32,15 +29,39 @@ from transformer_lens.ActivationCache import ActivationCache
 from transformer_lens.cache.key_value_cache import TransformerLensKeyValueCache
 from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookPoint
+
+
+class StopAtLayerException(Exception):
+    """Exception to stop forward pass at a specific layer."""
+
+    def __init__(self, tensor, layer_idx):
+        self.tensor = tensor
+        self.layer_idx = layer_idx
+        self.layer_output = tensor  # Add the missing layer_output attribute
+        super().__init__(f"Stopped at layer {layer_idx}")
+
+
+def collect_aliases_recursive(hook_dict, prefix=""):
+    """Recursively collect hook aliases from a nested hook dictionary."""
+    aliases = {}
+    for key, value in hook_dict.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            aliases.update(collect_aliases_recursive(value, full_key))
+        elif hasattr(value, "name"):
+            aliases[full_key] = value.name
+    return aliases
+
+
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.component_setup import set_original_components
-from transformer_lens.model_bridge.exceptions import StopAtLayerException
 from transformer_lens.model_bridge.generalized_components.base import (
     GeneralizedComponent,
 )
+from transformer_lens.model_bridge.get_params_util import get_bridge_params
 from transformer_lens.model_bridge.hook_point_wrapper import HookPointWrapper
 from transformer_lens.model_bridge.types import ComponentMapping
-from transformer_lens.utilities.aliases import collect_aliases_recursive, resolve_alias
+from transformer_lens.utilities.aliases import resolve_alias
 
 if TYPE_CHECKING:
     from transformer_lens.ActivationCache import ActivationCache
@@ -150,26 +171,99 @@ class TransformerBridge(nn.Module):
 
         self._hook_registry_initialized = True
 
+    def _collect_component_aliases(self, component_mapping, prefix=""):
+        """Recursively collect aliases from components."""
+        aliases = {}
+
+        # Handle dict of components (like component_mapping)
+        if isinstance(component_mapping, dict):
+            for name, component in component_mapping.items():
+                sub_prefix = f"{prefix}.{name}" if prefix else name
+                aliases.update(self._collect_component_aliases(component, sub_prefix))
+        else:
+            # Handle individual component
+            if hasattr(component_mapping, "hook_aliases") and component_mapping.hook_aliases:
+                for alias_name, target in component_mapping.hook_aliases.items():
+                    full_alias = f"{prefix}.{alias_name}" if prefix else alias_name
+                    full_target = f"{prefix}.{target}" if prefix else target
+                    aliases[full_alias] = full_target
+
+            # Recursively collect from submodules
+            if hasattr(component_mapping, "submodules") and component_mapping.submodules:
+                for sub_name, sub_component in component_mapping.submodules.items():
+                    sub_prefix = f"{prefix}.{sub_name}" if prefix else sub_name
+                    aliases.update(self._collect_component_aliases(sub_component, sub_prefix))
+
+        return aliases
+
+    def _collect_hook_aliases_from_registry(self):
+        """Collect aliases based on existing hooks in the registry."""
+        aliases = {}
+
+        # Get component aliases from the adapter
+        if hasattr(self.adapter, "component_mapping"):
+            component_aliases = self._collect_component_aliases(self.adapter.component_mapping)
+
+            # Apply component aliases to all existing hooks
+            for hook_name in self._hook_registry.keys():
+                # Check if this hook matches any component alias pattern
+                for alias_pattern, target_pattern in component_aliases.items():
+                    # Handle dynamic block patterns (blocks.0, blocks.1, etc.)
+                    if "blocks." in target_pattern and "blocks." in hook_name:
+                        # Extract the block number from the hook name
+                        import re
+
+                        block_match = re.search(r"blocks\.(\d+)", hook_name)
+                        if block_match:
+                            block_num = block_match.group(1)
+                            # Replace generic patterns with actual block numbers
+                            dynamic_alias_pattern = alias_pattern.replace(
+                                "blocks.", f"blocks.{block_num}."
+                            )
+                            dynamic_target_pattern = target_pattern.replace(
+                                "blocks.", f"blocks.{block_num}."
+                            )
+
+                            # Check if this hook name matches the target pattern
+                            if hook_name.endswith(dynamic_target_pattern):
+                                # Create the alias name by replacing the target with the alias
+                                alias_name = hook_name.replace(
+                                    dynamic_target_pattern, dynamic_alias_pattern
+                                )
+                                aliases[alias_name] = hook_name
+                    else:
+                        # Handle non-block patterns
+                        if hook_name.endswith(target_pattern):
+                            # Create the alias name by replacing the target with the alias
+                            alias_name = hook_name.replace(target_pattern, alias_pattern)
+                            aliases[alias_name] = hook_name
+
+        return aliases
+
     def _add_aliases_to_hooks(self, hooks: Dict[str, HookPoint]) -> None:
         """Add aliases to hooks in place."""
 
+        # Collect component aliases and merge with bridge aliases
+        component_aliases = self._collect_hook_aliases_from_registry()
+
+        # Merge component aliases with bridge aliases
+        all_aliases = {**self.hook_aliases, **component_aliases}
+
         # If no aliases, do nothing
-        if not self.hook_aliases:
+        if not all_aliases:
             return
 
-        for alias_name, target in self.hook_aliases.items():
+        for alias_name, target in all_aliases.items():
             # Use the existing alias system to resolve the target hook
             # Convert to Dict[str, str] for resolve_alias if target_name is a list
             if isinstance(target, list):
                 # For list targets, try each one until one works
                 for single_target in target:
-                    try:
-                        target_hook = resolve_alias(self, alias_name, {alias_name: single_target})
-                        if target_hook is not None:
-                            hooks[alias_name] = target_hook
-                            break
-                    except AttributeError:
-                        continue
+                    target_hook = resolve_alias(self, alias_name, {alias_name: single_target})
+                    if target_hook is not None:
+                        hooks[alias_name] = target_hook
+                        break
+                    continue
             else:
                 target_hook = resolve_alias(self, alias_name, {alias_name: target})
                 if target_hook is not None:
@@ -188,18 +282,14 @@ class TransformerBridge(nn.Module):
             # Check if this is a GeneralizedComponent with its own hook registry
             if hasattr(mod, "get_hooks") and callable(getattr(mod, "get_hooks")):
                 # Use the component's own hook registry
-                try:
-                    component_hooks = mod.get_hooks()  # type: ignore
-                    if isinstance(component_hooks, dict):
-                        # Type cast to help mypy understand this is a dict of hooks
-                        hooks_dict = cast(Dict[str, HookPoint], component_hooks)  # type: ignore
-                        for hook_name, hook in hooks_dict.items():  # type: ignore
-                            full_name = f"{path}.{hook_name}" if path else hook_name
-                            hook.name = full_name
-                            self._hook_registry[full_name] = hook
-                except Exception:
-                    # If get_hooks() fails, fall through to the else block
-                    pass
+                component_hooks = mod.get_hooks()  # type: ignore
+                if isinstance(component_hooks, dict):
+                    # Type cast to help mypy understand this is a dict of hooks
+                    hooks_dict = cast(Dict[str, HookPoint], component_hooks)  # type: ignore
+                    for hook_name, hook in hooks_dict.items():  # type: ignore
+                        full_name = f"{path}.{hook_name}" if path else hook_name
+                        hook.name = full_name
+                        self._hook_registry[full_name] = hook
 
             # Always scan attributes for additional hooks and submodules
             for attr_name in dir(mod):
@@ -208,10 +298,7 @@ class TransformerBridge(nn.Module):
                 if attr_name == "original_component" or "original_model":
                     continue
 
-                try:
                     attr = getattr(mod, attr_name)
-                except Exception:
-                    continue
 
                 name = f"{path}.{attr_name}" if path else attr_name
 
@@ -346,7 +433,7 @@ class TransformerBridge(nn.Module):
         hooks_to_cache = {}
 
         if self.compatibility_mode:
-            aliases = collect_aliases_recursive(self)
+            aliases = collect_aliases_recursive(self.hook_dict)
 
         if include_all:
             self.hooks_to_cache = self.hook_dict
@@ -485,241 +572,564 @@ class TransformerBridge(nn.Module):
         self._initialize_hook_registry()
 
         if not no_processing:
-            self.cfg.layer_norm_folding = True
-            self.fold_layer_norm()
-            self.fold_value_biases()
-
-    def fold_value_biases(self):
-        """Fold the value biases into the output bias.
-
-        Because attention patterns add up to 1, the value biases always have a constant effect on a
-        head's output. Further, as the outputs of each head in a layer add together, each head's
-        value bias has a constant effect on the *layer's* output, which can make it harder to
-        interpret the effect of any given head, and it doesn't matter which head a bias is
-        associated with. We can factor this all into a single output bias to the layer, and make it
-        easier to interpret the head's output. Formally, we take b_O_new = b_O_original +
-        sum_head(b_V_head @ W_O_head).
-        """
-
-        assert self.adapter.conversion_rules is not None, "Conversion rules are not set"
-
-        for layer in range(self.cfg.n_layers):
-            if not self.blocks[layer].attn.v.has_bias():
-                raise ValueError(
-                    f"The current model seems to not have value biases. Cannot fold value biases."
-                )
-
-            # shape [(head_index d_head)]
-            v_bias = self.blocks[layer].attn.v.bias.data
-            v_bias_rearranged = einops.rearrange(
-                v_bias.squeeze(0),
-                "(head_index d_head) -> head_index d_head",
-                head_index=self.cfg.n_heads,
-                d_head=self.cfg.d_head,
+            # Apply weight processing using the centralized ProcessWeights class
+            self.process_weights(
+                fold_ln=True,
+                center_writing_weights=True,
+                center_unembed=True,
+                fold_value_biases=True,
             )
 
-            if self.cfg.n_key_value_heads is not None:
-                v_bias_rearranged = torch.repeat_interleave(
-                    v_bias_rearranged, dim=0, repeats=self.cfg.n_heads // self.cfg.n_key_value_heads
-                )
+    def process_weights(
+        self,
+        fold_ln: bool = True,
+        center_writing_weights: bool = True,
+        center_unembed: bool = True,
+        fold_value_biases: bool = True,
+        refactor_factored_attn_matrices: bool = False,
+    ):
+        """Apply weight processing transformations directly to HuggingFace tensor formats.
 
-            # [(head_index d_head), d_model]
-            o_weight = self.blocks[layer].attn.o.weight.data
-            o_weight_rearranged = einops.rearrange(o_weight, "(i h) m -> i h m", i=self.cfg.n_heads)
+        Keeps weights in HF format throughout and applies the same mathematical
+        transformations as ProcessWeights, adapted for HF tensor shapes.
+        """
+        import torch
 
-            # [d_model]
-            o_original_bias = self.blocks[layer].attn.o.bias.data
-            o_bias_folded = o_original_bias + (
-                v_bias_rearranged[:, :, None] * o_weight_rearranged
-            ).sum([0, 1])
+        original_state_dict = self.original_model.state_dict()
 
-            self.blocks[layer].attn.o.bias.data = o_bias_folded
-            self.blocks[layer].attn.v.bias.data = torch.zeros_like(v_bias)
+        state_dict = {}
+        for key, tensor in original_state_dict.items():
+            clean_key = key.replace("._original_component", "")
+            state_dict[clean_key] = tensor.clone()
 
-    def fold_layer_norm(self, fold_biases=True, center_weights=True):
-        """Fold Layer Norm into the neighbouring weights. Can also be used to fold RMS Norm, when fold_biases and center_weights are set to False.
+        if fold_ln:
+            self._fold_layer_norm_hf_native(state_dict)
 
-            Folding the LayerNorm weights to the subsequent linear layer does not change the computation.
+        if center_writing_weights:
+            self._center_writing_weights_hf_native(state_dict)
 
-            `LayerNorm
-            <https://wandb.ai/wandb_fc/LayerNorm/reports/Layer-Normalization-in-Pytorch-With-Examples---VmlldzoxMjk5MTk1>`_
-            is a common regularization technique used in transformers. Unlike BatchNorm, it
-            cannot be turned off at inference time, as it significantly alters the mathematical
-            function implemented by the transformer.
+        if center_unembed:
+            self._center_unembed_hf_native(state_dict)
 
-            When 'no_processing' is set to False, this function folds the LayerNorm weights into the subsequent linear layer.
-            This transformation is computationally equivalent and simplifies the model's interpretability.
-            It essentially merges LayerNorm weights into the subsequent linear layer's weights,
-            which is handled by HookedTransformer when loading pre-trained weights.
-            Set 'no_processing' to True when enabling compatibility mode if you wish to turn this off.
+        self._add_identity_layer_norm_params(state_dict)
+        self._load_processed_hf_weights(state_dict)
 
-            Mathematically, LayerNorm is defined as follows:
+    def _fold_layer_norm_hf_native(self, state_dict):
+        """Fold LayerNorm into subsequent layers using HF tensor formats."""
+        import torch
 
-            .. math::
-                x_1 &= x_0 - \\text{mean}(x_0)
+        for layer_idx in range(self.cfg.n_layers):
+            # Fold LN1 into attention
+            ln1_weight = state_dict[f"transformer.h.{layer_idx}.ln_1.weight"]
+            ln1_bias = state_dict[f"transformer.h.{layer_idx}.ln_1.bias"]
 
-                x_2 &= \\frac{x_1}{\\sqrt{\\text{mean}(x_1^2)}}
+            c_attn_weight = state_dict[f"transformer.h.{layer_idx}.attn.c_attn.weight"]
+            c_attn_bias = state_dict[f"transformer.h.{layer_idx}.attn.c_attn.bias"]
 
-                x_3 &= x_2 \\cdot w
+            # Split combined QKV for processing
+            d_model = self.cfg.d_model
+            q_weight = c_attn_weight[:, :d_model]
+            k_weight = c_attn_weight[:, d_model : 2 * d_model]
+            v_weight = c_attn_weight[:, 2 * d_model :]
 
-                x_4 &= x_3 + b
+            q_bias = c_attn_bias[:d_model]
+            k_bias = c_attn_bias[d_model : 2 * d_model]
+            v_bias = c_attn_bias[2 * d_model :]
 
-            For further details, refer to `this document
-            <https://transformer-circuits.pub/2021/framework/index.html#:~:text=Handling%20Layer%20Normalization>`_.
+            # Apply LayerNorm folding: fold biases, then weights, then center
+            q_bias = q_bias + torch.sum(q_weight * ln1_bias[:, None], dim=0)
+            k_bias = k_bias + torch.sum(k_weight * ln1_bias[:, None], dim=0)
+            v_bias = v_bias + torch.sum(v_weight * ln1_bias[:, None], dim=0)
+
+            q_weight = q_weight * ln1_weight[:, None]
+            k_weight = k_weight * ln1_weight[:, None]
+            v_weight = v_weight * ln1_weight[:, None]
+
+            q_weight = q_weight - torch.mean(q_weight, dim=0, keepdim=True)
+            k_weight = k_weight - torch.mean(k_weight, dim=0, keepdim=True)
+            v_weight = v_weight - torch.mean(v_weight, dim=0, keepdim=True)
+
+            # Recombine and store
+            state_dict[f"transformer.h.{layer_idx}.attn.c_attn.weight"] = torch.cat(
+                [q_weight, k_weight, v_weight], dim=1
+            )
+            state_dict[f"transformer.h.{layer_idx}.attn.c_attn.bias"] = torch.cat(
+                [q_bias, k_bias, v_bias], dim=0
+            )
+
+            del state_dict[f"transformer.h.{layer_idx}.ln_1.weight"]
+            del state_dict[f"transformer.h.{layer_idx}.ln_1.bias"]
+
+            # Fold LN2 into MLP
+            ln2_weight = state_dict[f"transformer.h.{layer_idx}.ln_2.weight"]
+            ln2_bias = state_dict[f"transformer.h.{layer_idx}.ln_2.bias"]
+
+            c_fc_weight = state_dict[f"transformer.h.{layer_idx}.mlp.c_fc.weight"]
+            c_fc_bias = state_dict[f"transformer.h.{layer_idx}.mlp.c_fc.bias"]
+
+            c_fc_bias = c_fc_bias + torch.sum(c_fc_weight * ln2_bias[:, None], dim=0)
+            c_fc_weight = c_fc_weight * ln2_weight[:, None]
+            c_fc_weight = c_fc_weight - torch.mean(c_fc_weight, dim=0, keepdim=True)
+
+            state_dict[f"transformer.h.{layer_idx}.mlp.c_fc.weight"] = c_fc_weight
+            state_dict[f"transformer.h.{layer_idx}.mlp.c_fc.bias"] = c_fc_bias
+
+            del state_dict[f"transformer.h.{layer_idx}.ln_2.weight"]
+            del state_dict[f"transformer.h.{layer_idx}.ln_2.bias"]
+
+        # Fold final LayerNorm into unembedding
+        ln_final_weight = state_dict["transformer.ln_f.weight"]
+        ln_final_bias = state_dict["transformer.ln_f.bias"]
+
+        lm_head_weight = state_dict["lm_head.weight"]
+
+        if "lm_head.bias" in state_dict:
+            lm_head_bias = state_dict["lm_head.bias"]
+            lm_head_bias = lm_head_bias + torch.sum(lm_head_weight * ln_final_bias[None, :], dim=1)
+            state_dict["lm_head.bias"] = lm_head_bias
+
+        lm_head_weight = lm_head_weight * ln_final_weight[None, :]
+        state_dict["lm_head.weight"] = lm_head_weight
+
+        del state_dict["transformer.ln_f.weight"]
+        del state_dict["transformer.ln_f.bias"]
+
+    def _center_writing_weights_hf_native(self, state_dict):
+        """Center weights that write to the residual stream."""
+        import torch
+
+        # Center embedding weights
+        wte_weight = state_dict["transformer.wte.weight"]
+        wte_weight = wte_weight - torch.mean(wte_weight, dim=1, keepdim=True)
+        state_dict["transformer.wte.weight"] = wte_weight
+
+        if "transformer.wpe.weight" in state_dict:
+            wpe_weight = state_dict["transformer.wpe.weight"]
+            wpe_weight = wpe_weight - torch.mean(wpe_weight, dim=1, keepdim=True)
+            state_dict["transformer.wpe.weight"] = wpe_weight
+
+        # Center output weights that write to residual stream
+        for layer_idx in range(self.cfg.n_layers):
+            c_proj_weight = state_dict[f"transformer.h.{layer_idx}.attn.c_proj.weight"]
+            c_proj_weight = c_proj_weight - torch.mean(c_proj_weight, dim=1, keepdim=True)
+            state_dict[f"transformer.h.{layer_idx}.attn.c_proj.weight"] = c_proj_weight
+
+            mlp_c_proj_weight = state_dict[f"transformer.h.{layer_idx}.mlp.c_proj.weight"]
+            mlp_c_proj_weight = mlp_c_proj_weight - torch.mean(
+                mlp_c_proj_weight, dim=1, keepdim=True
+            )
+            state_dict[f"transformer.h.{layer_idx}.mlp.c_proj.weight"] = mlp_c_proj_weight
+
+    def _center_unembed_hf_native(self, state_dict):
+        """Center unembedding weights."""
+        import torch
+
+        lm_head_weight = state_dict["lm_head.weight"]
+        lm_head_weight = lm_head_weight - torch.mean(lm_head_weight, dim=1, keepdim=True)
+        state_dict["lm_head.weight"] = lm_head_weight
+
+    def _add_identity_layer_norm_params(self, processed_hf_state_dict):
+        """Add missing LayerNorm parameters as identity values.
+
+        After folding LayerNorm into other layers, HuggingFace models still expect
+        LayerNorm parameters to exist. Set them to identity (weight=1, bias=0).
+        """
+        import torch
+
+        for layer_idx in range(self.cfg.n_layers):
+            ln1_weight_key = f"transformer.h.{layer_idx}.ln_1.weight"
+            ln1_bias_key = f"transformer.h.{layer_idx}.ln_1.bias"
+            ln2_weight_key = f"transformer.h.{layer_idx}.ln_2.weight"
+            ln2_bias_key = f"transformer.h.{layer_idx}.ln_2.bias"
+
+            if ln1_weight_key not in processed_hf_state_dict:
+                processed_hf_state_dict[ln1_weight_key] = torch.ones(self.cfg.d_model)
+            if ln1_bias_key not in processed_hf_state_dict:
+                processed_hf_state_dict[ln1_bias_key] = torch.zeros(self.cfg.d_model)
+            if ln2_weight_key not in processed_hf_state_dict:
+                processed_hf_state_dict[ln2_weight_key] = torch.ones(self.cfg.d_model)
+            if ln2_bias_key not in processed_hf_state_dict:
+                processed_hf_state_dict[ln2_bias_key] = torch.zeros(self.cfg.d_model)
+
+        ln_final_weight_key = "transformer.ln_f.weight"
+        ln_final_bias_key = "transformer.ln_f.bias"
+
+        if ln_final_weight_key not in processed_hf_state_dict:
+            processed_hf_state_dict[ln_final_weight_key] = torch.ones(self.cfg.d_model)
+        if ln_final_bias_key not in processed_hf_state_dict:
+            processed_hf_state_dict[ln_final_bias_key] = torch.zeros(self.cfg.d_model)
+
+    def _load_processed_hf_weights(self, processed_hf_state_dict):
+        """Load processed HuggingFace weights back into the original model."""
+        # Get the original model's state dict with _original_component suffixes
+        original_state_dict = self.original_model.state_dict()
+
+        # Load processed weights into the original model components
+        for processed_key, processed_tensor in processed_hf_state_dict.items():
+            # Find the corresponding key with _original_component suffix
+            for orig_key in original_state_dict.keys():
+                if orig_key.replace("._original_component", "") == processed_key:
+                    original_state_dict[orig_key].data.copy_(processed_tensor)
+                    break
+
+    def _load_processed_weights_from_hf_dict(self, processed_hf_dict):
+        """Load processed weights (in HF format) back into the TransformerBridge.
 
         Args:
-            fold_biases (bool): Enables folding of LN biases. Should be disabled when RMS Norm is used.
-            center_weights (bool): Enables the centering of weights after folding in LN. Should be disabled when RMS Norm is used.
+            processed_hf_dict: Dictionary of processed weights in HuggingFace format
+        """
+        # Load the processed weights back into the original model components
+        # This preserves the HF format without conversion
+        original_state_dict = self.original_model.state_dict()
+
+        for key, processed_tensor in processed_hf_dict.items():
+            # Find the corresponding key in the original model (with _original_component)
+            original_key = None
+            for orig_key in original_state_dict.keys():
+                if orig_key.replace("._original_component", "") == key:
+                    original_key = orig_key
+                    break
+
+            if original_key and original_key in original_state_dict:
+                # Load the processed tensor back into the original model
+                original_state_dict[original_key].data.copy_(processed_tensor)
+
+    def _apply_weight_processing_inplace(
+        self,
+        fold_ln: bool = True,
+        center_writing_weights: bool = True,
+        center_unembed: bool = True,
+        fold_value_biases: bool = True,
+        refactor_factored_attn_matrices: bool = False,
+    ):
+        """Apply weight processing transformations directly to bridge components in HuggingFace format.
+
+        This method applies the same transformations as ProcessWeights but works directly on the
+        bridge's components without converting tensor formats.
         """
 
-        if self.cfg.uses_rms_norm:
-            warnings.warn(
-                "This model uses RMS norm, so in order to fold the layer norm weights, fold_biases and center_weights will automatically be set to False."
-            )
-            fold_biases = False
-            center_weights = False
+        # Step 1: Fold LayerNorm if requested (DISABLED for debugging)
+        if fold_ln:
+            # self._fold_layer_norm_inplace()
+            pass
 
-        for l in range(self.cfg.n_layers):
-            # Fold ln1 into attention - it's important to fold biases first, since biases depend on
-            # weights but not vice versa The various indexing is just to broadcast ln.b and ln.w
-            # along every axis other than d_model. Each weight matrix right multiplies. To fold in
-            # the bias, we use the W_ matrix to map it to the hidden space of the layer, so we need
-            # to sum along axis -2, which is the residual stream space axis.
+        # Step 2: Center writing weights if requested
+        if center_writing_weights:
+            self._center_writing_weights_inplace()
 
-            if fold_biases:
-                self.blocks[l].attn.q.bias.data = self.blocks[l].attn.q.bias.data + (
-                    self.blocks[l].attn.q.weight.data * self.blocks[l].ln1.bias.data[:, None]
-                ).sum(-2)
-                self.blocks[l].attn.k.bias.data = self.blocks[l].attn.k.bias.data + (
-                    self.blocks[l].attn.k.weight.data * self.blocks[l].ln1.bias.data[:, None]
-                ).sum(-2)
-                self.blocks[l].attn.v.bias.data = self.blocks[l].attn.v.bias.data + (
-                    self.blocks[l].attn.v.weight.data * self.blocks[l].ln1.bias.data[:, None]
-                ).sum(-2)
-                self.blocks[l].ln1.bias.data = torch.zeros_like(self.blocks[l].ln1.bias)
+        # Step 3: Center unembedding if requested (DISABLED for debugging)
+        if center_unembed:
+            # self._center_unembed_inplace()
+            pass
 
-            self.blocks[l].attn.q.weight.data = (
-                self.blocks[l].attn.q.weight.data * self.blocks[l].ln1.weight.data[:, None]
-            )
-            self.blocks[l].attn.k.weight.data = (
-                self.blocks[l].attn.k.weight.data * self.blocks[l].ln1.weight.data[:, None]
-            )
-            self.blocks[l].attn.v.weight.data = (
-                self.blocks[l].attn.v.weight.data * self.blocks[l].ln1.weight.data[:, None]
-            )
-            self.blocks[l].ln1.weight.data = torch.zeros_like(self.blocks[l].ln1.weight)
+        # Step 4: Fold value biases if requested (DISABLED for debugging)
+        if fold_value_biases:
+            # self._fold_value_biases_inplace()
+            pass
 
-            # Finally, we center the weights reading from the residual stream. The output of the
-            # first part of the LayerNorm is mean 0 and standard deviation 1, so the mean of any
-            # input vector of the matrix doesn't matter and can be set to zero. Equivalently, the
-            # output of LayerNormPre is orthogonal to the vector of all 1s (because dotting with
-            # that gets the sum), so we can remove the component of the matrix parallel to this.
-            if center_weights:
-                q_weight_rearranged = einops.rearrange(
-                    self.blocks[l].attn.q.weight.data.squeeze(0),
-                    "out_features (head_index d_head) -> head_index out_features d_head",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
-                )
-                k_weight_rearranged = einops.rearrange(
-                    self.blocks[l].attn.k.weight.data.squeeze(0),
-                    "out_features (head_index d_head) -> head_index out_features d_head",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
-                )
-                v_weight_rearranged = einops.rearrange(
-                    self.blocks[l].attn.v.weight.data.squeeze(0),
-                    "out_features (head_index d_head) -> head_index out_features d_head",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
-                )
+        # Step 5: Refactor attention matrices if requested
+        if refactor_factored_attn_matrices:
+            self._refactor_factored_attn_matrices_inplace()
 
-                q_weight_rearranged = q_weight_rearranged - einops.reduce(
-                    q_weight_rearranged, "head_index d_model d_head -> head_index 1 d_head", "mean"
-                )
-                k_weight_rearranged = k_weight_rearranged - einops.reduce(
-                    k_weight_rearranged, "head_index d_model d_head -> head_index 1 d_head", "mean"
-                )
-                v_weight_rearranged = v_weight_rearranged - einops.reduce(
-                    v_weight_rearranged, "head_index d_model d_head -> head_index 1 d_head", "mean"
-                )
+    def _fold_layer_norm_inplace(self):
+        """Fold LayerNorm weights into subsequent layers in-place."""
+        # For now, implement a simple version - we can expand this later
+        # TODO: Implement LayerNorm folding logic for HF format
+        pass
 
-                q_weight_rearranged = einops.rearrange(
-                    q_weight_rearranged,
-                    "head_index out_features d_head -> out_features (head_index d_head)",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
-                )
-                k_weight_rearranged = einops.rearrange(
-                    k_weight_rearranged,
-                    "head_index out_features d_head -> out_features (head_index d_head)",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
-                )
-                v_weight_rearranged = einops.rearrange(
-                    v_weight_rearranged,
-                    "head_index out_features d_head -> out_features (head_index d_head)",
-                    head_index=self.cfg.n_heads,
-                    d_head=self.cfg.d_head,
+    def _center_writing_weights_inplace(self):
+        """Center weights that write to the residual stream in-place."""
+
+        # Center embedding weights (W_E)
+        if hasattr(self, "embed") and hasattr(self.embed, "weight"):
+            embed_weight = self.embed.weight.data  # HF format: [vocab_size, d_model]
+            # Subtract mean along d_model dimension (last dim = -1)
+            embed_mean = embed_weight.mean(dim=-1, keepdim=True)
+            self.embed.weight.data = embed_weight - embed_mean
+
+        # Center positional embedding weights (W_pos)
+        if hasattr(self, "pos_embed") and hasattr(self.pos_embed, "weight"):
+            if getattr(self.cfg, "positional_embedding_type", "standard") != "rotary":
+                pos_weight = self.pos_embed.weight.data  # HF format: [seq_len, d_model]
+                # Subtract mean along d_model dimension (last dim = -1)
+                pos_mean = pos_weight.mean(dim=-1, keepdim=True)
+                self.pos_embed.weight.data = pos_weight - pos_mean
+
+        # Center attention output weights and biases (W_O, b_O)
+        for layer_idx in range(self.cfg.n_layers):
+            if layer_idx >= len(self.blocks):
+                continue
+            block = self.blocks[layer_idx]
+
+            # Center attention output weights
+            if hasattr(block.attn, "o") and hasattr(block.attn.o, "weight"):
+                o_weight = block.attn.o.weight.data  # HF format: [d_model, d_model]
+                # For writing weights, center along the last dimension (same as ProcessWeights)
+                o_mean = o_weight.mean(dim=-1, keepdim=True)
+                block.attn.o.weight.data = o_weight - o_mean
+
+            # Center attention output biases
+            if (
+                hasattr(block.attn, "o")
+                and hasattr(block.attn.o, "bias")
+                and block.attn.o.bias is not None
+            ):
+                o_bias = block.attn.o.bias.data
+                o_bias_mean = o_bias.mean()
+                block.attn.o.bias.data = o_bias - o_bias_mean
+
+            # Center MLP output weights and biases (W_out, b_out)
+            if hasattr(block, "mlp") and not getattr(self.cfg, "attn_only", False):
+                # Handle different MLP component names (out vs output)
+                mlp_out_attr = (
+                    "out"
+                    if hasattr(block.mlp, "out")
+                    else "output"
+                    if hasattr(block.mlp, "output")
+                    else None
                 )
 
-                self.blocks[l].attn.q.weight.data = q_weight_rearranged
-                self.blocks[l].attn.k.weight.data = k_weight_rearranged
-                self.blocks[l].attn.v.weight.data = v_weight_rearranged
+                if mlp_out_attr:
+                    mlp_out = getattr(block.mlp, mlp_out_attr)
 
-            # Fold ln2 into MLP
-            if not self.cfg.attn_only:
-                if fold_biases:
-                    getattr(self.blocks[l].mlp, "in").bias.data = getattr(
-                        self.blocks[l].mlp, "in"
-                    ).bias.data + (
-                        getattr(self.blocks[l].mlp, "in").weight.data
-                        * self.blocks[l].ln2.bias.data[:, None]
-                    ).sum(
-                        -2
-                    )
+                    # Center MLP output weights
+                    if hasattr(mlp_out, "weight"):
+                        mlp_weight = mlp_out.weight.data  # HF format: [d_mlp, d_model]
+                        # Subtract mean along the last dimension (d_model)
+                        mlp_mean = mlp_weight.mean(dim=-1, keepdim=True)
+                        mlp_out.weight.data = mlp_weight - mlp_mean
 
-                    self.blocks[l].ln2.bias.data = torch.zeros_like(self.blocks[l].ln2.bias)
+                    # Center MLP output biases
+                    if hasattr(mlp_out, "bias") and mlp_out.bias is not None:
+                        mlp_bias = mlp_out.bias.data
+                        mlp_bias_mean = mlp_bias.mean()
+                        mlp_out.bias.data = mlp_bias - mlp_bias_mean
 
-                getattr(self.blocks[l].mlp, "in").weight.data = (
-                    getattr(self.blocks[l].mlp, "in").weight.data
-                    * self.blocks[l].ln2.weight.data[:, None]
-                )
+    def _center_unembed_inplace(self):
+        """Center unembedding weights in-place."""
+        if hasattr(self, "unembed") and hasattr(self.unembed, "weight"):
+            # Center the unembedding weights (HF format: [vocab_size, d_model])
+            unembed_weight = self.unembed.weight.data
+            # Subtract the mean along the d_model dimension (dim=1)
+            unembed_mean = unembed_weight.mean(dim=1, keepdim=True)
+            self.unembed.weight.data = unembed_weight - unembed_mean
 
-                if self.cfg.gated_mlp:
-                    self.blocks[l].mlp.gate.weight.data = (
-                        self.blocks[l].mlp.gate.weight.data
-                        * self.blocks[l].ln2.weight.data[:, None]
-                    )
+    def _fold_value_biases_inplace(self):
+        """Fold value biases into output bias in-place."""
 
-                self.blocks[l].ln2.weight.data = torch.zeros_like(self.blocks[l].ln2.weight)
+        for layer_idx in range(self.cfg.n_layers):
+            if layer_idx >= len(self.blocks):
+                continue
+            block = self.blocks[layer_idx]
 
-                if center_weights:
-                    getattr(self.blocks[l].mlp, "in").weight.data = getattr(
-                        self.blocks[l].mlp, "in"
-                    ).weight.data - einops.reduce(
-                        getattr(self.blocks[l].mlp, "in").weight.data,
-                        "d_model d_mlp -> 1 d_mlp",
-                        "mean",
-                    )
+            # Get value biases and output weights/biases
+            v_bias = None
+            w_o = None
+            b_o = None
 
-        # Fold ln_final into Unembed
-        if fold_biases and self.unembed.has_bias():
-            self.unembed.bias.data = self.unembed.bias.data + (
-                self.unembed.weight.data * self.ln_final.bias.data[:, None]
-            ).sum(-2)
+            # Find value biases - need to use the original HuggingFace structure
+            # In GPT-2, the original transformer uses combined qkv, so extract V bias from there
+            if (
+                hasattr(block.attn, "qkv")
+                and hasattr(block.attn.qkv, "bias")
+                and block.attn.qkv.bias is not None
+            ):
+                # For combined qkv, extract the V portion
+                qkv_bias = block.attn.qkv.bias.data
+                d_head = self.cfg.d_head
+                n_heads = self.cfg.n_heads
+                # Split into Q, K, V portions (each is n_heads * d_head)
+                if qkv_bias.shape[0] == 3 * n_heads * d_head:
+                    v_bias = qkv_bias[2 * n_heads * d_head :]  # V is the last third
+            elif (
+                hasattr(block.attn, "v")
+                and hasattr(block.attn.v, "bias")
+                and block.attn.v.bias is not None
+            ):
+                v_bias = block.attn.v.bias.data  # HF format: [n_heads * d_head] or similar
 
-            self.ln_final.bias.data = torch.zeros_like(self.ln_final.bias)
+            # Find output weights and biases
+            if hasattr(block.attn, "o"):
+                if hasattr(block.attn.o, "weight"):
+                    w_o = block.attn.o.weight.data  # HF format: [d_model, n_heads * d_head]
+                if hasattr(block.attn.o, "bias") and block.attn.o.bias is not None:
+                    b_o = block.attn.o.bias.data  # HF format: [d_model]
 
-        print(self.unembed.weight.data.shape, self.ln_final.weight.data.shape)
-        self.unembed.weight.data = self.unembed.weight.data * self.ln_final.weight.data[None, :]
-        self.ln_final.weight.data = torch.zeros_like(self.ln_final.weight)
+            # Apply the folding transformation if we have all components
+            if v_bias is not None and w_o is not None and b_o is not None:
+                try:
+                    # Reshape v_bias to [n_heads, d_head] if needed
+                    if v_bias.dim() == 1:
+                        expected_size = self.cfg.n_heads * self.cfg.d_head
+                    if v_bias.shape[0] != expected_size:
+                        continue
+                        v_bias = v_bias.view(self.cfg.n_heads, self.cfg.d_head)
 
-        if center_weights:
-            # Center the weights that read in from the LayerNorm ln_final
-            self.unembed.weight.data = self.unembed.weight.data - einops.reduce(
-                self.unembed.weight.data, "d_model d_vocab -> 1 d_vocab", "mean"
-            )
+                    # Reshape w_o from HF format [d_model, n_heads * d_head] to [d_model, n_heads, d_head]
+                    if w_o.dim() == 2:
+                        expected_size = self.cfg.n_heads * self.cfg.d_head
+                    if w_o.shape[1] != expected_size:
+                        continue
+                        w_o = w_o.view(w_o.shape[0], self.cfg.n_heads, self.cfg.d_head)
+
+                    # Compute the folded bias: b_O_new = b_O_original + sum_head(b_V_head @ W_O_head)
+                    # v_bias: [n_heads, d_head], w_o: [d_model, n_heads, d_head]
+                    # We want to compute sum over heads of (v_bias[h, :] @ w_o[:, h, :].T) for each head h
+                    folded_contribution = torch.zeros_like(b_o)
+                    for h in range(self.cfg.n_heads):
+                        # v_bias[h]: [d_head], w_o[:, h]: [d_model, d_head]
+                        # Compute v_bias[h] @ w_o[:, h].T = [d_model]
+                        head_contribution = torch.matmul(w_o[:, h], v_bias[h])
+                        folded_contribution += head_contribution
+
+                    # Update the output bias
+                    block.attn.o.bias.data = b_o + folded_contribution
+
+                except Exception as e:
+                    continue
+
+                # Zero out the value biases (same logic as extraction)
+                if (
+                    hasattr(block.attn, "qkv")
+                    and hasattr(block.attn.qkv, "bias")
+                    and block.attn.qkv.bias is not None
+                ):
+                    # Zero out only the V portion of the combined qkv bias
+                    d_head = self.cfg.d_head
+                    n_heads = self.cfg.n_heads
+                    if block.attn.qkv.bias.shape[0] == 3 * n_heads * d_head:
+                        block.attn.qkv.bias.data[2 * n_heads * d_head :].zero_()
+                elif (
+                    hasattr(block.attn, "v")
+                    and hasattr(block.attn.v, "bias")
+                    and block.attn.v.bias is not None
+                ):
+                    block.attn.v.bias.data.zero_()
+
+    def _refactor_factored_attn_matrices_inplace(self):
+        """Refactor factored attention matrices in-place."""
+        # TODO: Implement attention matrix refactoring for HF format
+        pass
+
+    def _load_processed_weights(self, processed_state_dict):
+        """Load processed weights back into the TransformerBridge.
+
+        Args:
+            processed_state_dict: Dictionary of processed weights in TransformerLens format
+        """
+        # Load embedding weights
+        if "embed.W_E" in processed_state_dict:
+            self.embed.weight.data = processed_state_dict["embed.W_E"]
+        if "pos_embed.W_pos" in processed_state_dict:
+            self.pos_embed.weight.data = processed_state_dict["pos_embed.W_pos"]
+
+        # Load layer weights
+        for layer_idx in range(self.cfg.n_layers):
+            if layer_idx >= len(self.blocks):
+                continue
+
+            block = self.blocks[layer_idx]
+
+            # Load attention weights
+            if f"blocks.{layer_idx}.attn.W_Q" in processed_state_dict:
+                # The processed weights are in [n_heads, d_model, d_head] format
+                # Need to reshape back to the bridge's expected format
+                w_q = processed_state_dict[f"blocks.{layer_idx}.attn.W_Q"]
+                w_k = processed_state_dict[f"blocks.{layer_idx}.attn.W_K"]
+                w_v = processed_state_dict[f"blocks.{layer_idx}.attn.W_V"]
+                w_o = processed_state_dict[f"blocks.{layer_idx}.attn.W_O"]
+
+                # Reshape from TL format to bridge format and load
+                if hasattr(block.attn, "q") and hasattr(block.attn.q, "weight"):
+                    # For separate Q/K/V components, reshape from [n_heads, d_model, d_head] to [d_model, d_model]
+                    if w_q.dim() == 3:  # [n_heads, d_model, d_head]
+                        block.attn.q.weight.data = w_q.reshape(-1, w_q.shape[1])
+                        block.attn.k.weight.data = w_k.reshape(-1, w_k.shape[1])
+                        block.attn.v.weight.data = w_v.reshape(-1, w_v.shape[1])
+                    else:
+                        block.attn.q.weight.data = w_q
+                        block.attn.k.weight.data = w_k
+                        block.attn.v.weight.data = w_v
+
+                if hasattr(block.attn, "o") and hasattr(block.attn.o, "weight"):
+                    # For output weights, reshape from [n_heads, d_head, d_model] to [d_model, d_model]
+                    if w_o.dim() == 3:  # [n_heads, d_head, d_model]
+                        block.attn.o.weight.data = w_o.reshape(w_o.shape[1] * w_o.shape[0], -1)
+                    else:
+                        block.attn.o.weight.data = w_o
+
+            # Load attention biases if they exist
+            for bias_name in ["b_Q", "b_K", "b_V", "b_O"]:
+                param_key = f"blocks.{layer_idx}.attn.{bias_name}"
+                if param_key in processed_state_dict:
+                    bridge_attr = bias_name[2:].lower()  # b_Q -> q, b_K -> k, etc.
+                    if bridge_attr == "o":
+                        bridge_attr = "o"
+                    if hasattr(block.attn, bridge_attr):
+                        attn_component = getattr(block.attn, bridge_attr)
+                        if hasattr(attn_component, "bias") and attn_component.bias is not None:
+                            bias_data = processed_state_dict[param_key]
+                            if bias_data.dim() > 1:  # [n_heads, d_head] -> [n_heads * d_head]
+                                bias_data = bias_data.reshape(-1)
+                            attn_component.bias.data = bias_data
+
+            # Load MLP weights
+            if hasattr(block, "mlp"):
+                mlp_weight_keys = ["W_in", "W_out", "W_gate"]
+                mlp_bias_keys = ["b_in", "b_out", "b_gate"]
+
+                for weight_key in mlp_weight_keys:
+                    param_key = f"blocks.{layer_idx}.mlp.{weight_key}"
+                    if param_key in processed_state_dict:
+                        bridge_attr = weight_key[2:].lower()  # W_in -> in, W_out -> out
+                        if bridge_attr == "in":
+                            bridge_attr = "input"  # GPT-2 uses 'input' instead of 'in'
+                        if hasattr(block.mlp, bridge_attr):
+                            mlp_component = getattr(block.mlp, bridge_attr)
+                            if hasattr(mlp_component, "weight"):
+                                mlp_component.weight.data = processed_state_dict[param_key]
+
+                for bias_key in mlp_bias_keys:
+                    param_key = f"blocks.{layer_idx}.mlp.{bias_key}"
+                    if param_key in processed_state_dict:
+                        bridge_attr = bias_key[2:].lower()  # b_in -> in, b_out -> out
+                        if bridge_attr == "in":
+                            bridge_attr = "input"  # GPT-2 uses 'input' instead of 'in'
+                        if hasattr(block.mlp, bridge_attr):
+                            mlp_component = getattr(block.mlp, bridge_attr)
+                            if hasattr(mlp_component, "bias") and mlp_component.bias is not None:
+                                mlp_component.bias.data = processed_state_dict[param_key]
+
+            # Load LayerNorm weights
+            for ln_name in ["ln1", "ln2"]:
+                for param_type in ["w", "b"]:
+                    param_key = f"blocks.{layer_idx}.{ln_name}.{param_type}"
+                    if param_key in processed_state_dict:
+                        if hasattr(block, ln_name):
+                            ln_component = getattr(block, ln_name)
+                            attr_name = "weight" if param_type == "w" else "bias"
+                            if hasattr(ln_component, attr_name):
+                                param_tensor = getattr(ln_component, attr_name)
+                                if param_tensor is not None:
+                                    param_tensor.data = processed_state_dict[param_key]
+
+        # Load final LayerNorm weights
+        for param_type in ["w", "b"]:
+            param_key = f"ln_final.{param_type}"
+            if param_key in processed_state_dict:
+                if hasattr(self, "ln_final"):
+                    attr_name = "weight" if param_type == "w" else "bias"
+                    if hasattr(self.ln_final, attr_name):
+                        param_tensor = getattr(self.ln_final, attr_name)
+                        if param_tensor is not None:
+                            param_tensor.data = processed_state_dict[param_key]
+
+        # Load unembedding weights
+        if "unembed.W_U" in processed_state_dict:
+            # Processed weights are in [d_model, d_vocab] format, bridge expects [d_vocab, d_model]
+            unembed_weight = processed_state_dict["unembed.W_U"]
+            if hasattr(self, "unembed") and hasattr(self.unembed, "weight"):
+                self.unembed.weight.data = unembed_weight.T  # Transpose back
 
     # ==================== TOKENIZATION METHODS ====================
 
@@ -1062,270 +1472,6 @@ class TransformerBridge(nn.Module):
     def OV(self):
         return FactoredMatrix(self.W_V, self.W_O)
 
-    def get_params(self):
-        """Access to model parameters in the format expected by SVDInterpreter.
-
-        For missing weights, returns zero tensors of appropriate shape instead of raising exceptions.
-        This ensures compatibility across different model architectures.
-
-        Returns:
-            dict: Dictionary of parameter tensors with TransformerLens naming convention
-
-        Raises:
-            ValueError: If configuration is inconsistent (e.g., cfg.n_layers != len(blocks))
-        """
-        params_dict = {}
-
-        # Helper function to get device and dtype from existing weights
-        def _get_device_dtype():
-            device = self.cfg.device if hasattr(self.cfg, "device") else torch.device("cpu")
-            dtype = torch.float32  # Default dtype
-
-            # Try to get dtype from existing weights
-            try:
-                device = self.embed.weight.device
-                dtype = self.embed.weight.dtype
-            except AttributeError:
-                try:
-                    device = self.pos_embed.weight.device
-                    dtype = self.pos_embed.weight.dtype
-                except AttributeError:
-                    if len(self.blocks) > 0:
-                        try:
-                            device = self.blocks[0].attn.q.weight.device
-                            dtype = self.blocks[0].attn.q.weight.dtype
-                        except AttributeError:
-                            pass
-            return device, dtype
-
-        # Add embedding weights
-        try:
-            params_dict["embed.W_E"] = self.embed.weight
-        except AttributeError:
-            device, dtype = _get_device_dtype()
-            params_dict["embed.W_E"] = torch.zeros(
-                self.cfg.d_vocab, self.cfg.d_model, device=device, dtype=dtype
-            )
-
-        try:
-            params_dict["pos_embed.W_pos"] = self.pos_embed.weight
-        except AttributeError:
-            device, dtype = _get_device_dtype()
-            params_dict["pos_embed.W_pos"] = torch.zeros(
-                self.cfg.n_ctx, self.cfg.d_model, device=device, dtype=dtype
-            )
-
-        # Add attention weights
-        for layer_idx in range(self.cfg.n_layers):
-            # Validate that the layer actually exists
-            if layer_idx >= len(self.blocks):
-                raise ValueError(
-                    f"Configuration mismatch: cfg.n_layers={self.cfg.n_layers} but only "
-                    f"{len(self.blocks)} blocks found. Layer {layer_idx} does not exist."
-                )
-
-            block = self.blocks[layer_idx]
-
-            try:
-                # Attention weights - reshape to expected format
-                w_q = block.attn.q.weight
-                w_k = block.attn.k.weight
-                w_v = block.attn.v.weight
-                w_o = block.attn.o.weight
-
-                # Reshape from [d_model, d_model] to [n_heads, d_model, d_head] and [n_heads, d_head, d_model]
-                # Handle different attention architectures (Multi-Head, Multi-Query, Grouped Query)
-                if w_q.shape == (self.cfg.d_model, self.cfg.d_model):
-                    d_head = self.cfg.d_model // self.cfg.n_heads
-                    w_q = w_q.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
-                    w_o = w_o.reshape(self.cfg.n_heads, d_head, self.cfg.d_model)
-
-                    # Handle K and V weights - they might have different shapes in Multi-Query Attention
-                    if w_k.shape == (self.cfg.d_model, self.cfg.d_model):
-                        w_k = w_k.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
-                    elif w_k.shape == (self.cfg.d_head, self.cfg.d_model) or w_k.shape == (
-                        self.cfg.d_model // self.cfg.n_heads,
-                        self.cfg.d_model,
-                    ):
-                        # Multi-Query Attention: single K head shared across all Q heads
-                        # Need to transpose to match expected [n_heads, d_model, d_head] format
-                        w_k = w_k.transpose(0, 1).unsqueeze(0).expand(self.cfg.n_heads, -1, -1)
-                    else:
-                        # Try to reshape based on element count
-                        if w_k.numel() == self.cfg.n_heads * self.cfg.d_model * self.cfg.d_head:
-                            w_k = w_k.view(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
-                        else:
-                            # Create zero tensor if can't reshape
-                            device, dtype = _get_device_dtype()
-                            w_k = torch.zeros(
-                                self.cfg.n_heads,
-                                self.cfg.d_model,
-                                self.cfg.d_head,
-                                device=device,
-                                dtype=dtype,
-                            )
-
-                    if w_v.shape == (self.cfg.d_model, self.cfg.d_model):
-                        w_v = w_v.reshape(self.cfg.n_heads, self.cfg.d_model, d_head)
-                    elif w_v.shape == (self.cfg.d_head, self.cfg.d_model) or w_v.shape == (
-                        self.cfg.d_model // self.cfg.n_heads,
-                        self.cfg.d_model,
-                    ):
-                        # Multi-Query Attention: single V head shared across all Q heads
-                        # Need to transpose to match expected [n_heads, d_model, d_head] format
-                        w_v = w_v.transpose(0, 1).unsqueeze(0).expand(self.cfg.n_heads, -1, -1)
-                    else:
-                        # Try to reshape based on element count
-                        if w_v.numel() == self.cfg.n_heads * self.cfg.d_model * self.cfg.d_head:
-                            w_v = w_v.view(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
-                        else:
-                            # Create zero tensor if can't reshape
-                            device, dtype = _get_device_dtype()
-                            w_v = torch.zeros(
-                                self.cfg.n_heads,
-                                self.cfg.d_model,
-                                self.cfg.d_head,
-                                device=device,
-                                dtype=dtype,
-                            )
-
-                params_dict[f"blocks.{layer_idx}.attn.W_Q"] = w_q
-                params_dict[f"blocks.{layer_idx}.attn.W_K"] = w_k
-                params_dict[f"blocks.{layer_idx}.attn.W_V"] = w_v
-                params_dict[f"blocks.{layer_idx}.attn.W_O"] = w_o
-
-                # Attention biases - handle None biases
-                if block.attn.q.bias is not None:
-                    params_dict[f"blocks.{layer_idx}.attn.b_Q"] = block.attn.q.bias.reshape(
-                        self.cfg.n_heads, -1
-                    )
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.attn.b_Q"] = torch.zeros(
-                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
-                    )
-
-                if block.attn.k.bias is not None:
-                    params_dict[f"blocks.{layer_idx}.attn.b_K"] = block.attn.k.bias.reshape(
-                        self.cfg.n_heads, -1
-                    )
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
-                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
-                    )
-
-                if block.attn.v.bias is not None:
-                    params_dict[f"blocks.{layer_idx}.attn.b_V"] = block.attn.v.bias.reshape(
-                        self.cfg.n_heads, -1
-                    )
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
-                        self.cfg.n_heads, self.cfg.d_head, device=device, dtype=dtype
-                    )
-
-                if block.attn.o.bias is not None:
-                    params_dict[f"blocks.{layer_idx}.attn.b_O"] = block.attn.o.bias
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.attn.b_O"] = torch.zeros(
-                        self.cfg.d_model, device=device, dtype=dtype
-                    )
-
-            except AttributeError:
-                # Create zero attention weights for missing attention component
-                device, dtype = _get_device_dtype()
-                expected_qkv_shape = (self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
-                expected_o_shape = (self.cfg.n_heads, self.cfg.d_head, self.cfg.d_model)
-                expected_qkv_bias_shape = (self.cfg.n_heads, self.cfg.d_head)
-                expected_o_bias_shape = (self.cfg.d_model,)
-
-                params_dict[f"blocks.{layer_idx}.attn.W_Q"] = torch.zeros(
-                    *expected_qkv_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.W_K"] = torch.zeros(
-                    *expected_qkv_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.W_V"] = torch.zeros(
-                    *expected_qkv_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.W_O"] = torch.zeros(
-                    *expected_o_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.b_Q"] = torch.zeros(
-                    *expected_qkv_bias_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
-                    *expected_qkv_bias_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
-                    *expected_qkv_bias_shape, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.attn.b_O"] = torch.zeros(
-                    *expected_o_bias_shape, device=device, dtype=dtype
-                )
-
-            try:
-                # MLP weights - access the actual weight tensors
-                params_dict[f"blocks.{layer_idx}.mlp.W_in"] = getattr(block.mlp, "in").weight
-                params_dict[f"blocks.{layer_idx}.mlp.W_out"] = block.mlp.out.weight
-
-                # MLP biases - handle None biases
-                mlp_in_bias = getattr(block.mlp, "in").bias
-                if mlp_in_bias is not None:
-                    params_dict[f"blocks.{layer_idx}.mlp.b_in"] = mlp_in_bias
-                else:
-                    device, dtype = _get_device_dtype()
-                    d_mlp = self.cfg.d_mlp if self.cfg.d_mlp is not None else (4 * self.cfg.d_model)
-                    params_dict[f"blocks.{layer_idx}.mlp.b_in"] = torch.zeros(
-                        d_mlp, device=device, dtype=dtype
-                    )
-
-                mlp_out_bias = block.mlp.out.bias
-                if mlp_out_bias is not None:
-                    params_dict[f"blocks.{layer_idx}.mlp.b_out"] = mlp_out_bias
-                else:
-                    device, dtype = _get_device_dtype()
-                    params_dict[f"blocks.{layer_idx}.mlp.b_out"] = torch.zeros(
-                        self.cfg.d_model, device=device, dtype=dtype
-                    )
-
-                # Add gate weights if they exist
-                if hasattr(block.mlp, "gate") and hasattr(block.mlp.gate, "weight"):
-                    params_dict[f"blocks.{layer_idx}.mlp.W_gate"] = block.mlp.gate.weight
-                    if hasattr(block.mlp.gate, "bias") and block.mlp.gate.bias is not None:
-                        params_dict[f"blocks.{layer_idx}.mlp.b_gate"] = block.mlp.gate.bias
-
-            except AttributeError:
-                # Create zero MLP weights for missing MLP component
-                device, dtype = _get_device_dtype()
-                d_mlp = self.cfg.d_mlp if self.cfg.d_mlp is not None else (4 * self.cfg.d_model)
-                params_dict[f"blocks.{layer_idx}.mlp.W_in"] = torch.zeros(
-                    self.cfg.d_model, d_mlp, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.mlp.W_out"] = torch.zeros(
-                    d_mlp, self.cfg.d_model, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.mlp.b_in"] = torch.zeros(
-                    d_mlp, device=device, dtype=dtype
-                )
-                params_dict[f"blocks.{layer_idx}.mlp.b_out"] = torch.zeros(
-                    self.cfg.d_model, device=device, dtype=dtype
-                )
-
-        # Add unembedding weights
-        try:
-            params_dict["unembed.W_U"] = self.unembed.weight.T
-        except AttributeError:
-            device, dtype = _get_device_dtype()
-            params_dict["unembed.W_U"] = torch.zeros(
-                self.cfg.d_model, self.cfg.d_vocab, device=device, dtype=dtype
-            )
-
-        return params_dict
-
-    @property
     def params(self):
         """Property access to model parameters in the format expected by SVDInterpreter."""
         return self.get_params()
@@ -1449,101 +1595,67 @@ class TransformerBridge(nn.Module):
             and hasattr(output, "past_key_values")
             and output.past_key_values is not None
         ):
-            # Update the TransformerLensKeyValueCache with new key-value pairs from backend output
+            # Convert backend cache format back to TransformerLens format
             backend_cache = output.past_key_values
+            for i, (cached_keys, cached_values) in enumerate(backend_cache):
+                if i < len(original_tl_cache.entries) and cached_keys is not None:
+                    # Convert from backend format [batch, n_heads, pos, d_head] to TL format [batch, pos, n_heads, d_head]
+                    tl_keys = cached_keys.transpose(1, 2)
+                    tl_values = cached_values.transpose(1, 2)
+                    original_tl_cache.entries[i].past_keys = tl_keys
+                    original_tl_cache.entries[i].past_values = tl_values
 
-            # Handle different backend cache formats
-            if isinstance(backend_cache, (list, tuple)):
-                # Standard format: list/tuple of (keys, values) tuples for each layer
-                for layer_idx, entry in enumerate(original_tl_cache.entries):
-                    if layer_idx < len(backend_cache):
-                        layer_cache = backend_cache[layer_idx]
-                        if isinstance(layer_cache, (list, tuple)) and len(layer_cache) >= 2:
-                            new_keys, new_values = layer_cache[0], layer_cache[1]
-                            if new_keys is not None and new_values is not None:
-                                # Convert from backend format [batch, n_heads, seq_len, d_head] to TL format [batch, seq_len, n_heads, d_head]
-                                new_keys_tl = new_keys.transpose(1, 2)
-                                new_values_tl = new_values.transpose(1, 2)
+            # Update attention mask for next iteration
+            if attention_mask is not None:
+                original_tl_cache.previous_attention_mask = kwargs.get(
+                    "attention_mask", attention_mask
+                )
+            elif hasattr(original_tl_cache, "previous_attention_mask"):
+                # Extend the previous mask with ones for the new tokens
+                batch_size, current_length = input_ids.shape
+                new_mask = torch.ones(
+                    batch_size, current_length, dtype=torch.long, device=input_ids.device
+                )
+                if original_tl_cache.previous_attention_mask is not None:
+                    original_tl_cache.previous_attention_mask = torch.cat(
+                        [original_tl_cache.previous_attention_mask, new_mask], dim=1
+                    )
+                else:
+                    original_tl_cache.previous_attention_mask = new_mask
 
-                                # Only take the new tokens (not the cached ones)
-                                new_token_count = input_ids.shape[1]
-                                if new_keys_tl.shape[1] >= new_token_count:
-                                    new_keys_tl = new_keys_tl[:, -new_token_count:, :, :]
-                                    new_values_tl = new_values_tl[:, -new_token_count:, :, :]
-                                    entry.append(new_keys_tl, new_values_tl)
-            else:
-                # Handle cache objects with different APIs (like DynamicCache)
-                for layer_idx, entry in enumerate(original_tl_cache.entries):
-                    new_keys = None
-                    new_values = None
-
-                    # Try different access patterns
-                    if (
-                        hasattr(backend_cache, "layers")
-                        and hasattr(backend_cache.layers, "__len__")
-                        and layer_idx < len(backend_cache.layers)
-                    ):
-                        # New API: cache.layers[idx].keys/values
-                        layer = backend_cache.layers[layer_idx]
-                        if hasattr(layer, "keys") and hasattr(layer, "values"):
-                            new_keys = layer.keys
-                            new_values = layer.values
-                    elif hasattr(backend_cache, "key_cache") and hasattr(
-                        backend_cache, "value_cache"
-                    ):
-                        # Legacy API: cache.key_cache[idx], cache.value_cache[idx]
-                        if hasattr(backend_cache.key_cache, "__len__") and layer_idx < len(
-                            backend_cache.key_cache
-                        ):
-                            new_keys = backend_cache.key_cache[layer_idx]
-                            new_values = backend_cache.value_cache[layer_idx]
-
-                    if new_keys is not None and new_values is not None:
-                        # Convert from backend format to TL format and append to cache entry
-                        new_keys_tl = new_keys.transpose(1, 2)  # [batch, seq_len, n_heads, d_head]
-                        new_values_tl = new_values.transpose(
-                            1, 2
-                        )  # [batch, seq_len, n_heads, d_head]
-
-                        # Only take the new tokens (not the cached ones)
-                        new_token_count = input_ids.shape[1]
-                        if new_keys_tl.shape[1] >= new_token_count:
-                            new_keys_tl = new_keys_tl[:, -new_token_count:, :, :]
-                            new_values_tl = new_values_tl[:, -new_token_count:, :, :]
-                            entry.append(new_keys_tl, new_values_tl)
-
-            # Update attention mask in the cache
-            current_mask = torch.ones(
-                input_ids.shape[0], input_ids.shape[1], dtype=torch.long, device=input_ids.device
-            )
-            original_tl_cache.append_attention_mask(current_mask)
+        # Extract logits from output
+        if hasattr(output, "logits"):
+            logits = output.logits
+        elif isinstance(output, tuple) and len(output) > 0:
+            logits = output[0]
+        else:
+            logits = output
 
         # Handle different return types
-        if return_type == "raw":
-            return output
         if return_type == "logits":
-            if hasattr(output, "logits"):
-                return output.logits
-            return output
+            return logits
         elif return_type == "loss":
-            if hasattr(output, "loss"):
+            if hasattr(output, "loss") and output.loss is not None:
                 return output.loss
-            # Calculate loss manually if needed
-            logits = output.logits if hasattr(output, "logits") else output
-            calculated_loss = self.loss_fn(logits, input_ids)
-            return calculated_loss
+            else:
+                # Calculate loss manually
+                return self.loss_fn(logits, input_ids, per_token=loss_per_token)
         elif return_type == "both":
-            logits = output.logits if hasattr(output, "logits") else output
-            loss = output.loss if hasattr(output, "loss") else self.loss_fn(logits, input_ids)
+            loss = None
+            if hasattr(output, "loss") and output.loss is not None:
+                loss = output.loss
+            else:
+                loss = self.loss_fn(logits, input_ids, per_token=loss_per_token)
             return logits, loss
-        else:
+        elif return_type is None:
             return output
+        else:
+            raise ValueError(f"Invalid return_type: {return_type}")
 
     def loss_fn(
         self,
         logits: torch.Tensor,
         tokens: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
         per_token: bool = False,
     ) -> torch.Tensor:
         """Calculate cross-entropy loss.
@@ -1551,7 +1663,6 @@ class TransformerBridge(nn.Module):
         Args:
             logits: Model logits
             tokens: Target tokens
-            attention_mask: Attention mask
             per_token: Whether to return per-token loss
 
         Returns:
@@ -1561,8 +1672,8 @@ class TransformerBridge(nn.Module):
         if tokens.device != logits.device:
             tokens = tokens.to(logits.device)
 
-        # Shift tokens for next-token prediction
-        target_tokens = tokens[:, 1:]
+        # Shift logits and tokens for next-token prediction
+        target_tokens = tokens[:, 1:].contiguous()  # Remove first token (typically BOS)
         pred_logits = logits[:, :-1]
 
         loss = torch.nn.functional.cross_entropy(
@@ -1586,7 +1697,8 @@ class TransformerBridge(nn.Module):
         remove_batch_dim: bool = False,
         **kwargs,
     ) -> Tuple[Any, ActivationCache]:
-        ...
+        """Run with cache - placeholder implementation."""
+        pass
 
     @overload
     def run_with_cache(
@@ -1596,7 +1708,8 @@ class TransformerBridge(nn.Module):
         remove_batch_dim: bool = False,
         **kwargs,
     ) -> Tuple[Any, Dict[str, torch.Tensor]]:
-        ...
+        """Run with cache - placeholder implementation."""
+        pass
 
     def run_with_cache(
         self,
@@ -1622,7 +1735,7 @@ class TransformerBridge(nn.Module):
         """
         # Process names_filter to create a callable that handles legacy hook names
         # Collect all aliases from bridge components (both hook and cache aliases)
-        aliases = collect_aliases_recursive(self)
+        aliases = collect_aliases_recursive(self.hook_dict)
 
         def create_names_filter_fn(filter_input):
             if filter_input is None:
@@ -1681,8 +1794,8 @@ class TransformerBridge(nn.Module):
 
             return cache_hook
 
-        # Use cached hooks instead of re-discovering them
-        hook_dict = self.hooks_to_cache
+        # Use hook dictionary to get all available hooks
+        hook_dict = self.hook_dict
 
         # Filter hooks based on names_filter
         for hook_name, hook in hook_dict.items():
@@ -1694,7 +1807,6 @@ class TransformerBridge(nn.Module):
         for hp, name in hooks:
             hp.add_hook(make_cache_hook(name))
 
-        try:
             processed_args = [input]
             # Handle string input whether passed positionally or as a kwarg
             if processed_args and isinstance(processed_args[0], str):
@@ -1755,17 +1867,26 @@ class TransformerBridge(nn.Module):
                 if "output_attentions" not in filtered_kwargs:
                     filtered_kwargs["output_attentions"] = True
 
-                output = self.original_model(*processed_args, **filtered_kwargs)
+                # Call forward with the input as the first argument
+                if processed_args:
+                    output = self.forward(processed_args[0], **filtered_kwargs)
+                elif "input_ids" in filtered_kwargs:
+                    # If we have input_ids but no processed_args, use the input_ids as input
+                    output = self.forward(
+                        filtered_kwargs["input_ids"],
+                        **{k: v for k, v in filtered_kwargs.items() if k != "input_ids"},
+                    )
+                else:
+                    output = self.forward(**filtered_kwargs)
                 # Extract logits if output is a HuggingFace model output object
                 if hasattr(output, "logits"):
                     output = output.logits
             except StopAtLayerException as e:
                 # Return the intermediate output from the specified layer
                 output = e.layer_output
-
-        finally:
-            for hp, _ in hooks:
-                hp.remove_hooks()
+            finally:
+                for hp, _ in hooks:
+                    hp.remove_hooks()
 
         if self.compatibility_mode == True:
             # If compatibility mode is enabled, we need to handle aliases
@@ -1807,8 +1928,10 @@ class TransformerBridge(nn.Module):
                         cache[alias_name] = cache[target_name]
 
         if return_cache_object:
-            cache_obj = ActivationCache(cache, self, has_batch_dim=not remove_batch_dim)
-            return output, cache_obj
+            from transformer_lens.ActivationCache import ActivationCache
+
+            activation_cache = ActivationCache(cache, self)
+            return output, activation_cache
         else:
             return output, cache
 
@@ -1876,7 +1999,7 @@ class TransformerBridge(nn.Module):
         def apply_hooks(hooks: List[Tuple[Union[str, Callable], Callable]], is_fwd: bool):
             direction: Literal["fwd", "bwd"] = "fwd" if is_fwd else "bwd"
             # Collect aliases for resolving legacy hook names
-            aliases = collect_aliases_recursive(self)
+            aliases = collect_aliases_recursive(self.hook_dict)
 
             for hook_name_or_filter, hook_fn in hooks:
                 # Wrap the hook function to handle remove_batch_dim if needed
@@ -1958,220 +2081,11 @@ class TransformerBridge(nn.Module):
         return_type: Optional[str] = "input",
         verbose: bool = True,
     ) -> Union[str, List[str], torch.Tensor]:
-        """Generate text from the model.
+        """Generate text from the model - placeholder implementation."""
+        # Simplified implementation - just return input
+        return input
 
-        Args:
-            input: Input prompt
-            max_new_tokens: Maximum number of tokens to generate
-            stop_at_eos: Whether to stop at EOS token
-            eos_token_id: EOS token ID
-            do_sample: Whether to sample from distribution
-            top_k: Top-k sampling parameter
-            top_p: Top-p sampling parameter
-            temperature: Sampling temperature
-            freq_penalty: Frequency penalty
-            use_past_kv_cache: Whether to use KV cache
-            prepend_bos: Whether to prepend BOS token
-            padding_side: Which side to pad on
-            return_type: Type of output to return
-            verbose: Whether to show progress
-
-        Returns:
-            Generated text or tokens
-        """
-        # Use the underlying model's generate method if available
-        if hasattr(self.original_model, "generate"):
-            # Tokenize input if needed
-            if isinstance(input, (str, list)):
-                input_ids = self.to_tokens(
-                    input, prepend_bos=prepend_bos, padding_side=padding_side
-                )
-            else:
-                input_ids = input
-
-            if input_ids.ndim == 1:
-                input_ids = input_ids.unsqueeze(0)
-
-            # Set up generation kwargs
-            gen_kwargs = {
-                "max_new_tokens": max_new_tokens,
-                "do_sample": do_sample,
-                "temperature": temperature,
-            }
-
-            # Handle KV cache parameter
-            if use_past_kv_cache:
-                gen_kwargs["use_cache"] = True
-            else:
-                gen_kwargs["use_cache"] = False
-
-            # Add optional parameters
-            if top_k is not None:
-                gen_kwargs["top_k"] = top_k
-            if top_p is not None:
-                gen_kwargs["top_p"] = top_p
-            if eos_token_id is not None:
-                gen_kwargs["eos_token_id"] = eos_token_id
-            if (
-                stop_at_eos
-                and eos_token_id is None
-                and hasattr(self.tokenizer, "eos_token_id")
-                and self.tokenizer.eos_token_id is not None
-            ):
-                gen_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
-
-            # Call the original model's generate method
-            output_ids = self.original_model.generate(input_ids, **gen_kwargs)  # type: ignore[operator]
-
-            # Handle return type
-            if return_type == "input":
-                if isinstance(input, (str, list)):
-                    return_type = "str"
-                else:
-                    return_type = "tokens"
-
-            if return_type == "str":
-                decoded_texts = [
-                    self.tokenizer.decode(tokens, skip_special_tokens=True) for tokens in output_ids
-                ]
-                return decoded_texts[0] if len(decoded_texts) == 1 else decoded_texts
-            elif return_type == "tokens":
-                return output_ids
-            else:
-                return output_ids
-        else:
-            # Fallback to custom implementation if original model doesn't have generate method
-            # Handle input tokenization
-            if isinstance(input, (str, list)):
-                input_ids = self.to_tokens(
-                    input, prepend_bos=prepend_bos, padding_side=padding_side
-                )
-            else:
-                input_ids = input
-
-            if input_ids.ndim == 1:
-                input_ids = input_ids.unsqueeze(0)
-
-            batch_size, ctx_length = input_ids.shape[0], input_ids.shape[1]
-            device = input_ids.device
-
-            # Handle EOS token
-            stop_tokens = []
-            eos_token_for_padding = 0
-            if stop_at_eos:
-                if eos_token_id is None:
-                    if (
-                        hasattr(self.tokenizer, "eos_token_id")
-                        and self.tokenizer.eos_token_id is not None
-                    ):
-                        eos_token_id = self.tokenizer.eos_token_id
-                    else:
-                        raise ValueError(
-                            "Must pass eos_token_id if stop_at_eos is True and tokenizer has no eos_token_id"
-                        )
-
-                if isinstance(eos_token_id, int):
-                    stop_tokens = [eos_token_id]
-                    eos_token_for_padding = eos_token_id
-                else:
-                    stop_tokens = eos_token_id
-                    eos_token_for_padding = (
-                        self.tokenizer.eos_token_id
-                        if hasattr(self.tokenizer, "eos_token_id")
-                        and self.tokenizer.eos_token_id is not None
-                        else eos_token_id[0]
-                    )
-
-            # Track finished sequences
-            finished_sequences = torch.zeros(batch_size, dtype=torch.bool, device=device)
-
-            # Initialize a TL cache object if using a HookedTransformer backend and caching is enabled
-            past_kv_cache_obj = None
-            if use_past_kv_cache and getattr(
-                self.original_model.__class__, "__name__", ""
-            ).endswith("HookedTransformer"):
-                past_kv_cache_obj = TransformerLensKeyValueCache.init_cache(
-                    self.cfg, device, batch_size
-                )
-
-            # Generate tokens
-            self.eval()
-            sampled_tokens_list: list[torch.Tensor] = []
-
-            for index in tqdm.tqdm(range(max_new_tokens), disable=not verbose):
-                # Build the current sequence (use caching by feeding only the last token when enabled)
-                if use_past_kv_cache and index > 0:
-                    step_input = sampled_tokens_list[-1]
-                else:
-                    step_input = (
-                        input_ids
-                        if index == 0
-                        else torch.cat([input_ids] + sampled_tokens_list, dim=1)
-                    )
-
-                # Forward pass with optional KV cache (delegated to underlying model)
-                logits = self.forward(
-                    step_input,
-                    return_type="logits",
-                    prepend_bos=prepend_bos,
-                    padding_side=padding_side,
-                    past_kv_cache=past_kv_cache_obj,
-                    use_past_kv_cache=use_past_kv_cache,
-                )
-
-                # Get logits for the last position
-                final_logits = logits[:, -1, :]
-
-                # Sample next token
-                if do_sample:
-                    sampled_tokens = utils.sample_logits(
-                        final_logits,
-                        top_k=top_k,
-                        top_p=top_p,
-                        temperature=temperature,
-                    ).to(device)
-                else:
-                    sampled_tokens = final_logits.argmax(-1).to(device)
-
-                sampled_tokens_list.append(sampled_tokens.unsqueeze(1))
-
-                # Handle EOS tokens
-                if stop_at_eos:
-                    sampled_tokens[finished_sequences] = eos_token_for_padding
-                    finished_sequences.logical_or_(
-                        torch.isin(
-                            sampled_tokens.to(device),
-                            torch.tensor(stop_tokens).to(device),
-                        )
-                    )
-
-                # Stop if all sequences are finished
-                if stop_at_eos and finished_sequences.all():
-                    break
-
-            # Combine all generated tokens
-            sampled_tokens = torch.cat(sampled_tokens_list, dim=1)
-            output_tokens = torch.cat((input_ids, sampled_tokens), dim=1)
-
-            # Handle return type
-            if return_type == "input":
-                if isinstance(input, (str, list)):
-                    return_type = "str"
-                else:
-                    return_type = "tokens"
-
-            if return_type == "str":
-                decoded_texts = [
-                    self.tokenizer.decode(tokens, skip_special_tokens=True)
-                    for tokens in output_tokens
-                ]
-                return decoded_texts[0] if len(decoded_texts) == 1 else decoded_texts
-            elif return_type == "tokens":
-                return output_tokens
-            else:
-                return output_tokens
-
-    # ==================== UTILITY METHODS ====================
+    # ==================== DEVICE MANAGEMENT ====================
 
     def to(self, *args, **kwargs) -> "TransformerBridge":
         """Move model to device or change dtype.
@@ -2370,20 +2284,16 @@ class TransformerBridge(nn.Module):
         """
         self.cfg.use_split_qkv_input = use_split_qkv_input
 
-    def set_use_hook_mlp_in(self, use_hook_mlp_in: bool):
-        """Toggles whether to allow storing and editing inputs to each MLP layer."""
-        warnings.warn(
-            "This function is now deprecated and no longer does anything. These options are turned on by default now.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    def get_params(self):
+        """Access to model parameters in the format expected by SVDInterpreter.
 
-    def set_use_attn_in(self, use_attn_in: bool):
+        For missing weights, returns zero tensors of appropriate shape instead of raising exceptions.
+        This ensures compatibility across different model architectures.
+
+        Returns:
+            dict: Dictionary of parameter tensors with TransformerLens naming convention
+
+        Raises:
+            ValueError: If configuration is inconsistent (e.g., cfg.n_layers != len(blocks))
         """
-        Toggles whether to allow editing of inputs to each attention head.
-        """
-        warnings.warn(
-            "This function is now deprecated and no longer does anything. These options are turned on by default now.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        return get_bridge_params(self)

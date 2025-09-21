@@ -30,6 +30,7 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
         # Set default config for GPT2 models
         self.default_cfg = {
             "default_prepend_bos": True,  # Default for GPT-2 style models
+            "uses_split_attention": True,  # GPT-2 uses combined QKV attention that needs splitting
         }
 
         self.conversion_rules = HookConversionSet(

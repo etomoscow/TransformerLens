@@ -43,6 +43,9 @@ class ArchitectureAdapter:
         self.component_mapping: ComponentMapping | None = None
         self.conversion_rules: HookConversionSet | None = None
 
+        # Configuration for attention weight handling
+        self.uses_split_attention: bool = getattr(cfg, "uses_split_attention", False)
+
         # Merge default_cfg into cfg for missing variables
         self._merge_default_config()
 
@@ -263,6 +266,9 @@ class ArchitectureAdapter:
                 "component_mapping must be set before calling translate_transformer_lens_path"
             )
 
+        # Preprocess the path to handle parameter name mapping
+        path, param_suffix = self._preprocess_parameter_path(path)
+
         parts = path.split(".")
         if not parts:
             raise ValueError("Empty path")
@@ -276,6 +282,9 @@ class ArchitectureAdapter:
         if len(parts) == 1:
             # Simple case: just return the bridge's remote path
             remote_path = bridge_component.name
+            # Add parameter suffix from preprocessing
+            if param_suffix:
+                remote_path = remote_path + param_suffix
             if last_component_only:
                 return remote_path.split(".")[-1]
             return remote_path
@@ -293,8 +302,11 @@ class ArchitectureAdapter:
             if len(parts) == 2:
                 # Just return the indexed item path
                 remote_path = f"{items_path}.{item_index}"
+                # Add parameter suffix from preprocessing
+                if param_suffix:
+                    remote_path = remote_path + param_suffix
                 if last_component_only:
-                    return item_index
+                    return remote_path.split(".")[-1]
                 return remote_path
             else:
                 # Get subcomponent from the item bridge
@@ -323,14 +335,20 @@ class ArchitectureAdapter:
                                 )
 
                         remote_path = ".".join(remote_path_parts)
+                        # Add parameter suffix from preprocessing
+                        if param_suffix:
+                            remote_path = remote_path + param_suffix
                         if last_component_only:
-                            return current_bridge.name
+                            return remote_path.split(".")[-1]
                         return remote_path
                     else:
                         # Just the 3-level path
                         remote_path = f"{items_path}.{item_index}.{subcomponent_bridge.name}"
+                        # Add parameter suffix from preprocessing
+                        if param_suffix:
+                            remote_path = remote_path + param_suffix
                         if last_component_only:
-                            return subcomponent_bridge.name
+                            return remote_path.split(".")[-1]
                         return remote_path
                 else:
                     raise ValueError(
@@ -342,8 +360,251 @@ class ArchitectureAdapter:
         if len(parts) > 1:
             remote_path = f"{remote_path}.{'.'.join(parts[1:])}"
 
+        # Add parameter suffix from preprocessing
+        if param_suffix:
+            remote_path = remote_path + param_suffix
+
         if last_component_only:
             return remote_path.split(".")[-1]
+        return remote_path
+
+    def _preprocess_parameter_path(self, path: str) -> tuple[str, str]:
+        """Preprocess TransformerLens path to map parameter names to component names.
+
+        Args:
+            path: The original TransformerLens path
+
+        Returns:
+            Tuple of (preprocessed_path, parameter_suffix)
+        """
+        # Determine parameter suffix from the original path
+        param_suffix = ""  # Initialize to handle all code paths
+        if path.endswith(
+            (
+                ".W_Q",
+                ".W_K",
+                ".W_V",
+                ".W_O",
+                ".W_in",
+                ".W_out",
+                ".W_gate",
+                ".W_E",
+                ".W_U",
+                ".W_pos",
+                ".w",
+                "._W_K",
+                "._W_V",
+            )
+        ):
+            param_suffix = ".weight"
+        elif path.endswith(
+            (
+                ".b_Q",
+                ".b_K",
+                ".b_V",
+                ".b_O",
+                ".b_in",
+                ".b_out",
+                ".b_gate",
+                ".b_E",
+                ".b_U",
+                ".b_pos",
+                ".b",
+                "._b_K",
+                "._b_V",
+            )
+        ):
+            param_suffix = ".bias"
+
+        # Handle attention weights based on actual architecture
+        # Check if this is an attention weight that needs architecture-specific mapping
+        if any(
+            path.endswith(suffix)
+            for suffix in [
+                ".W_Q",
+                ".W_K",
+                ".W_V",
+                ".b_Q",
+                ".b_K",
+                ".b_V",
+                "._W_K",
+                "._W_V",
+                "._b_K",
+                "._b_V",
+            ]
+        ):
+            # Extract the attention component path (e.g., "blocks.0.attn")
+            attn_path_parts = path.split(".")
+            if len(attn_path_parts) >= 3 and attn_path_parts[-2] == "attn":
+                attn_component_path = ".".join(attn_path_parts[:-1])  # e.g., "blocks.0.attn"
+
+                # Check what attention components are actually available
+                try:
+                    if self.component_mapping:
+                        # Navigate to the attention component to see what submodules it has
+                        current_mapping = self.component_mapping
+                        for part in attn_component_path.split("."):
+                            if (
+                                hasattr(current_mapping, "submodules")
+                                and part in current_mapping.submodules
+                            ):
+                                current_mapping = current_mapping.submodules[part]  # type: ignore
+                            elif hasattr(current_mapping, "__getitem__"):
+                                current_mapping = current_mapping[part]  # type: ignore
+
+                        # Check available attention subcomponents
+                        if hasattr(current_mapping, "submodules"):
+                            attn_components = list(current_mapping.submodules.keys())
+
+                            # If we have a combined qkv component, map all Q/K/V to it
+                            if "qkv" in attn_components:
+                                path = path.replace(".W_Q", ".qkv")
+                                path = path.replace(".W_K", ".qkv")
+                                path = path.replace(".W_V", ".qkv")
+                                path = path.replace(".b_Q", ".qkv")
+                                path = path.replace(".b_K", ".qkv")
+                                path = path.replace(".b_V", ".qkv")
+                                # Handle GQA-specific paths
+                                path = path.replace("._W_K", ".qkv")
+                                path = path.replace("._W_V", ".qkv")
+                                path = path.replace("._b_K", ".qkv")
+                                path = path.replace("._b_V", ".qkv")
+                            # If we have separate q, k, v components, map individually
+                            elif all(comp in attn_components for comp in ["q", "k", "v"]):
+                                path = path.replace(".W_Q", ".q")
+                                path = path.replace(".W_K", ".k")
+                                path = path.replace(".W_V", ".v")
+                                path = path.replace(".b_Q", ".q")
+                                path = path.replace(".b_K", ".k")
+                                path = path.replace(".b_V", ".v")
+                                # Handle GQA-specific paths - map to regular k/v components
+                                path = path.replace("._W_K", ".k")
+                                path = path.replace("._W_V", ".v")
+                                path = path.replace("._b_K", ".k")
+                                path = path.replace("._b_V", ".v")
+                            # If we have qkv_proj (like some other architectures), use that
+                            elif "qkv_proj" in attn_components:
+                                path = path.replace(".W_Q", ".qkv_proj")
+                                path = path.replace(".W_K", ".qkv_proj")
+                                path = path.replace(".W_V", ".qkv_proj")
+                                path = path.replace(".b_Q", ".qkv_proj")
+                                path = path.replace(".b_K", ".qkv_proj")
+                                path = path.replace(".b_V", ".qkv_proj")
+                except Exception:
+                    # Fallback to default behavior if component mapping inspection fails
+                    pass
+
+        # If no architecture-specific mapping was applied, use default fallback
+        if any(
+            path.endswith(suffix) for suffix in [".W_Q", ".W_K", ".W_V", ".b_Q", ".b_K", ".b_V"]
+        ):
+            # Default fallback - assume separate components
+            path = path.replace(".W_Q", ".q")
+            path = path.replace(".W_K", ".k")
+            path = path.replace(".W_V", ".v")
+            path = path.replace(".b_Q", ".q")
+            path = path.replace(".b_K", ".k")
+            path = path.replace(".b_V", ".v")
+
+        # Handle other attention weights
+        path = path.replace(".W_O", ".o")
+        path = path.replace(".b_O", ".o")
+
+        # Handle MLP weights based on actual architecture
+        # Check if this is an MLP weight that needs architecture-specific mapping
+        if any(
+            path.endswith(suffix)
+            for suffix in [".W_in", ".W_out", ".b_in", ".b_out", ".ln.w", ".ln.b"]
+        ):
+            # Extract the MLP component path (e.g., "blocks.0.mlp")
+            mlp_path_parts = path.split(".")
+            if len(mlp_path_parts) >= 3 and mlp_path_parts[-2] == "mlp":
+                mlp_component_path = ".".join(mlp_path_parts[:-1])  # e.g., "blocks.0.mlp"
+
+                # Check what MLP components are actually available
+                try:
+                    if self.component_mapping:
+                        # Navigate to the MLP component to see what submodules it has
+                        current_mapping = self.component_mapping
+                        for part in mlp_component_path.split("."):
+                            if (
+                                hasattr(current_mapping, "submodules")
+                                and part in current_mapping.submodules
+                            ):
+                                current_mapping = current_mapping.submodules[part]  # type: ignore
+                            elif hasattr(current_mapping, "__getitem__"):
+                                current_mapping = current_mapping[part]  # type: ignore
+
+                        # Check available MLP subcomponents
+                        if hasattr(current_mapping, "submodules"):
+                            mlp_components = list(current_mapping.submodules.keys())
+
+                            # Map based on available components
+                            if "input" in mlp_components and "out" in mlp_components:
+                                # GPT-2 style: input/out
+                                path = path.replace(".W_in", ".input")
+                                path = path.replace(".b_in", ".input")
+                                path = path.replace(".W_out", ".out")
+                                path = path.replace(".b_out", ".out")
+                            elif "in" in mlp_components and "out" in mlp_components:
+                                # Standard style: in/out
+                                path = path.replace(".W_in", ".in")
+                                path = path.replace(".b_in", ".in")
+                                path = path.replace(".W_out", ".out")
+                                path = path.replace(".b_out", ".out")
+                            elif "fc_in" in mlp_components and "fc_out" in mlp_components:
+                                # Some other style: fc_in/fc_out
+                                path = path.replace(".W_in", ".fc_in")
+                                path = path.replace(".b_in", ".fc_in")
+                                path = path.replace(".W_out", ".fc_out")
+                                path = path.replace(".b_out", ".fc_out")
+
+                            # Handle SoLU MLP layer norm paths
+                            if "ln" in mlp_components:
+                                path = path.replace(".ln.w", ".ln")
+                                path = path.replace(".ln.b", ".ln")
+                except Exception:
+                    # Fallback to default behavior if component mapping inspection fails
+                    pass
+
+        # If no architecture-specific mapping was applied, use default fallback for MLP
+        if any(path.endswith(suffix) for suffix in [".W_in", ".W_out", ".b_in", ".b_out"]):
+            # Default fallback - assume standard in/out components
+            path = path.replace(".W_in", ".in")
+            path = path.replace(".b_in", ".in")
+            path = path.replace(".W_out", ".out")
+            path = path.replace(".b_out", ".out")
+        path = path.replace(".W_gate", ".gate")
+        path = path.replace(".b_gate", ".gate")
+
+        # Handle embedding/unembedding weights (these keep their suffix)
+        if not (path.endswith(".weight") or path.endswith(".bias")):
+            path = path.replace(".W_E", "")
+            path = path.replace(".b_E", "")
+            path = path.replace(".W_U", "")
+            path = path.replace(".b_U", "")
+            path = path.replace(".W_pos", "")
+            path = path.replace(".b_pos", "")
+            path = path.replace(".w", "")
+            path = path.replace(".b", "")
+
+        return path, param_suffix
+
+    def _translate_parameter_name(self, remote_path: str, original_path: str) -> str:
+        """Translate parameter names from TransformerLens format to target format.
+
+        Since preprocessing handles most parameter mapping, this method just
+        handles any remaining cases.
+
+        Args:
+            remote_path: The translated component path
+            original_path: The original TransformerLens path
+
+        Returns:
+            The path with parameter names translated
+        """
+        # Most parameter translation is handled by preprocessing,
+        # so this method is now much simpler
         return remote_path
 
     def convert_weights(self, hf_model: nn.Module) -> dict[str, torch.Tensor]:
