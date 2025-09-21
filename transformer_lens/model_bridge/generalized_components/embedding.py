@@ -52,6 +52,11 @@ class EmbeddingBridge(GeneralizedComponent):
         assert isinstance(weight, torch.Tensor), f"Weight is not a tensor for {self.name}"
         return weight
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """Return the embedding weight matrix (alias for W_E)."""
+        return self.W_E
+
     def forward(
         self,
         input_ids: torch.Tensor,

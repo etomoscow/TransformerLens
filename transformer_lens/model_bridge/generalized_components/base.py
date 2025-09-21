@@ -282,6 +282,24 @@ class GeneralizedComponent(nn.Module):
         # Fall back to normal attribute setting
         super().__setattr__(name, value)
 
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """Load state dict into the component, forwarding to the original component.
+
+        Args:
+            state_dict: Dictionary containing a whole state of the module
+            strict: Whether to strictly enforce that the keys in state_dict match the keys returned by this module's state_dict() function
+            assign: Whether to assign items in the state dictionary to their corresponding keys in the module instead of copying them
+
+        Returns:
+            NamedTuple with missing_keys and unexpected_keys fields
+        """
+        if self.original_component is None:
+            raise RuntimeError(
+                f"Original component not set for {self.name}. Call set_original_component() first."
+            )
+        # Forward the load_state_dict call to the original component
+        return self.original_component.load_state_dict(state_dict, strict=strict, assign=assign)
+
     def has_bias(self) -> bool:
         """Check if the linear layer has a bias."""
         if self.original_component is None:

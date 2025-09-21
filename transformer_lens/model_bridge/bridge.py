@@ -98,7 +98,8 @@ class TransformerBridge(nn.Module):
             tokenizer: The tokenizer to use (required)
         """
         super().__init__()
-        self.original_model: nn.Module = model
+        # Set original_model directly in __dict__ to avoid any property issues
+        self.__dict__["original_model"] = model
         self.adapter = adapter
         self.cfg = adapter.cfg
 
@@ -121,7 +122,9 @@ class TransformerBridge(nn.Module):
             raise ValueError("Adapter must have a component_mapping attribute")
 
         # Set original components on the pre-created bridge components
-        set_original_components(self, self.adapter, self.original_model)
+        # Access original_model directly from __dict__ to avoid __getattr__ issues
+        original_model = self.__dict__["original_model"]
+        set_original_components(self, self.adapter, original_model)
 
         # Initialize hook registry after components are set up
         self._initialize_hook_registry()
@@ -265,9 +268,13 @@ class TransformerBridge(nn.Module):
                         break
                     continue
             else:
-                target_hook = resolve_alias(self, alias_name, {alias_name: target})
-                if target_hook is not None:
-                    hooks[alias_name] = target_hook
+                try:
+                    target_hook = resolve_alias(self, alias_name, {alias_name: target})
+                    if target_hook is not None:
+                        hooks[alias_name] = target_hook
+                except AttributeError:
+                    # Skip this alias if it can't be resolved (e.g., during initialization)
+                    continue
 
     def _scan_existing_hooks(self, module: nn.Module, prefix: str = "") -> None:
         """Scan existing modules for hooks and add them to registry."""
@@ -295,10 +302,30 @@ class TransformerBridge(nn.Module):
             for attr_name in dir(mod):
                 if attr_name.startswith("_"):
                     continue
-                if attr_name == "original_component" or "original_model":
+                if attr_name == "original_component" or attr_name == "original_model":
                     continue
 
-                    attr = getattr(mod, attr_name)
+                # Skip properties that might not be ready during initialization
+                if attr_name in [
+                    "OV",
+                    "QK",
+                    "W_V",
+                    "W_O",
+                    "W_Q",
+                    "W_K",
+                    "W_in",
+                    "W_gate",
+                    "W_out",
+                    "b_V",
+                    "b_O",
+                    "b_Q",
+                    "b_K",
+                    "b_in",
+                    "b_out",
+                ]:
+                    continue
+
+                attr = getattr(mod, attr_name)
 
                 name = f"{path}.{attr_name}" if path else attr_name
 
@@ -454,6 +481,7 @@ class TransformerBridge(nn.Module):
 
     def __getattr__(self, name: str) -> Any:
         """Provide a clear error message for missing attributes."""
+        # First check if the attribute is in __dict__ (direct attributes)
         if name in self.__dict__:
             return self.__dict__[name]
 
@@ -463,7 +491,22 @@ class TransformerBridge(nn.Module):
             if resolved_hook is not None:
                 return resolved_hook
 
-        return super().__getattr__(name)
+        # Try to get from original_model if it exists
+        if "original_model" in self.__dict__ and self.__dict__["original_model"] is not None:
+            try:
+                name_split = name.split(".")
+                if len(name_split) > 1:
+                    current = getattr(self.__dict__["original_model"], name_split[0])
+                    for part in name_split[1:]:
+                        current = getattr(current, part)
+                    return current
+                else:
+                    return getattr(self.__dict__["original_model"], name)
+            except AttributeError:
+                pass
+
+        # If we get here, the attribute wasn't found anywhere
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def _get_nested_attr(self, path: str) -> Any:
         """Get a nested attribute using dot notation."""
@@ -578,6 +621,7 @@ class TransformerBridge(nn.Module):
                 center_writing_weights=True,
                 center_unembed=True,
                 fold_value_biases=True,
+                refactor_factored_attn_matrices=False,  # Keep unfactored format to match HuggingFace
             )
 
     def process_weights(
@@ -588,148 +632,73 @@ class TransformerBridge(nn.Module):
         fold_value_biases: bool = True,
         refactor_factored_attn_matrices: bool = False,
     ):
-        """Apply weight processing transformations directly to HuggingFace tensor formats.
+        """Apply weight processing transformations using the centralized ProcessWeights class.
 
-        Keeps weights in HF format throughout and applies the same mathematical
-        transformations as ProcessWeights, adapted for HF tensor shapes.
+        This method extracts weights from the original HuggingFace model and applies weight processing
+        using the centralized ProcessWeights class with the architecture adapter to handle parameter
+        name translation from TransformerLens format to HuggingFace format.
         """
-        import torch
+        # import torch
+        # import torch.nn as nn
 
-        original_state_dict = self.original_model.state_dict()
+        from transformer_lens.weight_processing import ProcessWeights
 
-        state_dict = {}
-        for key, tensor in original_state_dict.items():
-            clean_key = key.replace("._original_component", "")
-            state_dict[clean_key] = tensor.clone()
+        # # Step 1: Extract HuggingFace weights from original model
+        hf_state_dict = self._extract_hf_weights()
 
+        # # Step 2: Apply centralized weight processing with architecture adapter
+        # # The adapter will translate TransformerLens parameter names to HuggingFace parameter names
+        processed_hf_state_dict = ProcessWeights.process_weights(
+            hf_state_dict,
+            self.cfg,
+            fold_ln=fold_ln,
+            center_writing_weights=center_writing_weights,
+            center_unembed=center_unembed,
+            fold_value_biases=fold_value_biases,
+            refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+            adapter=self.adapter,
+        )
+
+        # # Step 3: Replace LayerNorm components with LayerNormPre-like operations if fold_ln is True
+        # This is equivalent to what HookedTransformer does when it replaces LayerNorm with LayerNormPre
         if fold_ln:
-            self._fold_layer_norm_hf_native(state_dict)
+            self._replace_layer_norm_with_identity(self.original_model)
 
-        if center_writing_weights:
-            self._center_writing_weights_hf_native(state_dict)
+        # # Step 4: Load processed weights into the original model using the bridge's load_state_dict method
+        # This handles the key mapping between clean keys and _original_component keys
+        # Use strict=False because weight processing may remove some keys (e.g., individual Q,K,V -> combined QKV)
+        self.load_state_dict(processed_hf_state_dict, strict=False, assign=True)
 
-        if center_unembed:
-            self._center_unembed_hf_native(state_dict)
+    def _extract_hf_weights(self):
+        """Extract weights from the original HuggingFace model."""
+        # Use the bridge's clean state_dict method which automatically filters out _original_component
+        hf_state_dict = self.state_dict()
 
-        self._add_identity_layer_norm_params(state_dict)
-        self._load_processed_hf_weights(state_dict)
-
-    def _fold_layer_norm_hf_native(self, state_dict):
-        """Fold LayerNorm into subsequent layers using HF tensor formats."""
-        import torch
-
+        # Remove separate Q, K, V weights if combined QKV weights exist
+        # This prevents the adapter from processing the same combined weight multiple times
         for layer_idx in range(self.cfg.n_layers):
-            # Fold LN1 into attention
-            ln1_weight = state_dict[f"transformer.h.{layer_idx}.ln_1.weight"]
-            ln1_bias = state_dict[f"transformer.h.{layer_idx}.ln_1.bias"]
+            combined_qkv_key = f"transformer.h.{layer_idx}.attn.c_attn.weight"
+            combined_qkv_bias_key = f"transformer.h.{layer_idx}.attn.c_attn.bias"
 
-            c_attn_weight = state_dict[f"transformer.h.{layer_idx}.attn.c_attn.weight"]
-            c_attn_bias = state_dict[f"transformer.h.{layer_idx}.attn.c_attn.bias"]
+            if combined_qkv_key in hf_state_dict:
+                # Remove separate Q, K, V weights since we have combined QKV
+                separate_keys_to_remove = [
+                    f"transformer.h.{layer_idx}.attn.q.weight",
+                    f"transformer.h.{layer_idx}.attn.q.bias",
+                    f"transformer.h.{layer_idx}.attn.k.weight",
+                    f"transformer.h.{layer_idx}.attn.k.bias",
+                    f"transformer.h.{layer_idx}.attn.v.weight",
+                    f"transformer.h.{layer_idx}.attn.v.bias",
+                ]
 
-            # Split combined QKV for processing
-            d_model = self.cfg.d_model
-            q_weight = c_attn_weight[:, :d_model]
-            k_weight = c_attn_weight[:, d_model : 2 * d_model]
-            v_weight = c_attn_weight[:, 2 * d_model :]
+                for key_to_remove in separate_keys_to_remove:
+                    if key_to_remove in hf_state_dict:
+                        del hf_state_dict[key_to_remove]
 
-            q_bias = c_attn_bias[:d_model]
-            k_bias = c_attn_bias[d_model : 2 * d_model]
-            v_bias = c_attn_bias[2 * d_model :]
-
-            # Apply LayerNorm folding: fold biases, then weights, then center
-            q_bias = q_bias + torch.sum(q_weight * ln1_bias[:, None], dim=0)
-            k_bias = k_bias + torch.sum(k_weight * ln1_bias[:, None], dim=0)
-            v_bias = v_bias + torch.sum(v_weight * ln1_bias[:, None], dim=0)
-
-            q_weight = q_weight * ln1_weight[:, None]
-            k_weight = k_weight * ln1_weight[:, None]
-            v_weight = v_weight * ln1_weight[:, None]
-
-            q_weight = q_weight - torch.mean(q_weight, dim=0, keepdim=True)
-            k_weight = k_weight - torch.mean(k_weight, dim=0, keepdim=True)
-            v_weight = v_weight - torch.mean(v_weight, dim=0, keepdim=True)
-
-            # Recombine and store
-            state_dict[f"transformer.h.{layer_idx}.attn.c_attn.weight"] = torch.cat(
-                [q_weight, k_weight, v_weight], dim=1
-            )
-            state_dict[f"transformer.h.{layer_idx}.attn.c_attn.bias"] = torch.cat(
-                [q_bias, k_bias, v_bias], dim=0
-            )
-
-            del state_dict[f"transformer.h.{layer_idx}.ln_1.weight"]
-            del state_dict[f"transformer.h.{layer_idx}.ln_1.bias"]
-
-            # Fold LN2 into MLP
-            ln2_weight = state_dict[f"transformer.h.{layer_idx}.ln_2.weight"]
-            ln2_bias = state_dict[f"transformer.h.{layer_idx}.ln_2.bias"]
-
-            c_fc_weight = state_dict[f"transformer.h.{layer_idx}.mlp.c_fc.weight"]
-            c_fc_bias = state_dict[f"transformer.h.{layer_idx}.mlp.c_fc.bias"]
-
-            c_fc_bias = c_fc_bias + torch.sum(c_fc_weight * ln2_bias[:, None], dim=0)
-            c_fc_weight = c_fc_weight * ln2_weight[:, None]
-            c_fc_weight = c_fc_weight - torch.mean(c_fc_weight, dim=0, keepdim=True)
-
-            state_dict[f"transformer.h.{layer_idx}.mlp.c_fc.weight"] = c_fc_weight
-            state_dict[f"transformer.h.{layer_idx}.mlp.c_fc.bias"] = c_fc_bias
-
-            del state_dict[f"transformer.h.{layer_idx}.ln_2.weight"]
-            del state_dict[f"transformer.h.{layer_idx}.ln_2.bias"]
-
-        # Fold final LayerNorm into unembedding
-        ln_final_weight = state_dict["transformer.ln_f.weight"]
-        ln_final_bias = state_dict["transformer.ln_f.bias"]
-
-        lm_head_weight = state_dict["lm_head.weight"]
-
-        if "lm_head.bias" in state_dict:
-            lm_head_bias = state_dict["lm_head.bias"]
-            lm_head_bias = lm_head_bias + torch.sum(lm_head_weight * ln_final_bias[None, :], dim=1)
-            state_dict["lm_head.bias"] = lm_head_bias
-
-        lm_head_weight = lm_head_weight * ln_final_weight[None, :]
-        state_dict["lm_head.weight"] = lm_head_weight
-
-        del state_dict["transformer.ln_f.weight"]
-        del state_dict["transformer.ln_f.bias"]
-
-    def _center_writing_weights_hf_native(self, state_dict):
-        """Center weights that write to the residual stream."""
-        import torch
-
-        # Center embedding weights
-        wte_weight = state_dict["transformer.wte.weight"]
-        wte_weight = wte_weight - torch.mean(wte_weight, dim=1, keepdim=True)
-        state_dict["transformer.wte.weight"] = wte_weight
-
-        if "transformer.wpe.weight" in state_dict:
-            wpe_weight = state_dict["transformer.wpe.weight"]
-            wpe_weight = wpe_weight - torch.mean(wpe_weight, dim=1, keepdim=True)
-            state_dict["transformer.wpe.weight"] = wpe_weight
-
-        # Center output weights that write to residual stream
-        for layer_idx in range(self.cfg.n_layers):
-            c_proj_weight = state_dict[f"transformer.h.{layer_idx}.attn.c_proj.weight"]
-            c_proj_weight = c_proj_weight - torch.mean(c_proj_weight, dim=1, keepdim=True)
-            state_dict[f"transformer.h.{layer_idx}.attn.c_proj.weight"] = c_proj_weight
-
-            mlp_c_proj_weight = state_dict[f"transformer.h.{layer_idx}.mlp.c_proj.weight"]
-            mlp_c_proj_weight = mlp_c_proj_weight - torch.mean(
-                mlp_c_proj_weight, dim=1, keepdim=True
-            )
-            state_dict[f"transformer.h.{layer_idx}.mlp.c_proj.weight"] = mlp_c_proj_weight
-
-    def _center_unembed_hf_native(self, state_dict):
-        """Center unembedding weights."""
-        import torch
-
-        lm_head_weight = state_dict["lm_head.weight"]
-        lm_head_weight = lm_head_weight - torch.mean(lm_head_weight, dim=1, keepdim=True)
-        state_dict["lm_head.weight"] = lm_head_weight
+        return hf_state_dict
 
     def _add_identity_layer_norm_params(self, processed_hf_state_dict):
-        """Add missing LayerNorm parameters as identity values.
+        """Add identity LayerNorm parameters after folding.
 
         After folding LayerNorm into other layers, HuggingFace models still expect
         LayerNorm parameters to exist. Set them to identity (weight=1, bias=0).
@@ -742,274 +711,57 @@ class TransformerBridge(nn.Module):
             ln2_weight_key = f"transformer.h.{layer_idx}.ln_2.weight"
             ln2_bias_key = f"transformer.h.{layer_idx}.ln_2.bias"
 
-            if ln1_weight_key not in processed_hf_state_dict:
-                processed_hf_state_dict[ln1_weight_key] = torch.ones(self.cfg.d_model)
-            if ln1_bias_key not in processed_hf_state_dict:
-                processed_hf_state_dict[ln1_bias_key] = torch.zeros(self.cfg.d_model)
-            if ln2_weight_key not in processed_hf_state_dict:
-                processed_hf_state_dict[ln2_weight_key] = torch.ones(self.cfg.d_model)
-            if ln2_bias_key not in processed_hf_state_dict:
-                processed_hf_state_dict[ln2_bias_key] = torch.zeros(self.cfg.d_model)
+            # Always add identity LayerNorm parameters (they were deleted by ProcessWeights.fold_layer_norm)
+            processed_hf_state_dict[ln1_weight_key] = torch.ones(self.cfg.d_model)
+            processed_hf_state_dict[ln1_bias_key] = torch.zeros(self.cfg.d_model)
+            processed_hf_state_dict[ln2_weight_key] = torch.ones(self.cfg.d_model)
+            processed_hf_state_dict[ln2_bias_key] = torch.zeros(self.cfg.d_model)
 
         ln_final_weight_key = "transformer.ln_f.weight"
         ln_final_bias_key = "transformer.ln_f.bias"
 
-        if ln_final_weight_key not in processed_hf_state_dict:
-            processed_hf_state_dict[ln_final_weight_key] = torch.ones(self.cfg.d_model)
-        if ln_final_bias_key not in processed_hf_state_dict:
-            processed_hf_state_dict[ln_final_bias_key] = torch.zeros(self.cfg.d_model)
+        # Always add identity final LayerNorm parameters (they were deleted by ProcessWeights.fold_layer_norm)
+        processed_hf_state_dict[ln_final_weight_key] = torch.ones(self.cfg.d_model)
+        processed_hf_state_dict[ln_final_bias_key] = torch.zeros(self.cfg.d_model)
 
-    def _load_processed_hf_weights(self, processed_hf_state_dict):
-        """Load processed HuggingFace weights back into the original model."""
-        # Get the original model's state dict with _original_component suffixes
-        original_state_dict = self.original_model.state_dict()
+    def _replace_layer_norm_with_identity(self, model):
+        """Replace LayerNorm components with LayerNormPre-like operations to maintain mathematical equivalence.
 
-        # Load processed weights into the original model components
-        for processed_key, processed_tensor in processed_hf_state_dict.items():
-            # Find the corresponding key with _original_component suffix
-            for orig_key in original_state_dict.keys():
-                if orig_key.replace("._original_component", "") == processed_key:
-                    original_state_dict[orig_key].data.copy_(processed_tensor)
-                    break
-
-    def _load_processed_weights_from_hf_dict(self, processed_hf_dict):
-        """Load processed weights (in HF format) back into the TransformerBridge.
-
-        Args:
-            processed_hf_dict: Dictionary of processed weights in HuggingFace format
+        After folding LayerNorm into other layers, we need to replace the LayerNorm components
+        with operations that only apply normalization (centering and scaling) without learnable parameters.
+        This is equivalent to what HookedTransformer does when it replaces LayerNorm with LayerNormPre components.
         """
-        # Load the processed weights back into the original model components
-        # This preserves the HF format without conversion
-        original_state_dict = self.original_model.state_dict()
+        import torch.nn as nn
 
-        for key, processed_tensor in processed_hf_dict.items():
-            # Find the corresponding key in the original model (with _original_component)
-            original_key = None
-            for orig_key in original_state_dict.keys():
-                if orig_key.replace("._original_component", "") == key:
-                    original_key = orig_key
-                    break
+        # Import the proper LayerNormPre from HookedTransformer
+        from transformer_lens.components.layer_norm_pre import LayerNormPre
+        from transformer_lens.config.HookedTransformerConfig import (
+            HookedTransformerConfig,
+        )
 
-            if original_key and original_key in original_state_dict:
-                # Load the processed tensor back into the original model
-                original_state_dict[original_key].data.copy_(processed_tensor)
+        # Create a compatible HookedTransformerConfig from the bridge config
+        hooked_config = HookedTransformerConfig(
+            d_model=self.cfg.d_model,
+            d_vocab=self.cfg.d_vocab,
+            n_layers=self.cfg.n_layers,
+            n_heads=self.cfg.n_heads,
+            d_head=self.cfg.d_head,
+            d_mlp=self.cfg.d_mlp,
+            eps=self.cfg.eps,
+            n_ctx=1024,  # Default context length
+            device=self.cfg.device,
+            act_fn="relu",  # GPT-2 uses ReLU activation
+            attn_only=getattr(self.cfg, 'attn_only', False),
+        )
 
-    def _apply_weight_processing_inplace(
-        self,
-        fold_ln: bool = True,
-        center_writing_weights: bool = True,
-        center_unembed: bool = True,
-        fold_value_biases: bool = True,
-        refactor_factored_attn_matrices: bool = False,
-    ):
-        """Apply weight processing transformations directly to bridge components in HuggingFace format.
-
-        This method applies the same transformations as ProcessWeights but works directly on the
-        bridge's components without converting tensor formats.
-        """
-
-        # Step 1: Fold LayerNorm if requested (DISABLED for debugging)
-        if fold_ln:
-            # self._fold_layer_norm_inplace()
-            pass
-
-        # Step 2: Center writing weights if requested
-        if center_writing_weights:
-            self._center_writing_weights_inplace()
-
-        # Step 3: Center unembedding if requested (DISABLED for debugging)
-        if center_unembed:
-            # self._center_unembed_inplace()
-            pass
-
-        # Step 4: Fold value biases if requested (DISABLED for debugging)
-        if fold_value_biases:
-            # self._fold_value_biases_inplace()
-            pass
-
-        # Step 5: Refactor attention matrices if requested
-        if refactor_factored_attn_matrices:
-            self._refactor_factored_attn_matrices_inplace()
-
-    def _fold_layer_norm_inplace(self):
-        """Fold LayerNorm weights into subsequent layers in-place."""
-        # For now, implement a simple version - we can expand this later
-        # TODO: Implement LayerNorm folding logic for HF format
-        pass
-
-    def _center_writing_weights_inplace(self):
-        """Center weights that write to the residual stream in-place."""
-
-        # Center embedding weights (W_E)
-        if hasattr(self, "embed") and hasattr(self.embed, "weight"):
-            embed_weight = self.embed.weight.data  # HF format: [vocab_size, d_model]
-            # Subtract mean along d_model dimension (last dim = -1)
-            embed_mean = embed_weight.mean(dim=-1, keepdim=True)
-            self.embed.weight.data = embed_weight - embed_mean
-
-        # Center positional embedding weights (W_pos)
-        if hasattr(self, "pos_embed") and hasattr(self.pos_embed, "weight"):
-            if getattr(self.cfg, "positional_embedding_type", "standard") != "rotary":
-                pos_weight = self.pos_embed.weight.data  # HF format: [seq_len, d_model]
-                # Subtract mean along d_model dimension (last dim = -1)
-                pos_mean = pos_weight.mean(dim=-1, keepdim=True)
-                self.pos_embed.weight.data = pos_weight - pos_mean
-
-        # Center attention output weights and biases (W_O, b_O)
+        # Replace LayerNorm components in each layer
         for layer_idx in range(self.cfg.n_layers):
-            if layer_idx >= len(self.blocks):
-                continue
-            block = self.blocks[layer_idx]
+            # Replace ln_1 and ln_2 with LayerNormPre using proper constructor
+            model.transformer.h[layer_idx].ln_1 = LayerNormPre(hooked_config)
+            model.transformer.h[layer_idx].ln_2 = LayerNormPre(hooked_config)
 
-            # Center attention output weights
-            if hasattr(block.attn, "o") and hasattr(block.attn.o, "weight"):
-                o_weight = block.attn.o.weight.data  # HF format: [d_model, d_model]
-                # For writing weights, center along the last dimension (same as ProcessWeights)
-                o_mean = o_weight.mean(dim=-1, keepdim=True)
-                block.attn.o.weight.data = o_weight - o_mean
-
-            # Center attention output biases
-            if (
-                hasattr(block.attn, "o")
-                and hasattr(block.attn.o, "bias")
-                and block.attn.o.bias is not None
-            ):
-                o_bias = block.attn.o.bias.data
-                o_bias_mean = o_bias.mean()
-                block.attn.o.bias.data = o_bias - o_bias_mean
-
-            # Center MLP output weights and biases (W_out, b_out)
-            if hasattr(block, "mlp") and not getattr(self.cfg, "attn_only", False):
-                # Handle different MLP component names (out vs output)
-                mlp_out_attr = (
-                    "out"
-                    if hasattr(block.mlp, "out")
-                    else "output"
-                    if hasattr(block.mlp, "output")
-                    else None
-                )
-
-                if mlp_out_attr:
-                    mlp_out = getattr(block.mlp, mlp_out_attr)
-
-                    # Center MLP output weights
-                    if hasattr(mlp_out, "weight"):
-                        mlp_weight = mlp_out.weight.data  # HF format: [d_mlp, d_model]
-                        # Subtract mean along the last dimension (d_model)
-                        mlp_mean = mlp_weight.mean(dim=-1, keepdim=True)
-                        mlp_out.weight.data = mlp_weight - mlp_mean
-
-                    # Center MLP output biases
-                    if hasattr(mlp_out, "bias") and mlp_out.bias is not None:
-                        mlp_bias = mlp_out.bias.data
-                        mlp_bias_mean = mlp_bias.mean()
-                        mlp_out.bias.data = mlp_bias - mlp_bias_mean
-
-    def _center_unembed_inplace(self):
-        """Center unembedding weights in-place."""
-        if hasattr(self, "unembed") and hasattr(self.unembed, "weight"):
-            # Center the unembedding weights (HF format: [vocab_size, d_model])
-            unembed_weight = self.unembed.weight.data
-            # Subtract the mean along the d_model dimension (dim=1)
-            unembed_mean = unembed_weight.mean(dim=1, keepdim=True)
-            self.unembed.weight.data = unembed_weight - unembed_mean
-
-    def _fold_value_biases_inplace(self):
-        """Fold value biases into output bias in-place."""
-
-        for layer_idx in range(self.cfg.n_layers):
-            if layer_idx >= len(self.blocks):
-                continue
-            block = self.blocks[layer_idx]
-
-            # Get value biases and output weights/biases
-            v_bias = None
-            w_o = None
-            b_o = None
-
-            # Find value biases - need to use the original HuggingFace structure
-            # In GPT-2, the original transformer uses combined qkv, so extract V bias from there
-            if (
-                hasattr(block.attn, "qkv")
-                and hasattr(block.attn.qkv, "bias")
-                and block.attn.qkv.bias is not None
-            ):
-                # For combined qkv, extract the V portion
-                qkv_bias = block.attn.qkv.bias.data
-                d_head = self.cfg.d_head
-                n_heads = self.cfg.n_heads
-                # Split into Q, K, V portions (each is n_heads * d_head)
-                if qkv_bias.shape[0] == 3 * n_heads * d_head:
-                    v_bias = qkv_bias[2 * n_heads * d_head :]  # V is the last third
-            elif (
-                hasattr(block.attn, "v")
-                and hasattr(block.attn.v, "bias")
-                and block.attn.v.bias is not None
-            ):
-                v_bias = block.attn.v.bias.data  # HF format: [n_heads * d_head] or similar
-
-            # Find output weights and biases
-            if hasattr(block.attn, "o"):
-                if hasattr(block.attn.o, "weight"):
-                    w_o = block.attn.o.weight.data  # HF format: [d_model, n_heads * d_head]
-                if hasattr(block.attn.o, "bias") and block.attn.o.bias is not None:
-                    b_o = block.attn.o.bias.data  # HF format: [d_model]
-
-            # Apply the folding transformation if we have all components
-            if v_bias is not None and w_o is not None and b_o is not None:
-                try:
-                    # Reshape v_bias to [n_heads, d_head] if needed
-                    if v_bias.dim() == 1:
-                        expected_size = self.cfg.n_heads * self.cfg.d_head
-                    if v_bias.shape[0] != expected_size:
-                        continue
-                        v_bias = v_bias.view(self.cfg.n_heads, self.cfg.d_head)
-
-                    # Reshape w_o from HF format [d_model, n_heads * d_head] to [d_model, n_heads, d_head]
-                    if w_o.dim() == 2:
-                        expected_size = self.cfg.n_heads * self.cfg.d_head
-                    if w_o.shape[1] != expected_size:
-                        continue
-                        w_o = w_o.view(w_o.shape[0], self.cfg.n_heads, self.cfg.d_head)
-
-                    # Compute the folded bias: b_O_new = b_O_original + sum_head(b_V_head @ W_O_head)
-                    # v_bias: [n_heads, d_head], w_o: [d_model, n_heads, d_head]
-                    # We want to compute sum over heads of (v_bias[h, :] @ w_o[:, h, :].T) for each head h
-                    folded_contribution = torch.zeros_like(b_o)
-                    for h in range(self.cfg.n_heads):
-                        # v_bias[h]: [d_head], w_o[:, h]: [d_model, d_head]
-                        # Compute v_bias[h] @ w_o[:, h].T = [d_model]
-                        head_contribution = torch.matmul(w_o[:, h], v_bias[h])
-                        folded_contribution += head_contribution
-
-                    # Update the output bias
-                    block.attn.o.bias.data = b_o + folded_contribution
-
-                except Exception as e:
-                    continue
-
-                # Zero out the value biases (same logic as extraction)
-                if (
-                    hasattr(block.attn, "qkv")
-                    and hasattr(block.attn.qkv, "bias")
-                    and block.attn.qkv.bias is not None
-                ):
-                    # Zero out only the V portion of the combined qkv bias
-                    d_head = self.cfg.d_head
-                    n_heads = self.cfg.n_heads
-                    if block.attn.qkv.bias.shape[0] == 3 * n_heads * d_head:
-                        block.attn.qkv.bias.data[2 * n_heads * d_head :].zero_()
-                elif (
-                    hasattr(block.attn, "v")
-                    and hasattr(block.attn.v, "bias")
-                    and block.attn.v.bias is not None
-                ):
-                    block.attn.v.bias.data.zero_()
-
-    def _refactor_factored_attn_matrices_inplace(self):
-        """Refactor factored attention matrices in-place."""
-        # TODO: Implement attention matrix refactoring for HF format
-        pass
+        # Replace final LayerNorm with LayerNormPre
+        model.transformer.ln_f = LayerNormPre(hooked_config)
 
     def _load_processed_weights(self, processed_state_dict):
         """Load processed weights back into the TransformerBridge.
@@ -1884,6 +1636,9 @@ class TransformerBridge(nn.Module):
             except StopAtLayerException as e:
                 # Return the intermediate output from the specified layer
                 output = e.layer_output
+            except Exception as e:
+                # Re-raise any other exceptions
+                raise e
             finally:
                 for hp, _ in hooks:
                     hp.remove_hooks()
