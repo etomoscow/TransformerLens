@@ -78,6 +78,9 @@ class JointQKVAttentionBridge(AttentionBridge):
         self.k.hook_out.hook_conversion = self.qkv_conversion_rule
         self.v.hook_out.hook_conversion = self.qkv_conversion_rule
 
+        # Store processed weights after weight processing
+        self._processed_weights: Optional[Dict[str, torch.Tensor]] = None
+
     def _create_qkv_conversion_rule(self) -> RearrangeHookConversion:
         """Create the appropriate conversion rule for the individual q, k, and v matrices.
 
@@ -242,7 +245,7 @@ class JointQKVAttentionBridge(AttentionBridge):
     def _manual_attention_computation(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs
     ) -> tuple:
-        """Manual attention computation as fallback."""
+        """Manual attention computation as fallback using TransformerLens computation logic."""
         original_component = self.original_component
         assert original_component is not None
 
@@ -267,18 +270,13 @@ class JointQKVAttentionBridge(AttentionBridge):
         else:
             raise ValueError(f"Unexpected Q tensor shape: {q.shape}. Expected 3D or 4D tensor.")
 
+        # Compute attention scores using TransformerLens logic
         scale = head_dim**-0.5
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
 
-        # Apply causal mask for GPT-2
-        if (
-            hasattr(original_component, "register_buffer")
-            or "gpt" in str(type(original_component)).lower()
-        ):
-            causal_mask = torch.tril(
-                torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool)
-            )
-            attn_scores = attn_scores.masked_fill(~causal_mask, float("-inf"))
+        # Apply causal mask using the same approach as WorkingAttention
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=q.device))
+        attn_scores = attn_scores.masked_fill(causal_mask == 0, float('-inf'))
 
         attention_mask = kwargs.get("attention_mask", None)
         if attention_mask is not None:
@@ -290,21 +288,212 @@ class JointQKVAttentionBridge(AttentionBridge):
                 attention_mask = attention_mask[..., :seq_len, :]
             attn_scores = attn_scores + attention_mask
 
+        # Apply softmax to get attention weights
         attn_weights = torch.nn.functional.softmax(attn_scores, dim=-1)
 
         if hasattr(original_component, "attn_dropout"):
             attn_weights = original_component.attn_dropout(attn_weights)  # type: ignore[operator]
 
+        # Apply attention to values
         attn_output = torch.matmul(attn_weights, v)
 
+        # Reshape back to original format
         final_hidden_size: int = num_heads * head_dim
         attn_output = (
             attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, final_hidden_size)
         )
 
-        if hasattr(self, "o") and self.o is not None:
+        # Apply output projection - use functional linear if available
+        if hasattr(original_component, 'c_proj'):
+            attn_output = self._apply_output_projection_with_functional_linear(attn_output)
+        elif hasattr(self, "o") and self.o is not None:
             attn_output = self.o(attn_output)
 
         # Return format should match what GPT2Block expects (exactly 2 values)
         # The GPT2Block handles past_key_value separately
         return (attn_output, attn_weights)  # (output, weights)
+
+    def _apply_qkv_projection_with_functional_linear(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply QKV projection using torch.nn.functional.linear with transposed weights.
+
+        This method implements the TransformerLens computation logic from WorkingAttention,
+        using torch.nn.functional.linear for weight projection.
+
+        Args:
+            hidden_states: Input hidden states tensor [batch_size, seq_len, d_model]
+
+        Returns:
+            Tuple of (q, k, v) tensors after projection
+        """
+        original_component = self.original_component
+        assert original_component is not None
+        assert self.config is not None
+
+        # Extract weights from original attention component
+        if hasattr(original_component, 'c_attn'):
+            qkv_weight = original_component.c_attn.weight  # Shape: [d_model, 3*d_model]
+            qkv_bias = original_component.c_attn.bias      # Shape: [3*d_model]
+        else:
+            raise AttributeError("Original component doesn't have c_attn attribute for QKV projection")
+
+        batch_size, seq_len, d_model = hidden_states.shape
+
+        # Apply QKV projection using torch.nn.functional.linear
+        # Note: torch.nn.functional.linear expects weight to be [output_features, input_features]
+        # but HuggingFace stores it as [input_features, output_features], so we transpose
+        qkv = torch.nn.functional.linear(hidden_states, qkv_weight.T, qkv_bias)
+
+        # Split into Q, K, V - reshape to separate the 3 components
+        qkv = qkv.view(batch_size, seq_len, 3, d_model)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+
+        return q, k, v
+
+    def _apply_output_projection_with_functional_linear(self, attn_output: torch.Tensor) -> torch.Tensor:
+        """Apply output projection using torch.nn.functional.linear with transposed weights.
+
+        This method implements the output projection logic from WorkingAttention,
+        using torch.nn.functional.linear for weight projection.
+
+        Args:
+            attn_output: Attention output tensor [batch_size, seq_len, d_model]
+
+        Returns:
+            Final output tensor after projection
+        """
+        original_component = self.original_component
+        assert original_component is not None
+
+        # Extract output projection weights from original attention component
+        if hasattr(original_component, 'c_proj'):
+            proj_weight = original_component.c_proj.weight  # Shape: [d_model, d_model]
+            proj_bias = original_component.c_proj.bias      # Shape: [d_model]
+        else:
+            # If no output projection, return the input unchanged
+            return attn_output
+
+        # Apply output projection using torch.nn.functional.linear
+        # Note: torch.nn.functional.linear expects weight to be [output_features, input_features]
+        # but HuggingFace stores it as [input_features, output_features], so we transpose
+        output = torch.nn.functional.linear(attn_output, proj_weight.T, proj_bias)
+
+        return output
+
+    def process_weights(
+        self,
+        fold_ln: bool = False,
+        center_writing_weights: bool = False,
+        center_unembed: bool = False,
+        fold_value_biases: bool = False,
+        refactor_factored_attn_matrices: bool = False,
+    ) -> None:
+        """Process QKV weights according to GPT2 pretrained logic.
+
+        Ports the weight processing from transformer_lens.pretrained.weight_conversions.gpt2
+        to work with the architecture adapter.
+        """
+        import einops
+
+        original_component = self.original_component
+        if original_component is None:
+            return
+
+        # Get the combined QKV weight and bias from the original component
+        if hasattr(original_component, 'c_attn'):
+            qkv_weight = original_component.c_attn.weight  # Shape: [d_model, 3*d_model]
+            qkv_bias = original_component.c_attn.bias      # Shape: [3*n_heads*d_head]
+        else:
+            # Try to get from submodules mapping
+            qkv_submodule = None
+            for name, module in self.submodules.items():
+                if hasattr(module, 'name') and module.name == "c_attn":
+                    qkv_submodule = getattr(original_component, module.name, None)
+                    break
+
+            if qkv_submodule is None:
+                return
+
+            qkv_weight = qkv_submodule.weight
+            qkv_bias = qkv_submodule.bias
+
+        # Split QKV weights: [d_model, 3*d_model] -> 3 x [d_model, d_model]
+        W_Q, W_K, W_V = torch.tensor_split(qkv_weight, 3, dim=1)
+
+        # Rearrange Q, K, V weights following GPT2 pretrained logic
+        # "m (i h)->i m h" where m=d_model, i=n_heads, h=d_head
+        W_Q = einops.rearrange(W_Q, "m (i h)->i m h", i=self.config.n_heads)
+        W_K = einops.rearrange(W_K, "m (i h)->i m h", i=self.config.n_heads)
+        W_V = einops.rearrange(W_V, "m (i h)->i m h", i=self.config.n_heads)
+
+        # Process QKV bias following GPT2 pretrained logic
+        qkv_bias = einops.rearrange(
+            qkv_bias,
+            "(qkv index head)->qkv index head",
+            qkv=3,
+            index=self.config.n_heads,
+            head=self.config.d_head,
+        )
+        b_Q, b_K, b_V = qkv_bias[0], qkv_bias[1], qkv_bias[2]
+
+        # Process output projection weight if it exists
+        W_O = None
+        b_O = None
+        if hasattr(original_component, 'c_proj'):
+            W_O = original_component.c_proj.weight
+            b_O = original_component.c_proj.bias
+            # Rearrange W_O following GPT2 pretrained logic: "(i h) m->i h m"
+            W_O = einops.rearrange(W_O, "(i h) m->i h m", i=self.config.n_heads)
+        else:
+            # Try to get from submodules mapping
+            for name, module in self.submodules.items():
+                if hasattr(module, 'name') and module.name == "c_proj":
+                    proj_submodule = getattr(original_component, module.name, None)
+                    if proj_submodule is not None:
+                        W_O = proj_submodule.weight
+                        b_O = proj_submodule.bias
+                        W_O = einops.rearrange(W_O, "(i h) m->i h m", i=self.config.n_heads)
+                    break
+
+        # Store processed weights in TransformerLens format
+        self._processed_weights = {
+            "W_Q": W_Q,
+            "W_K": W_K,
+            "W_V": W_V,
+            "b_Q": b_Q,
+            "b_K": b_K,
+            "b_V": b_V,
+        }
+
+        if W_O is not None:
+            self._processed_weights["W_O"] = W_O
+        if b_O is not None:
+            self._processed_weights["b_O"] = b_O
+
+    def get_processed_state_dict(self) -> Dict[str, torch.Tensor]:
+        """Get the processed weights in TransformerLens format.
+
+        Returns:
+            Dictionary mapping TransformerLens parameter names to processed tensors
+        """
+        if self._processed_weights is None:
+            # If weights haven't been processed, return empty dict
+            return {}
+
+        return self._processed_weights.copy()
+
+    def get_expected_parameter_names(self, prefix: str = "") -> list[str]:
+        """Get the expected TransformerLens parameter names for this QKV attention component.
+
+        Args:
+            prefix: Prefix to add to parameter names (e.g., "blocks.0")
+
+        Returns:
+            List of expected parameter names in TransformerLens format
+        """
+        # QKV attention components always have Q, K, V weights and biases, and output projection
+        base_names = ["W_Q", "b_Q", "W_K", "b_K", "W_V", "b_V", "W_O", "b_O"]
+
+        if prefix:
+            return [f"{prefix}.{name}" for name in base_names]
+        else:
+            return base_names

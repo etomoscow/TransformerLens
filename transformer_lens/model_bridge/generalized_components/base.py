@@ -147,6 +147,72 @@ class GeneralizedComponent(nn.Module):
                 f"Hook name '{hook_name}' not supported. Supported names are 'output' and 'input'."
             )
 
+    def process_weights(
+        self,
+        fold_ln: bool = False,
+        center_writing_weights: bool = False,
+        center_unembed: bool = False,
+        fold_value_biases: bool = False,
+        refactor_factored_attn_matrices: bool = False,
+    ) -> None:
+        """Process weights according to weight processing flags.
+
+        This method should be overridden by specific components that need
+        custom weight processing (e.g., QKV splitting, weight rearrangement).
+
+        Args:
+            fold_ln: Whether to fold layer norm weights
+            center_writing_weights: Whether to center writing weights
+            center_unembed: Whether to center unembedding weights
+            fold_value_biases: Whether to fold value biases
+            refactor_factored_attn_matrices: Whether to refactor factored attention matrices
+        """
+        # Base implementation does nothing - components override this
+        pass
+
+    def get_processed_state_dict(self) -> Dict[str, torch.Tensor]:
+        """Get the state dict after weight processing.
+
+        Returns:
+            Dictionary mapping parameter names to processed tensors
+        """
+        # Base implementation returns the standard state dict
+        return self.state_dict()
+
+    def get_expected_parameter_names(self, prefix: str = "") -> list[str]:
+        """Get the expected TransformerLens parameter names for this component.
+
+        This method should be overridden by specific components to return
+        the parameter names they expect in the TransformerLens format.
+
+        Args:
+            prefix: Prefix to add to parameter names (e.g., "blocks.0.attn")
+
+        Returns:
+            List of expected parameter names in TransformerLens format
+        """
+        # Base implementation returns empty list - components should override
+        return []
+
+    def get_list_size(self) -> int:
+        """Get the number of items if this is a list component.
+
+        For components where is_list_item=True, this should return the number
+        of items in the list (e.g., number of layers for blocks, number of experts
+        for MoE experts).
+
+        Subclasses should override this method to return the correct count
+        based on their specific configuration attribute.
+
+        Returns:
+            Number of items in the list, or 0 if not a list component
+        """
+        if not self.is_list_item:
+            return 0
+
+        # Base implementation returns 0 - subclasses should override
+        return 0
+
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Generic forward pass for bridge components with input/output hooks."""
         # Since we use add_module, the component is stored in _modules
