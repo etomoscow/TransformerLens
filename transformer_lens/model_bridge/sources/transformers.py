@@ -262,11 +262,17 @@ def boot(
     if tokenizer is not None:
         adapter.cfg.tokenizer_prepends_bos = len(tokenizer.encode("")) > 0
 
-    return TransformerBridge(
+    # Create the bridge
+    bridge = TransformerBridge(
         hf_model,
         adapter,
         tokenizer,
     )
+
+    # Note: enable_compatibility_mode() is available to apply folding if needed
+    # This should be called manually when folding is desired
+
+    return bridge
 
 
 def setup_tokenizer(

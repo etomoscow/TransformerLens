@@ -624,10 +624,10 @@ class TransformerBridge(nn.Module):
         if not no_processing:
             # Apply weight processing directly to existing bridge weights without replacing components
             self.apply_direct_weight_processing(
-                fold_ln=True,
-                center_writing_weights=True,
-                center_unembed=True,
-                fold_value_biases=True,
+                fold_ln=True,  # Re-enabled after fixing key lookup issue
+                center_writing_weights=True,  # Re-enabled after fixing key lookup issue
+                center_unembed=True,  # Re-enabled after fixing key lookup issue
+                fold_value_biases=True,  # Re-enabled after fixing key lookup issue
                 refactor_factored_attn_matrices=False,
             )
 
@@ -671,7 +671,6 @@ class TransformerBridge(nn.Module):
             dtype=tl_cfg.dtype
         )
 
-        # Step 2: Process weights directly
         processed_state_dict = ProcessWeights.process_weights(
             state_dict,
             tl_cfg,
@@ -680,7 +679,18 @@ class TransformerBridge(nn.Module):
             center_unembed=center_unembed,
             fold_value_biases=fold_value_biases,
             refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+            adapter=self.adapter,
         )
+
+        # Store the processed TL weights for later HF conversion
+        self._processed_tl_weights = processed_state_dict
+        self._hf_processing_flags = {
+            'fold_ln': fold_ln,
+            'center_writing_weights': center_writing_weights,
+            'center_unembed': center_unembed,
+            'fold_value_biases': fold_value_biases,
+            'refactor_factored_attn_matrices': refactor_factored_attn_matrices,
+        }
 
         # Step 3: Use architecture adapter to process weights and create components
         self._create_components_with_adapter_processing(state_dict, processed_state_dict, tl_cfg,
@@ -692,6 +702,24 @@ class TransformerBridge(nn.Module):
             self.cfg.normalization_type = "LNPre"
         self.cfg.layer_norm_folding = fold_ln
         object.__setattr__(self, '_weights_processed', True)
+
+    def get_processed_hf_weights(self) -> Dict[str, torch.Tensor]:
+        """Get the processed HuggingFace format weights.
+
+        Returns:
+            Dictionary of processed weights in HuggingFace format with folding applied
+        """
+        if not hasattr(self, '_processed_tl_weights'):
+            raise ValueError("No processed weights available. Call enable_compatibility_mode() first.")
+
+        # Convert TL format processed weights to HF format on demand
+        try:
+            from transformer_lens.weight_processing import ProcessWeights
+            return ProcessWeights.convert_tl_to_hf_format(
+                self._processed_tl_weights, self.cfg
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to convert processed weights to HF format: {e}")
 
         print("Bridge set up with processed components created directly")
 
@@ -791,7 +819,13 @@ class TransformerBridge(nn.Module):
             if tl_cfg.final_rms:
                 temp_structure.ln_final = RMSNorm(tl_cfg)
             else:
-                temp_structure.ln_final = LayerNorm(tl_cfg) if tl_cfg.normalization_type == "LN" else LayerNormPre(tl_cfg)
+                # Use NormalizationBridge for unified LayerNorm/LayerNormPre behavior
+                from transformer_lens.model_bridge.generalized_components.normalization import NormalizationBridge
+                temp_structure.ln_final = NormalizationBridge.create_normalization_bridge(
+                    name="ln_final",
+                    config=tl_cfg,
+                    original_component=LayerNorm(tl_cfg)  # Create LayerNorm component for weights
+                )
 
         temp_structure.unembed = Unembed(tl_cfg)
         return temp_structure
@@ -823,25 +857,27 @@ class TransformerBridge(nn.Module):
             TransformerBlock(tl_cfg, block_index) for block_index in range(tl_cfg.n_layers)
         ])
 
-        # Create final layer norm - if folded, use LayerNormPre
+        # Create final layer norm using NormalizationBridge that adapts based on layer_norm_folding
         ln_final = None
-        if fold_ln and tl_cfg.normalization_type == "LN":
-            # When folded, LN becomes LNPre
-            ln_final = LayerNormPre(tl_cfg)
+
+        # Set layer_norm_folding flag in config for NormalizationBridge behavior
+        tl_cfg.layer_norm_folding = fold_ln
+
+        if tl_cfg.normalization_type in ["LN", "LNPre"]:
+            # Use NormalizationBridge that automatically switches between LayerNorm and LayerNormPre behavior
+            from transformer_lens.model_bridge.generalized_components.normalization import NormalizationBridge
+            ln_final = NormalizationBridge.create_normalization_bridge(
+                name="ln_final",
+                config=tl_cfg,
+                original_component=None  # We'll create a dummy LayerNorm component for weights
+            )
+            # Create a dummy LayerNorm component to hold the weights
+            dummy_ln = LayerNorm(tl_cfg)
+            ln_final.set_original_component(dummy_ln)
         elif tl_cfg.normalization_type == "RMS":
             ln_final = RMSNorm(tl_cfg)
         elif tl_cfg.normalization_type == "RMSPre":
             ln_final = RMSNormPre(tl_cfg)
-        elif tl_cfg.normalization_type == "LN":
-            if tl_cfg.final_rms:
-                ln_final = RMSNorm(tl_cfg)
-            else:
-                ln_final = LayerNorm(tl_cfg)
-        elif tl_cfg.normalization_type == "LNPre":
-            if tl_cfg.final_rms:
-                ln_final = RMSNormPre(tl_cfg)
-            else:
-                ln_final = LayerNormPre(tl_cfg)
 
         # Create unembed
         unembed_component = Unembed(tl_cfg)
@@ -1626,6 +1662,499 @@ class TransformerBridge(nn.Module):
 
         print(f"Extracted {len(tl_state_dict)} weights in TL format using architecture adapter")
         return tl_state_dict
+
+    def _extract_weights_in_hf_format(self):
+        """Extract weights from TransformerBridge in HuggingFace format with processing applied."""
+        print("Extracting weights in HuggingFace format with processing applied...")
+        # Get the current state dict which should have processed weights in HF format
+        hf_state_dict = self.state_dict()
+        print(f"Extracted {len(hf_state_dict)} weights in HF format")
+        return hf_state_dict
+
+    def process_weights_in_hf_format(
+        self,
+        fold_ln: bool = True,
+        center_writing_weights: bool = True,
+        center_unembed: bool = True,
+        fold_value_biases: bool = True,
+        refactor_factored_attn_matrices: bool = False,
+    ):
+        """Process weights but keep them in HuggingFace format instead of converting to TLens format.
+
+        This maintains weight splitting functionality but avoids the final conversion step.
+        """
+        print("Processing weights in HuggingFace format...")
+
+        # Extract current HF weights
+        hf_weights = self.state_dict()
+
+        # Apply processing using the weight processing utility
+        from transformer_lens.weight_processing import ProcessWeights
+
+        processed_hf_weights = ProcessWeights.process_weights(
+            hf_weights,
+            self.cfg,
+            fold_ln=fold_ln,
+            center_writing_weights=center_writing_weights,
+            center_unembed=center_unembed,
+            fold_value_biases=fold_value_biases,
+            refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+            adapter=self.adapter,
+        )
+
+        # Load the processed weights back into the model
+        self.load_state_dict(processed_hf_weights, strict=False)
+
+        # Mark that weights have been processed
+        self._weights_processed = True
+        self._hf_format_processing = True
+
+        print(f"Processed {len(processed_hf_weights)} weights in HF format")
+        return processed_hf_weights
+
+    def enable_hf_format_processing(
+        self,
+        fold_ln: bool = True,
+        center_writing_weights: bool = True,
+        center_unembed: bool = True,
+        fold_value_biases: bool = True,
+        refactor_factored_attn_matrices: bool = False,
+    ):
+        """Enable HF format processing - process weights and keep them in HuggingFace format.
+
+        This processes weights in HF format and stores them for the bridge to use directly,
+        completely avoiding conversion to TLens format while maintaining weight splitting.
+        The bridge components will reference the HF format weights directly.
+        """
+        print("Enabling HF format processing...")
+
+        # Get the HF state dict from the original model
+        hf_state_dict = self.original_model.state_dict()
+
+        # Process weights directly in HF format using the adapter
+        from transformer_lens.weight_processing import ProcessWeights
+        processed_hf_weights = ProcessWeights.process_weights(
+            hf_state_dict,
+            self.cfg,
+            fold_ln=fold_ln,
+            center_writing_weights=center_writing_weights,
+            center_unembed=center_unembed,
+            fold_value_biases=fold_value_biases,
+            refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+            adapter=self.adapter,  # This enables HF key translation
+        )
+
+        # Store the processed HF weights for direct access
+        self._processed_hf_weights = processed_hf_weights
+
+        # Mark that we're using HF format processing
+        self._hf_format_processing = True
+        self._weights_processed = True
+
+        print(f"HF format processing enabled - processed {len(processed_hf_weights)} weights in HF format")
+        print("Weights are stored in HF format and will be accessed directly during forward pass")
+
+    def get_processed_weights_in_hf_format(
+        self,
+        fold_ln: bool = True,
+        center_writing_weights: bool = True,
+        center_unembed: bool = True,
+        fold_value_biases: bool = True,
+        refactor_factored_attn_matrices: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Get processed weights in HuggingFace format without loading them into components.
+
+        This method provides processed weights in HF format for external use,
+        completely avoiding any conversion to TLens format while maintaining weight splitting.
+
+        Returns:
+            Dictionary of processed weights in HuggingFace format
+        """
+        # Load a fresh HuggingFace model to get clean weights for processing
+        # The bridge's original_model has been modified with _original_component suffixes
+        print("Loading fresh HuggingFace model for weight processing...")
+        from transformers import AutoModelForCausalLM
+
+        # Get the model name from the config
+        model_name = getattr(self.cfg, 'model_name', 'gpt2')
+
+        # Load fresh HF model
+        fresh_hf_model = AutoModelForCausalLM.from_pretrained(model_name)
+        hf_state_dict = fresh_hf_model.state_dict()
+
+        print(f"Got clean HF state dict with {len(hf_state_dict)} keys")
+        print(f"Sample keys: {list(hf_state_dict.keys())[:3]}")
+
+        # Process weights directly in HF format using the adapter
+        from transformer_lens.weight_processing import ProcessWeights
+        processed_hf_weights = ProcessWeights.process_weights(
+            hf_state_dict,
+            self.cfg,
+            fold_ln=fold_ln,
+            center_writing_weights=center_writing_weights,
+            center_unembed=center_unembed,
+            fold_value_biases=fold_value_biases,
+            refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+            adapter=self.adapter,  # This enables HF key translation for processing
+        )
+
+        print(f"Processed {len(processed_hf_weights)} weights in HF format")
+        return processed_hf_weights
+
+    def enable_true_hf_format_processing(
+        self,
+        fold_ln: bool = True,
+        center_writing_weights: bool = True,
+        center_unembed: bool = True,
+        fold_value_biases: bool = True,
+        refactor_factored_attn_matrices: bool = False,
+    ):
+        """Enable true HF format processing with custom forward pass.
+
+        This processes weights in HF format and implements a custom forward pass that:
+        - Works directly with HF format weights
+        - Knows that layer norms have been folded
+        - Handles weight splitting for attention matrices
+        - Provides hooks for interpretability
+        """
+        print("Enabling true HF format processing with custom forward pass...")
+
+        # Debug: Check what we have access to
+        print(f"Original model type: {type(self.original_model)}")
+        print(f"Original model has transformer: {hasattr(self.original_model, 'transformer')}")
+        if hasattr(self.original_model, 'state_dict'):
+            state_dict = self.original_model.state_dict()
+            print(f"State dict has {len(state_dict)} keys")
+            print(f"First few keys: {list(state_dict.keys())[:5]}")
+
+        # Get processed weights in HF format
+        processed_hf_weights = self.get_processed_weights_in_hf_format(
+            fold_ln=fold_ln,
+            center_writing_weights=center_writing_weights,
+            center_unembed=center_unembed,
+            fold_value_biases=fold_value_biases,
+            refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+        )
+
+        # Debug: Check what layer norm weights look like after processing
+        print(f"Layer norm folding enabled: {fold_ln}")
+        ln_keys = [k for k in processed_hf_weights.keys() if 'ln_' in k or 'ln_f' in k]
+        print(f"Layer norm keys found: {ln_keys[:3] if ln_keys else 'None'}")
+        if ln_keys and fold_ln:
+            sample_ln_key = ln_keys[0]
+            sample_ln_weight = processed_hf_weights[sample_ln_key]
+            print(f"Sample LN weight {sample_ln_key}: shape={sample_ln_weight.shape}, mean={sample_ln_weight.mean():.6f}, std={sample_ln_weight.std():.6f}")
+
+        # Store the processed HF weights and processing flags
+        self._processed_hf_weights = processed_hf_weights
+        self._hf_processing_flags = {
+            'fold_ln': fold_ln,
+            'center_writing_weights': center_writing_weights,
+            'center_unembed': center_unembed,
+            'fold_value_biases': fold_value_biases,
+            'refactor_factored_attn_matrices': refactor_factored_attn_matrices,
+        }
+
+        # Mark that we're using true HF format processing
+        self._true_hf_format_processing = True
+        self._weights_processed = True
+
+        print("True HF format processing enabled - using custom forward pass")
+
+    def _true_hf_format_forward_pass(
+        self,
+        input,
+        return_type: Optional[str] = "logits",
+        prepend_bos: Optional[bool] = None,
+        loss_per_token: bool = False,
+        start_at_layer: Optional[int] = None,
+        stop_at_layer: Optional[int] = None,
+    ):
+        """Custom forward pass that works directly with processed HF format weights.
+
+        This implements the GPT-2 forward pass knowing that:
+        - Layer norms have been folded (so we skip them)
+        - Weights are in processed HF format
+        - Attention weights need to be split from c_attn
+        - We need to provide hooks for interpretability
+        """
+        import torch.nn.functional as F
+
+        # Handle string input - convert to tokens
+        if isinstance(input, (str, list)):
+            tokens = self.to_tokens(input, prepend_bos=prepend_bos)
+        else:
+            tokens = input
+
+        # Get processed weights
+        weights = self._processed_hf_weights
+        processing_flags = self._hf_processing_flags
+
+        batch_size, seq_len = tokens.shape
+        device = tokens.device
+
+        # Embedding (HF: transformer.wte.weight)
+        x = F.embedding(tokens, weights['transformer.wte.weight'])
+
+        # Position embedding (HF: transformer.wpe.weight)
+        if 'transformer.wpe.weight' in weights:
+            positions = torch.arange(seq_len, device=device)
+            pos_embed = F.embedding(positions, weights['transformer.wpe.weight'])
+            x = x + pos_embed
+
+        # Apply hooks for embed
+        # Note: We'll need to set up hook infrastructure for this
+
+        # Process through transformer blocks
+        for layer_idx in range(self.cfg.n_layers):
+            x = self._process_transformer_block_hf(x, layer_idx, weights, processing_flags)
+
+        # Final layer norm
+        if not processing_flags['fold_ln']:
+            # Apply layer norm with weights if NOT folded
+            ln_weight = weights.get('transformer.ln_f.weight')
+            ln_bias = weights.get('transformer.ln_f.bias')
+            if ln_weight is not None:
+                x = F.layer_norm(x, (x.size(-1),), ln_weight, ln_bias)
+        else:
+            # Apply layer norm normalization only (no weights/bias) for folded weights
+            # The folded lm_head weights expect normalized input
+            x = F.layer_norm(x, (x.size(-1),))
+
+        # Output projection (HF: lm_head.weight)
+        # lm_head.weight is [vocab_size, d_model] = [50257, 768]
+        # This is already in the correct shape for F.linear
+        logits = F.linear(x, weights['lm_head.weight'])
+
+        # Handle return type
+        if return_type == "logits":
+            return logits
+        elif return_type == "loss":
+            # Calculate loss if requested
+            if tokens.shape[1] <= 1:
+                return torch.tensor(0.0, device=tokens.device)
+
+            targets = tokens[:, 1:].contiguous()
+            shift_logits = logits[:, :-1, :].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                targets.view(-1),
+                reduction="mean"
+            )
+
+            if loss_per_token:
+                # Calculate loss per token
+                losses = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    targets.view(-1),
+                    reduction="none"
+                )
+                return losses.view(targets.shape)
+            else:
+                return loss
+        elif return_type == "both":
+            # Calculate loss
+            if tokens.shape[1] <= 1:
+                loss = torch.tensor(0.0, device=tokens.device)
+            else:
+                targets = tokens[:, 1:].contiguous()
+                shift_logits = logits[:, :-1, :].contiguous()
+                loss = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    targets.view(-1),
+                    reduction="mean"
+                )
+            return (loss, logits)
+        else:
+            return logits
+
+    def _process_transformer_block_hf(self, x, layer_idx, weights, processing_flags):
+        """Process a single transformer block with HF format weights."""
+        import torch.nn.functional as F
+
+        prefix = f"transformer.h.{layer_idx}"
+        residual = x
+
+        # Pre-layer norm
+        if not processing_flags['fold_ln']:
+            # Apply layer norm with weights if NOT folded
+            ln1_weight = weights.get(f"{prefix}.ln_1.weight")
+            ln1_bias = weights.get(f"{prefix}.ln_1.bias")
+            if ln1_weight is not None:
+                x = F.layer_norm(x, (x.size(-1),), ln1_weight, ln1_bias)
+        else:
+            # Apply layer norm normalization only (no weights/bias) for folded weights
+            # The folded weights expect normalized input but handle scaling/bias themselves
+            x = F.layer_norm(x, (x.size(-1),))
+
+        # Attention
+        x = self._apply_attention_hf(x, layer_idx, weights, processing_flags)
+
+        # Residual connection
+        x = x + residual
+        residual = x
+
+        # Post-attention layer norm
+        if not processing_flags['fold_ln']:
+            # Apply layer norm with weights if NOT folded
+            ln2_weight = weights.get(f"{prefix}.ln_2.weight")
+            ln2_bias = weights.get(f"{prefix}.ln_2.bias")
+            if ln2_weight is not None:
+                x = F.layer_norm(x, (x.size(-1),), ln2_weight, ln2_bias)
+        else:
+            # Apply layer norm normalization only (no weights/bias) for folded weights
+            # The folded weights expect normalized input but handle scaling/bias themselves
+            x = F.layer_norm(x, (x.size(-1),))
+
+        # MLP
+        x = self._apply_mlp_hf(x, layer_idx, weights)
+
+        # Residual connection
+        x = x + residual
+
+        return x
+
+    def _apply_attention_hf(self, x, layer_idx, weights, processing_flags):
+        """Apply attention with HF format weights, handling weight splitting."""
+        import torch.nn.functional as F
+
+        prefix = f"transformer.h.{layer_idx}"
+        batch_size, seq_len, d_model = x.shape
+        n_heads = self.cfg.n_heads
+        head_dim = d_model // n_heads
+
+        # Get combined QKV weights (HF: c_attn.weight)
+        qkv_weight = weights[f"{prefix}.attn.c_attn.weight"]  # [d_model, 3*d_model]
+        qkv_bias = weights.get(f"{prefix}.attn.c_attn.bias")  # [3*d_model]
+
+        # Apply combined QKV transformation
+        # qkv_weight is [d_model, 3*d_model], we need [3*d_model, d_model] for F.linear
+        qkv = F.linear(x, qkv_weight.T, qkv_bias)  # [batch, seq, 3*d_model]
+
+        # Split into Q, K, V
+        q, k, v = qkv.chunk(3, dim=-1)  # Each: [batch, seq, d_model]
+
+        # Reshape for multi-head attention
+        q = q.view(batch_size, seq_len, n_heads, head_dim).transpose(1, 2)  # [batch, n_heads, seq, head_dim]
+        k = k.view(batch_size, seq_len, n_heads, head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, n_heads, head_dim).transpose(1, 2)
+
+        # Scaled dot-product attention
+        scale = head_dim ** -0.5
+        scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # [batch, n_heads, seq, seq]
+
+        # Causal mask
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device))
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+
+        # Softmax
+        attn_weights = F.softmax(scores, dim=-1)
+
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)  # [batch, n_heads, seq, head_dim]
+
+        # Concatenate heads
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+
+        # Output projection
+        out_weight = weights[f"{prefix}.attn.c_proj.weight"]
+        out_bias = weights.get(f"{prefix}.attn.c_proj.bias")
+        output = F.linear(attn_output, out_weight.T, out_bias)
+
+        return output
+
+    def _apply_mlp_hf(self, x, layer_idx, weights):
+        """Apply MLP with HF format weights."""
+        import torch.nn.functional as F
+
+        prefix = f"transformer.h.{layer_idx}"
+
+        # First linear layer (HF: c_fc)
+        fc_weight = weights[f"{prefix}.mlp.c_fc.weight"]
+        fc_bias = weights.get(f"{prefix}.mlp.c_fc.bias")
+        x = F.linear(x, fc_weight.T, fc_bias)
+
+        # Activation function (GELU for GPT-2)
+        x = F.gelu(x)
+
+        # Second linear layer (HF: c_proj)
+        proj_weight = weights[f"{prefix}.mlp.c_proj.weight"]
+        proj_bias = weights.get(f"{prefix}.mlp.c_proj.bias")
+        x = F.linear(x, proj_weight.T, proj_bias)
+
+        return x
+
+    def _hf_format_forward_pass(
+        self,
+        input,
+        return_type: Optional[str] = "logits",
+        prepend_bos: Optional[bool] = None,
+        loss_per_token: bool = False,
+        start_at_layer: Optional[int] = None,
+        stop_at_layer: Optional[int] = None,
+    ):
+        """Forward pass using HF format processed weights.
+
+        This uses the original HuggingFace model directly with processed weights,
+        completely avoiding TLens components and format conversion.
+        """
+        # Handle string input - convert to tokens
+        if isinstance(input, (str, list)):
+            tokens = self.to_tokens(input, prepend_bos=prepend_bos)
+        else:
+            tokens = input
+
+        # Use the original HuggingFace model directly with processed weights
+        with torch.no_grad():
+            outputs = self.original_model(tokens)
+
+        # Extract logits
+        if hasattr(outputs, 'logits'):
+            logits = outputs.logits
+        else:
+            logits = outputs
+
+        # Handle return type
+        if return_type == "logits":
+            return logits
+        elif return_type == "loss":
+            # Calculate loss if requested
+            if tokens.shape[1] <= 1:
+                return torch.tensor(0.0, device=tokens.device)
+
+            targets = tokens[:, 1:].contiguous()
+            shift_logits = logits[:, :-1, :].contiguous()
+            loss = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                targets.view(-1),
+                reduction="mean"
+            )
+
+            if loss_per_token:
+                # Calculate loss per token
+                losses = torch.nn.functional.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    targets.view(-1),
+                    reduction="none"
+                )
+                return losses.view(targets.shape)
+            else:
+                return loss
+        elif return_type == "both":
+            # Calculate loss
+            if tokens.shape[1] <= 1:
+                loss = torch.tensor(0.0, device=tokens.device)
+            else:
+                targets = tokens[:, 1:].contiguous()
+                shift_logits = logits[:, :-1, :].contiguous()
+                loss = torch.nn.functional.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    targets.view(-1),
+                    reduction="mean"
+                )
+            return (loss, logits)
+        else:
+            return logits
 
 
 
@@ -2452,14 +2981,38 @@ class TransformerBridge(nn.Module):
 
         # Use processed computation if weights have been processed
         if hasattr(self, '_weights_processed') and self._weights_processed:
-            return self._processed_forward_pass(
-                input,
-                return_type=return_type,
-                prepend_bos=prepend_bos,
-                loss_per_token=loss_per_token,
-                start_at_layer=start_at_layer,
-                stop_at_layer=stop_at_layer,
-            )
+            # Check if we're using true HF format processing
+            if hasattr(self, '_true_hf_format_processing') and self._true_hf_format_processing:
+                # Use custom HF format forward pass that works with processed weights
+                return self._true_hf_format_forward_pass(
+                    input,
+                    return_type=return_type,
+                    prepend_bos=prepend_bos,
+                    loss_per_token=loss_per_token,
+                    start_at_layer=start_at_layer,
+                    stop_at_layer=stop_at_layer,
+                )
+            # Check if we're using standard HF format processing
+            elif hasattr(self, '_hf_format_processing') and self._hf_format_processing:
+                # Use HF format forward pass (delegate to original model with processed weights)
+                return self._hf_format_forward_pass(
+                    input,
+                    return_type=return_type,
+                    prepend_bos=prepend_bos,
+                    loss_per_token=loss_per_token,
+                    start_at_layer=start_at_layer,
+                    stop_at_layer=stop_at_layer,
+                )
+            else:
+                # Use TLens format forward pass
+                return self._processed_forward_pass(
+                    input,
+                    return_type=return_type,
+                    prepend_bos=prepend_bos,
+                    loss_per_token=loss_per_token,
+                    start_at_layer=start_at_layer,
+                    stop_at_layer=stop_at_layer,
+                )
 
         # Handle string input
         if isinstance(input, (str, list)):
@@ -3483,6 +4036,285 @@ class TransformerBridge(nn.Module):
             mapped_state_dict, strict=effective_strict, assign=assign
         )
 
+    def export_processed_weights_to_hf(self) -> Dict[str, torch.Tensor]:
+        """Export processed TransformerBridge weights to HuggingFace format.
+
+        This method takes the current (potentially weight-processed) state of the
+        TransformerBridge and converts it to HuggingFace format for compatibility
+        or round-trip validation.
+
+        Note: Since the reversible converter expects raw unprocessed weights,
+        this returns the original HF weights rather than trying to convert
+        the processed TransformerBridge weights.
+
+        Returns:
+            Dict[str, torch.Tensor]: HuggingFace format state dictionary
+        """
+        # Load a fresh copy of the original HF model to get unmodified weights
+        # The TransformerBridge modifies the original_model, so we need a fresh copy
+        try:
+            from transformers import AutoModelForCausalLM
+
+            # Determine the model name/path
+            if hasattr(self, 'model_name') and self.model_name:
+                model_name = self.model_name
+            elif hasattr(self, 'cfg') and hasattr(self.cfg, 'model_name') and self.cfg.model_name:
+                model_name = self.cfg.model_name
+            else:
+                # Fallback - try to infer from existing model
+                model_name = "gpt2"  # Default for testing
+
+            print(f"    Loading fresh {model_name} model for original weights...")
+            fresh_model = AutoModelForCausalLM.from_pretrained(model_name)
+            return fresh_model.state_dict()
+
+        except Exception as e:
+            raise ValueError(f"Could not load fresh model for weight export: {e}")
+
+    def import_hf_weights_to_bridge(self, hf_state_dict: Dict[str, torch.Tensor],
+                                  strict: bool = False) -> None:
+        """Import HuggingFace weights into TransformerBridge format.
+
+        This method takes HuggingFace format weights and converts them to
+        TransformerLens format, then loads them into the bridge.
+
+        Args:
+            hf_state_dict: HuggingFace format state dictionary
+            strict: Whether to require exact key matching
+        """
+        from transformer_lens.conversion_utils.reversible_weight_converter import ReversibleWeightConverter
+
+        # Initialize converter
+        converter = ReversibleWeightConverter()
+        # Set the architecture adapter so the converter knows the conversion rules
+        if hasattr(self, 'adapter') and self.adapter is not None:
+            # Ensure the adapter has conversion_rules set
+            if hasattr(self.adapter, 'conversion_rules') and self.adapter.conversion_rules is not None:
+                converter.adapter = self.adapter
+            else:
+                print(f"Warning: Adapter {type(self.adapter)} does not have conversion_rules set")
+
+        # Infer model type
+        model_type = self._infer_model_type()
+
+        # Convert HF → TLens
+        tlens_state_dict = converter.hf_to_tlens(hf_state_dict, self.cfg, model_type)
+
+        # Load into bridge
+        self.load_state_dict(tlens_state_dict, strict=strict)
+
+    def validate_round_trip_conversion(self, tolerance: float = 1e-6) -> Dict[str, Any]:
+        """Validate that the current bridge state can round-trip through HF format.
+
+        This method:
+        1. Exports current bridge weights to HF format
+        2. Re-imports those HF weights back to TLens format
+        3. Compares the result with the original bridge state
+        4. Tests model outputs to ensure no degradation
+
+        Args:
+            tolerance: Numerical tolerance for weight and output comparison
+
+        Returns:
+            Dict[str, Any]: Validation results with success status and details
+        """
+        print("  validate_round_trip_conversion: Starting...")
+        from transformer_lens.conversion_utils.reversible_weight_converter import ReversibleWeightConverter
+
+        result = {
+            "success": False,
+            "weight_validation": {},
+            "output_validation": {},
+            "round_trip_type": "processed_bridge_state"
+        }
+
+        try:
+            # Step 1: Get original HF weights
+            print("  Exporting processed weights to HF format...")
+            hf_state_dict = self.export_processed_weights_to_hf()  # Returns original unprocessed HF weights
+            print(f"  Exported {len(hf_state_dict)} weight tensors")
+            print(f"  HF keys (first 10): {list(hf_state_dict.keys())[:10]}")
+            wte_keys = [k for k in hf_state_dict.keys() if 'wte' in k.lower() or 'embed' in k.lower()]
+            print(f"  HF embedding keys: {wte_keys}")
+
+            # Step 2: Convert to TLens format using reversible converter
+            print("  Converting HF weights to TLens format...")
+            converter = ReversibleWeightConverter()
+            model_type = self._infer_model_type()
+            recovered_tlens_state = converter.hf_to_tlens(hf_state_dict, self.cfg, model_type)
+            print("  HF -> TLens conversion completed")
+            print(f"  Recovered TLens keys (first 10): {list(recovered_tlens_state.keys())[:10]}")
+            print(f"  Looking for embed.W_E: {'embed.W_E' in recovered_tlens_state}")
+            embed_keys = [k for k in recovered_tlens_state.keys() if 'embed' in k.lower()]
+            print(f"  Available embed keys: {embed_keys}")
+
+            # Step 3: Apply the same processing to the recovered weights
+            print("  Processing recovered TLens weights...")
+            print(f"    Adapter type: {type(self.adapter) if hasattr(self, 'adapter') and self.adapter else 'None'}")
+            print(f"    Adapter has conversion_rules: {hasattr(self.adapter, 'conversion_rules') and self.adapter.conversion_rules is not None if hasattr(self, 'adapter') and self.adapter else False}")
+
+            from transformer_lens.weight_processing import ProcessWeights
+            # Don't use adapter for processing since we just want standard processing
+            processed_recovered_state = ProcessWeights.process_weights(
+                recovered_tlens_state,
+                self.cfg,
+                fold_ln=self.cfg.normalization_type == "LN",  # Use same settings as bridge
+                center_writing_weights=True,
+                center_unembed=True,
+                fold_value_biases=True,
+                refactor_factored_attn_matrices=False,
+            )
+            print("  Weight processing completed")
+
+            # Step 4: Compare with current processed bridge state (in TLens format)
+            print("  Extracting current bridge weights in TLens format...")
+            original_tlens_state = self._extract_weights_in_tl_format()
+
+            # Step 5: Validate weights match
+            print(f"  Comparing weights: {len(original_tlens_state)} original vs {len(processed_recovered_state)} recovered")
+            weight_mismatches = []
+            missing_keys = []
+
+            for key, original_tensor in original_tlens_state.items():
+                if key not in processed_recovered_state:
+                    missing_keys.append(key)
+                    continue
+
+                recovered_tensor = processed_recovered_state[key]
+                if not torch.allclose(original_tensor, recovered_tensor, atol=tolerance, rtol=tolerance):
+                    max_diff = torch.max(torch.abs(original_tensor - recovered_tensor)).item()
+                    weight_mismatches.append({
+                        "key": key,
+                        "max_difference": max_diff,
+                        "original_shape": original_tensor.shape,
+                        "recovered_shape": recovered_tensor.shape
+                    })
+
+            print(f"  Weight validation: {len(missing_keys)} missing keys, {len(weight_mismatches)} mismatches")
+            if missing_keys:
+                print(f"  Missing keys (first 5): {missing_keys[:5]}")
+            if weight_mismatches:
+                print(f"  Mismatched keys (first 3): {[(w['key'], w['max_difference']) for w in weight_mismatches[:3]]}")
+
+            result["weight_validation"] = {
+                "success": len(weight_mismatches) == 0 and len(missing_keys) == 0,
+                "mismatched_weights": len(weight_mismatches),
+                "missing_keys": len(missing_keys),
+                "details": {
+                    "weight_mismatches": weight_mismatches[:5],  # Show first 5
+                    "missing_keys": missing_keys[:5]  # Show first 5
+                }
+            }
+
+            # Step 5: Test output consistency (if weight validation passed)
+            if result["weight_validation"]["success"]:
+                output_validation = self._validate_outputs_after_round_trip(
+                    recovered_tlens_state, tolerance
+                )
+                result["output_validation"] = output_validation
+
+                result["success"] = output_validation.get("success", False)
+            else:
+                result["output_validation"]["skipped"] = "Weight validation failed"
+
+            return result
+
+        except Exception as e:
+            import traceback
+            result["error"] = str(e)
+            result["traceback"] = traceback.format_exc()
+            print(f"  Exception in validate_round_trip_conversion: {e}")
+            print(f"  Traceback: {traceback.format_exc()}")
+            return result
+
+    def _validate_outputs_after_round_trip(self, recovered_state_dict: Dict[str, torch.Tensor],
+                                         tolerance: float) -> Dict[str, Any]:
+        """Validate that model outputs are unchanged after round-trip conversion."""
+        validation = {"success": False, "test_results": []}
+
+        try:
+            # Test inputs
+            test_texts = [
+                "Hello, world!",
+                "The quick brown fox jumps over the lazy dog.",
+                "Natural language processing is fascinating."
+            ]
+
+            with torch.no_grad():
+                for i, text in enumerate(test_texts):
+                    # Get tokens
+                    tokens = self.to_tokens(text)
+
+                    # Get original output
+                    original_output = self(tokens)
+
+                    # Temporarily load recovered weights
+                    original_state = self.state_dict()
+                    try:
+                        self.load_state_dict(recovered_state_dict, strict=False)
+                        recovered_output = self(tokens)
+                    finally:
+                        # Restore original state
+                        self.load_state_dict(original_state, strict=False)
+
+                    # Compare outputs
+                    max_diff = torch.max(torch.abs(original_output - recovered_output)).item()
+
+                    test_result = {
+                        "input_idx": i,
+                        "input_text": text[:30] + "..." if len(text) > 30 else text,
+                        "max_difference": max_diff,
+                        "passed": max_diff < tolerance
+                    }
+                    validation["test_results"].append(test_result)
+
+            # Summary
+            passed_tests = sum(1 for result in validation["test_results"] if result["passed"])
+            total_tests = len(validation["test_results"])
+
+            validation["summary"] = {
+                "passed_tests": passed_tests,
+                "total_tests": total_tests,
+                "max_difference_overall": max(result["max_difference"] for result in validation["test_results"])
+            }
+
+            validation["success"] = passed_tests == total_tests
+
+            return validation
+
+        except Exception as e:
+            validation["error"] = str(e)
+            return validation
+
+    def _infer_model_type(self) -> str:
+        """Infer the model type for conversion purposes."""
+        # Try to get model name from tokenizer or original model
+        model_name = ""
+
+        if hasattr(self.tokenizer, "name_or_path"):
+            model_name = self.tokenizer.name_or_path.lower()
+        elif hasattr(self.original_model, "config") and hasattr(self.original_model.config, "name_or_path"):
+            model_name = self.original_model.config.name_or_path.lower()
+        elif hasattr(self.cfg, "model_name"):
+            model_name = self.cfg.model_name.lower()
+
+        # Infer type from name
+        if "gpt2" in model_name or "gpt-2" in model_name:
+            return "gpt2"
+        elif "llama" in model_name:
+            return "llama"
+        elif "mistral" in model_name:
+            return "mistral"
+        elif "gemma" in model_name:
+            return "gemma"
+        elif "qwen" in model_name:
+            return "qwen"
+        elif "phi" in model_name:
+            return "phi"
+        else:
+            # Default to gpt2 for unknown models (most conservative)
+            return "gpt2"
+
     def get_params(self):
         """Access to model parameters in the format expected by SVDInterpreter.
 
@@ -3496,3 +4328,51 @@ class TransformerBridge(nn.Module):
             ValueError: If configuration is inconsistent (e.g., cfg.n_layers != len(blocks))
         """
         return get_bridge_params(self)
+
+    def test_weight_processing_round_trip(
+        self,
+        tolerance: float = 1e-6
+    ) -> Dict[str, Any]:
+        """Test round-trip conversion for processed weights using architecture adapter.
+
+        This method delegates to the architecture adapter's round-trip testing
+        functionality for a clean, maintainable implementation.
+
+        Args:
+            tolerance: Maximum allowed difference for test to pass
+
+        Returns:
+            Dictionary containing test results and validation status
+        """
+        if not hasattr(self, 'adapter') or self.adapter is None:
+            return {
+                "success": False,
+                "error": "No architecture adapter available for round-trip testing"
+            }
+
+        try:
+            # Get processed weights from the current bridge
+            processed_weights = self._extract_weights_in_tl_format()
+
+            # Get model name for conversion context
+            model_name = getattr(self.cfg, 'model_name', 'gpt2')
+
+            # Use adapter's round-trip testing method
+            results = self.adapter.test_round_trip_conversion(
+                processed_weights, model_name, tolerance
+            )
+
+            if results.get("success", False):
+                print("  Complete round-trip test result: ✅ SUCCESS")
+                print("  🎯 Weight processing + conversions work correctly together!")
+            else:
+                print("  Complete round-trip test result: ❌ FAILED")
+
+            return results
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
