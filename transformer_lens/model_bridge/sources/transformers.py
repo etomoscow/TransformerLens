@@ -219,6 +219,7 @@ def boot(
     # Convert to TransformerBridgeConfig with unified architecture
     bridge_config = TransformerBridgeConfig.from_dict(tl_config.__dict__)
     bridge_config.architecture = architecture
+    bridge_config.model_name = model_name  # Set the actual model name instead of default "custom"
 
     adapter = ArchitectureAdapterFactory.select_architecture_adapter(bridge_config)
 
@@ -237,7 +238,8 @@ def boot(
     )
 
     # Move model to device
-    hf_model = hf_model.to(device)
+    if device is not None:
+        hf_model = hf_model.to(device)  # type: ignore
 
     # Load the tokenizer
     tokenizer = tokenizer

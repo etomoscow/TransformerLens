@@ -1,6 +1,6 @@
 """GPT2 architecture adapter."""
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -13,6 +13,7 @@ from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapt
 from transformer_lens.model_bridge.generalized_components import (
     BlockBridge,
     EmbeddingBridge,
+    PosEmbedBridge,
     JointQKVAttentionBridge,
     LinearBridge,
     MLPBridge,
@@ -273,7 +274,7 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
 
         self.component_mapping = {
             "embed": EmbeddingBridge(name="transformer.wte"),
-            "pos_embed": EmbeddingBridge(name="transformer.wpe"),
+            "pos_embed": PosEmbedBridge(name="transformer.wpe"),
             "blocks": BlockBridge(
                 name="transformer.h",
                 config=self.cfg,
@@ -301,7 +302,6 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
             "ln_final": NormalizationBridge(name="transformer.ln_f", config=self.cfg),
             "unembed": UnembeddingBridge(name="lm_head"),
         }
-
 
     def split_qkv_matrix(
         self, original_attention_component: Any
@@ -354,115 +354,34 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
 
         return W_Q_transformation, W_K_transformation, W_V_transformation
 
-    def process_weights_and_create_components(self, state_dict, tl_cfg,
-                                             fold_ln=True, center_writing_weights=True,
-                                             center_unembed=True, fold_value_biases=True,
-                                             refactor_factored_attn_matrices=False,
-                                             use_hf_format=False):
-        """Process weights and create components directly with integrated layer norm folding.
-
-        This method handles the complete weight processing pipeline for GPT-2 models.
-        """
-        print("GPT-2 adapter: Processing weights with integrated folding...")
-
-        # Process weights first using our proven method
-        from transformer_lens.loading_from_pretrained import fill_missing_keys
-        from transformer_lens.weight_processing import ProcessWeights
-
-        # Fill missing keys using a temporary minimal structure for compatibility
-        temp_structure = self._create_minimal_structure_for_filling_keys(tl_cfg)
-        complete_state_dict = fill_missing_keys(temp_structure, state_dict)
-
-        # Process weights with exact same parameters
-        processed_weights = ProcessWeights.process_weights(
-            complete_state_dict,
-            tl_cfg,
-            fold_ln=fold_ln,
-            center_writing_weights=center_writing_weights,
-            center_unembed=center_unembed,
-            fold_value_biases=fold_value_biases,
-            refactor_factored_attn_matrices=refactor_factored_attn_matrices,
-        )
-
-        # Create components directly based on the processing that was applied
-        components_dict = self._create_folded_components_directly(tl_cfg, processed_weights, fold_ln, use_hf_format)
-
-        print(f"GPT-2 adapter: Created {len(components_dict['blocks'])} transformer blocks with integrated folding")
-        return components_dict
-
-    def _create_minimal_structure_for_filling_keys(self, tl_cfg):
-        """Create minimal structure needed for fill_missing_keys compatibility."""
-        import torch.nn as nn
-        from transformer_lens.components import (
-            Embed, LayerNorm, LayerNormPre, PosEmbed, RMSNorm, RMSNormPre,
-            TransformerBlock, Unembed
-        )
-        from transformer_lens.config.HookedTransformerConfig import HookedTransformerConfig
-
-        # Create a compatible config by copying only the fields that HookedTransformerConfig supports
-        # This is safer than trying to remove all bridge-specific fields
-        component_cfg = HookedTransformerConfig(
-            d_model=tl_cfg.d_model,
-            n_heads=tl_cfg.n_heads,
-            n_layers=tl_cfg.n_layers,
-            d_vocab=tl_cfg.d_vocab,
-            n_ctx=tl_cfg.n_ctx,
-            d_mlp=tl_cfg.d_mlp,
-            d_head=tl_cfg.d_head,
-            act_fn=tl_cfg.act_fn,
-            normalization_type=tl_cfg.normalization_type,
-            positional_embedding_type=tl_cfg.positional_embedding_type,
-            device=tl_cfg.device,
-            final_rms=getattr(tl_cfg, 'final_rms', False),
-        )
-
-        # Create minimal structure that matches what fill_missing_keys expects
-        temp_structure = nn.Module()
-        temp_structure.cfg = component_cfg
-
-        # Create components without processing - just for fill_missing_keys
-        temp_structure.embed = Embed(component_cfg)
-
-        if component_cfg.positional_embedding_type != "rotary":
-            temp_structure.pos_embed = PosEmbed(component_cfg)
-
-        temp_structure.blocks = nn.ModuleList([
-            TransformerBlock(component_cfg, block_index) for block_index in range(component_cfg.n_layers)
-        ])
-
-        # Create ln_final based on original config (before folding)
-        if component_cfg.normalization_type in ["RMS", "RMSPre"]:
-            temp_structure.ln_final = RMSNorm(component_cfg) if component_cfg.normalization_type == "RMS" else RMSNormPre(component_cfg)
-        elif component_cfg.normalization_type in ["LN", "LNPre"]:
-            if component_cfg.final_rms:
-                temp_structure.ln_final = RMSNorm(component_cfg)
-            else:
-                # Use NormalizationBridge for unified LayerNorm/LayerNormPre behavior
-                from transformer_lens.model_bridge.generalized_components.normalization import NormalizationBridge
-                temp_structure.ln_final = NormalizationBridge.create_normalization_bridge(
-                    name="ln_final",
-                    config=component_cfg,
-                    original_component=LayerNorm(component_cfg)  # Create LayerNorm component for weights
-                )
-
-        temp_structure.unembed = Unembed(component_cfg)
-        return temp_structure
-
-    def _create_folded_components_directly(self, tl_cfg, processed_weights, fold_ln, use_hf_format=False):
+    def _create_folded_components_directly(
+        self, tl_cfg, processed_weights, fold_ln, use_hf_format=False
+    ):
         """Create components directly with processed weights, respecting folding."""
         import torch.nn as nn
-        from transformer_lens.components import (
-            Embed, LayerNorm, LayerNormPre, PosEmbed, RMSNorm, RMSNormPre,
-            TransformerBlock, Unembed
+
+        # from transformer_lens.components import (
+        #     Embed,
+        #     LayerNorm,
+        #     PosEmbed,
+        #     RMSNorm,
+        #     RMSNormPre,
+        #     TransformerBlock,
+        #     Unembed,
+        # )
+        # NOTE: This function requires TL components - skip if simplified approach is used
+        raise NotImplementedError(
+            "This function requires TransformerLens components and is not used in simplified startup"
+        )
+        from transformer_lens.config.TransformerBridgeConfig import (
+            TransformerBridgeConfig,
         )
         from transformer_lens.hook_points import HookPoint
-        from transformer_lens.config.HookedTransformerConfig import HookedTransformerConfig
 
         print("GPT-2 adapter: Creating components with folded configuration...")
 
-        # Create a compatible config by copying only the fields that HookedTransformerConfig supports
-        # This is safer than trying to remove all bridge-specific fields
-        component_cfg = HookedTransformerConfig(
+        # Use the TransformerBridgeConfig directly since it now has all HookedTransformerConfig fields
+        component_cfg = TransformerBridgeConfig(
             d_model=tl_cfg.d_model,
             n_heads=tl_cfg.n_heads,
             n_layers=tl_cfg.n_layers,
@@ -474,11 +393,11 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
             normalization_type=tl_cfg.normalization_type,
             positional_embedding_type=tl_cfg.positional_embedding_type,
             device=tl_cfg.device,
-            final_rms=getattr(tl_cfg, 'final_rms', False),
+            final_rms=getattr(tl_cfg, "final_rms", False),
         )
 
-        # Create embed component
-        embed_component = Embed(component_cfg)
+        # Use the bridge embed component from component mapping instead of creating custom
+        embed_component = self.component_mapping["embed"]
         hook_embed = HookPoint()
 
         # Create pos_embed if needed
@@ -489,27 +408,34 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
             hook_pos_embed = HookPoint()
 
         # Create transformer blocks
-        blocks = nn.ModuleList([
-            TransformerBlock(component_cfg, block_index) for block_index in range(component_cfg.n_layers)
-        ])
+        blocks = nn.ModuleList(
+            [
+                TransformerBlock(component_cfg, block_index)
+                for block_index in range(component_cfg.n_layers)
+            ]
+        )
 
         # Create final layer norm using NormalizationBridge that adapts based on layer_norm_folding
-        ln_final = None
+        from typing import Union
+
+        from transformer_lens.model_bridge.generalized_components.normalization import (
+            NormalizationBridge,
+        )
+
+        ln_final: Union[NormalizationBridge, RMSNorm, RMSNormPre, None] = None
 
         # Set layer_norm_folding flag in config for NormalizationBridge behavior
         component_cfg.layer_norm_folding = fold_ln
 
         if component_cfg.normalization_type in ["LN", "LNPre"]:
+            # Create a dummy LayerNorm component to hold the weights
+            dummy_ln = LayerNorm(component_cfg)
             # Use NormalizationBridge that automatically switches between LayerNorm and LayerNormPre behavior
-            from transformer_lens.model_bridge.generalized_components.normalization import NormalizationBridge
             ln_final = NormalizationBridge.create_normalization_bridge(
                 name="ln_final",
                 config=component_cfg,
-                original_component=None  # We'll create a dummy LayerNorm component for weights
+                original_component=dummy_ln,
             )
-            # Create a dummy LayerNorm component to hold the weights
-            dummy_ln = LayerNorm(component_cfg)
-            ln_final.set_original_component(dummy_ln)
         elif component_cfg.normalization_type == "RMS":
             ln_final = RMSNorm(component_cfg)
         elif component_cfg.normalization_type == "RMSPre":
@@ -520,29 +446,43 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
 
         # Load processed weights directly into components
         self._load_processed_weights_into_components(
-            processed_weights, embed_component, pos_embed_component, blocks, ln_final, unembed_component, use_hf_format
+            processed_weights,
+            embed_component,
+            pos_embed_component,
+            blocks,
+            ln_final,
+            unembed_component,
+            use_hf_format,
         )
 
         # Return components dictionary
         components_dict = {
-            'embed': embed_component,
-            'hook_embed': hook_embed,
-            'blocks': blocks,
-            'unembed': unembed_component,
+            "embed": embed_component,
+            "hook_embed": hook_embed,
+            "blocks": blocks,
+            "unembed": unembed_component,
         }
 
         if pos_embed_component is not None:
-            components_dict['pos_embed'] = pos_embed_component
-            components_dict['hook_pos_embed'] = hook_pos_embed
+            components_dict["pos_embed"] = pos_embed_component
+            if hook_pos_embed is not None:
+                components_dict["hook_pos_embed"] = hook_pos_embed
 
         if ln_final is not None:
-            components_dict['ln_final'] = ln_final
+            components_dict["ln_final"] = ln_final
 
         return components_dict
 
-    def _load_processed_weights_into_components(self, processed_weights, embed_component,
-                                              pos_embed_component, blocks, ln_final, unembed_component,
-                                              use_hf_format=False):
+    def _load_processed_weights_into_components(
+        self,
+        processed_weights,
+        embed_component,
+        pos_embed_component,
+        blocks,
+        ln_final,
+        unembed_component,
+        use_hf_format=False,
+    ):
         """Load processed weights directly into components.
 
         Args:
@@ -554,23 +494,40 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
 
         if use_hf_format:
             self._load_hf_format_weights_into_components(
-                processed_weights, embed_component, pos_embed_component, blocks, ln_final, unembed_component
+                processed_weights,
+                embed_component,
+                pos_embed_component,
+                blocks,
+                ln_final,
+                unembed_component,
             )
         else:
             self._load_tl_format_weights_into_components(
-                processed_weights, embed_component, pos_embed_component, blocks, ln_final, unembed_component
+                processed_weights,
+                embed_component,
+                pos_embed_component,
+                blocks,
+                ln_final,
+                unembed_component,
             )
 
-    def _load_tl_format_weights_into_components(self, processed_weights, embed_component,
-                                              pos_embed_component, blocks, ln_final, unembed_component):
+    def _load_tl_format_weights_into_components(
+        self,
+        processed_weights,
+        embed_component,
+        pos_embed_component,
+        blocks,
+        ln_final,
+        unembed_component,
+    ):
         """Load processed weights with TLens format keys into components."""
         # Load embed weights
-        if 'embed.W_E' in processed_weights:
-            embed_component.W_E.data = processed_weights['embed.W_E']
+        if "embed.W_E" in processed_weights:
+            embed_component.W_E.data = processed_weights["embed.W_E"]
 
         # Load pos_embed weights
-        if pos_embed_component is not None and 'pos_embed.W_pos' in processed_weights:
-            pos_embed_component.W_pos.data = processed_weights['pos_embed.W_pos']
+        if pos_embed_component is not None and "pos_embed.W_pos" in processed_weights:
+            pos_embed_component.W_pos.data = processed_weights["pos_embed.W_pos"]
 
         # Load block weights
         for i, block in enumerate(blocks):
@@ -587,13 +544,13 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                 block.attn.W_O.data = processed_weights[f"{prefix}.attn.W_O"]
 
             # Attention biases (if they exist)
-            if hasattr(block.attn, 'b_Q') and f"{prefix}.attn.b_Q" in processed_weights:
+            if hasattr(block.attn, "b_Q") and f"{prefix}.attn.b_Q" in processed_weights:
                 block.attn.b_Q.data = processed_weights[f"{prefix}.attn.b_Q"]
-            if hasattr(block.attn, 'b_K') and f"{prefix}.attn.b_K" in processed_weights:
+            if hasattr(block.attn, "b_K") and f"{prefix}.attn.b_K" in processed_weights:
                 block.attn.b_K.data = processed_weights[f"{prefix}.attn.b_K"]
-            if hasattr(block.attn, 'b_V') and f"{prefix}.attn.b_V" in processed_weights:
+            if hasattr(block.attn, "b_V") and f"{prefix}.attn.b_V" in processed_weights:
                 block.attn.b_V.data = processed_weights[f"{prefix}.attn.b_V"]
-            if hasattr(block.attn, 'b_O') and f"{prefix}.attn.b_O" in processed_weights:
+            if hasattr(block.attn, "b_O") and f"{prefix}.attn.b_O" in processed_weights:
                 block.attn.b_O.data = processed_weights[f"{prefix}.attn.b_O"]
 
             # MLP weights
@@ -601,26 +558,33 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                 block.mlp.W_in.data = processed_weights[f"{prefix}.mlp.W_in"]
             if f"{prefix}.mlp.W_out" in processed_weights:
                 block.mlp.W_out.data = processed_weights[f"{prefix}.mlp.W_out"]
-            if hasattr(block.mlp, 'b_in') and f"{prefix}.mlp.b_in" in processed_weights:
+            if hasattr(block.mlp, "b_in") and f"{prefix}.mlp.b_in" in processed_weights:
                 block.mlp.b_in.data = processed_weights[f"{prefix}.mlp.b_in"]
-            if hasattr(block.mlp, 'b_out') and f"{prefix}.mlp.b_out" in processed_weights:
+            if hasattr(block.mlp, "b_out") and f"{prefix}.mlp.b_out" in processed_weights:
                 block.mlp.b_out.data = processed_weights[f"{prefix}.mlp.b_out"]
 
         # Load final layer norm weights
         if ln_final is not None:
-            if hasattr(ln_final, 'w') and 'ln_final.w' in processed_weights:
-                ln_final.w.data = processed_weights['ln_final.w']
-            if hasattr(ln_final, 'b') and 'ln_final.b' in processed_weights:
-                ln_final.b.data = processed_weights['ln_final.b']
+            if hasattr(ln_final, "w") and "ln_final.w" in processed_weights:
+                ln_final.w.data = processed_weights["ln_final.w"]
+            if hasattr(ln_final, "b") and "ln_final.b" in processed_weights:
+                ln_final.b.data = processed_weights["ln_final.b"]
 
         # Load unembed weights
-        if 'unembed.W_U' in processed_weights:
-            unembed_component.W_U.data = processed_weights['unembed.W_U']
-        if hasattr(unembed_component, 'b_U') and 'unembed.b_U' in processed_weights:
-            unembed_component.b_U.data = processed_weights['unembed.b_U']
+        if "unembed.W_U" in processed_weights:
+            unembed_component.W_U.data = processed_weights["unembed.W_U"]
+        if hasattr(unembed_component, "b_U") and "unembed.b_U" in processed_weights:
+            unembed_component.b_U.data = processed_weights["unembed.b_U"]
 
-    def _load_hf_format_weights_into_components(self, processed_weights, embed_component,
-                                              pos_embed_component, blocks, ln_final, unembed_component):
+    def _load_hf_format_weights_into_components(
+        self,
+        processed_weights,
+        embed_component,
+        pos_embed_component,
+        blocks,
+        ln_final,
+        unembed_component,
+    ):
         """Load processed weights with HF format keys into TLens components.
 
         This method handles loading HF format weights (after processing) directly into
@@ -629,12 +593,12 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
         print("GPT-2 adapter: Loading HF format weights into components...")
 
         # Load embed weights (HF: transformer.wte.weight -> TL: W_E)
-        if 'transformer.wte.weight' in processed_weights:
-            embed_component.W_E.data = processed_weights['transformer.wte.weight']
+        if "transformer.wte.weight" in processed_weights:
+            embed_component.W_E.data = processed_weights["transformer.wte.weight"]
 
         # Load pos_embed weights (HF: transformer.wpe.weight -> TL: W_pos)
-        if pos_embed_component is not None and 'transformer.wpe.weight' in processed_weights:
-            pos_embed_component.W_pos.data = processed_weights['transformer.wpe.weight']
+        if pos_embed_component is not None and "transformer.wpe.weight" in processed_weights:
+            pos_embed_component.W_pos.data = processed_weights["transformer.wpe.weight"]
 
         # Load block weights
         for i, block in enumerate(blocks):
@@ -653,8 +617,8 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
 
                 # Split the combined weight into Q, K, V
                 q_weight = combined_weight[:, :d_model].T  # [d_model, d_model]
-                k_weight = combined_weight[:, d_model:2*d_model].T  # [d_model, d_model]
-                v_weight = combined_weight[:, 2*d_model:3*d_model].T  # [d_model, d_model]
+                k_weight = combined_weight[:, d_model : 2 * d_model].T  # [d_model, d_model]
+                v_weight = combined_weight[:, 2 * d_model : 3 * d_model].T  # [d_model, d_model]
 
                 block.attn.W_Q.data = q_weight
                 block.attn.W_K.data = k_weight
@@ -674,17 +638,17 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                 combined_bias = processed_weights[f"{hf_prefix}.attn.c_attn.bias"]
                 d_model = combined_bias.shape[0] // 3
 
-                if hasattr(block.attn, 'b_Q'):
+                if hasattr(block.attn, "b_Q"):
                     block.attn.b_Q.data = combined_bias[:d_model]
-                if hasattr(block.attn, 'b_K'):
-                    block.attn.b_K.data = combined_bias[d_model:2*d_model]
-                if hasattr(block.attn, 'b_V'):
-                    block.attn.b_V.data = combined_bias[2*d_model:3*d_model]
+                if hasattr(block.attn, "b_K"):
+                    block.attn.b_K.data = combined_bias[d_model : 2 * d_model]
+                if hasattr(block.attn, "b_V"):
+                    block.attn.b_V.data = combined_bias[2 * d_model : 3 * d_model]
 
             # Output projection
             if f"{hf_prefix}.attn.c_proj.weight" in processed_weights:
                 block.attn.W_O.data = processed_weights[f"{hf_prefix}.attn.c_proj.weight"].T
-            if hasattr(block.attn, 'b_O') and f"{hf_prefix}.attn.c_proj.bias" in processed_weights:
+            if hasattr(block.attn, "b_O") and f"{hf_prefix}.attn.c_proj.bias" in processed_weights:
                 block.attn.b_O.data = processed_weights[f"{hf_prefix}.attn.c_proj.bias"]
 
             # MLP weights
@@ -692,112 +656,38 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                 block.mlp.W_in.data = processed_weights[f"{hf_prefix}.mlp.c_fc.weight"].T
             if f"{hf_prefix}.mlp.c_proj.weight" in processed_weights:
                 block.mlp.W_out.data = processed_weights[f"{hf_prefix}.mlp.c_proj.weight"].T
-            if hasattr(block.mlp, 'b_in') and f"{hf_prefix}.mlp.c_fc.bias" in processed_weights:
+            if hasattr(block.mlp, "b_in") and f"{hf_prefix}.mlp.c_fc.bias" in processed_weights:
                 block.mlp.b_in.data = processed_weights[f"{hf_prefix}.mlp.c_fc.bias"]
-            if hasattr(block.mlp, 'b_out') and f"{hf_prefix}.mlp.c_proj.bias" in processed_weights:
+            if hasattr(block.mlp, "b_out") and f"{hf_prefix}.mlp.c_proj.bias" in processed_weights:
                 block.mlp.b_out.data = processed_weights[f"{hf_prefix}.mlp.c_proj.bias"]
 
         # Load final layer norm weights (HF: transformer.ln_f -> TL: ln_final)
         if ln_final is not None:
-            if hasattr(ln_final, 'w') and 'transformer.ln_f.weight' in processed_weights:
-                ln_final.w.data = processed_weights['transformer.ln_f.weight']
-            if hasattr(ln_final, 'b') and 'transformer.ln_f.bias' in processed_weights:
-                ln_final.b.data = processed_weights['transformer.ln_f.bias']
+            if hasattr(ln_final, "w") and "transformer.ln_f.weight" in processed_weights:
+                ln_final.w.data = processed_weights["transformer.ln_f.weight"]
+            if hasattr(ln_final, "b") and "transformer.ln_f.bias" in processed_weights:
+                ln_final.b.data = processed_weights["transformer.ln_f.bias"]
 
         # Load unembed weights (HF: lm_head.weight -> TL: W_U)
-        if 'lm_head.weight' in processed_weights:
-            unembed_component.W_U.data = processed_weights['lm_head.weight'].T
-        if hasattr(unembed_component, 'b_U') and 'lm_head.bias' in processed_weights:
-            unembed_component.b_U.data = processed_weights['lm_head.bias']
+        if "lm_head.weight" in processed_weights:
+            unembed_component.W_U.data = processed_weights["lm_head.weight"].T
+        if hasattr(unembed_component, "b_U") and "lm_head.bias" in processed_weights:
+            unembed_component.b_U.data = processed_weights["lm_head.bias"]
 
     def extract_hooks_from_components(self, components_dict, hook_registry):
         """Extract hooks from created components and populate the hook registry."""
         print("GPT-2 adapter: Extracting hooks from created components...")
 
         # Extract hooks from main components
-        if 'hook_embed' in components_dict:
-            hook_registry['hook_embed'] = components_dict['hook_embed']
-        if 'hook_pos_embed' in components_dict:
-            hook_registry['hook_pos_embed'] = components_dict['hook_pos_embed']
+        if "hook_embed" in components_dict:
+            hook_registry["hook_embed"] = components_dict["hook_embed"]
+        if "hook_pos_embed" in components_dict:
+            hook_registry["hook_pos_embed"] = components_dict["hook_pos_embed"]
 
         # Extract hooks from all components using scan method
         # Note: This requires access to the bridge's _scan_existing_hooks method
         # For now, we'll return the components and let the bridge handle hook extraction
 
-        print(f"GPT-2 adapter: Ready for hook extraction from components")
+        print("GPT-2 adapter: Ready for hook extraction from components")
 
-    def test_round_trip_conversion(
-        self,
-        processed_weights: dict[str, torch.Tensor],
-        model_name: str,
-        tolerance: float = 1e-6
-    ) -> dict[str, Any]:
-        """Test round-trip conversion for processed weights through HF format.
 
-        This method validates that processed weights can be converted to HuggingFace
-        format and back to TransformerLens format without loss of precision.
-
-        Args:
-            processed_weights: Dictionary of processed TLens weights
-            model_name: Name of the model (e.g., "gpt2")
-            tolerance: Maximum allowed difference for validation
-
-        Returns:
-            Dictionary containing validation results
-        """
-        from transformer_lens.conversion_utils.round_trip_validator import RoundTripValidator
-        from transformers import AutoModelForCausalLM
-
-        # Load original HF weights for reference
-        hf_model = AutoModelForCausalLM.from_pretrained(model_name)
-        original_hf_weights = hf_model.state_dict()
-
-        # Run round-trip validation
-        validator = RoundTripValidator(tolerance=tolerance)
-        results = validator.validate_processed_weight_conversion(
-            original_hf_weights, processed_weights, self.cfg, model_name
-        )
-
-        return results
-
-    def export_processed_weights_to_hf(
-        self,
-        processed_weights: dict[str, torch.Tensor],
-        model_name: str
-    ) -> dict[str, torch.Tensor]:
-        """Export processed TransformerLens weights to HuggingFace format.
-
-        Args:
-            processed_weights: Dictionary of processed TLens weights
-            model_name: Name of the model for conversion context
-
-        Returns:
-            Dictionary of weights in HuggingFace format
-        """
-        from transformer_lens.conversion_utils.reversible_weight_converter import ReversibleWeightConverter
-
-        converter = ReversibleWeightConverter()
-        hf_weights = converter.tlens_to_hf(processed_weights, self.cfg, model_name)
-
-        return hf_weights
-
-    def import_hf_weights_to_tlens(
-        self,
-        hf_weights: dict[str, torch.Tensor],
-        model_name: str
-    ) -> dict[str, torch.Tensor]:
-        """Import HuggingFace weights to TransformerLens format.
-
-        Args:
-            hf_weights: Dictionary of HF weights
-            model_name: Name of the model for conversion context
-
-        Returns:
-            Dictionary of weights in TransformerLens format
-        """
-        from transformer_lens.conversion_utils.reversible_weight_converter import ReversibleWeightConverter
-
-        converter = ReversibleWeightConverter()
-        tlens_weights = converter.hf_to_tlens(hf_weights, self.cfg, model_name)
-
-        return tlens_weights
