@@ -248,12 +248,13 @@ class ProcessWeights:
             )
         else:
             # State dict is already in TransformerLens format - use directly
-            wq_tensor = state_dict[f"blocks.{layer}.attn.W_Q"]
-            wk_tensor = state_dict[f"blocks.{layer}.attn.W_K"]
-            wv_tensor = state_dict[f"blocks.{layer}.attn.W_V"]
-            bq_tensor = state_dict[f"blocks.{layer}.attn.b_Q"]
-            bk_tensor = state_dict[f"blocks.{layer}.attn.b_K"]
-            bv_tensor = state_dict[f"blocks.{layer}.attn.b_V"]
+            # Handle case where some keys might not exist (e.g., grouped query attention)
+            wq_tensor = state_dict.get(f"blocks.{layer}.attn.W_Q", None)  # type: ignore[assignment]
+            wk_tensor = state_dict.get(f"blocks.{layer}.attn.W_K", None)  # type: ignore[assignment]
+            wv_tensor = state_dict.get(f"blocks.{layer}.attn.W_V", None)  # type: ignore[assignment]
+            bq_tensor = state_dict.get(f"blocks.{layer}.attn.b_Q", None)  # type: ignore[assignment]
+            bk_tensor = state_dict.get(f"blocks.{layer}.attn.b_K", None)  # type: ignore[assignment]
+            bv_tensor = state_dict.get(f"blocks.{layer}.attn.b_V", None)  # type: ignore[assignment]
 
         # Extract LayerNorm parameters using same format detection
         if uses_tl_format:
@@ -324,14 +325,28 @@ class ProcessWeights:
         ln1_w = tensors["ln1_w"]
         keys = tensors["keys"]
 
-        # Type assertions for mypy
+        # Check if we have the required tensors for layer norm folding
+        # For grouped query attention models, some tensors might be None
+        if wq_tensor is None:
+            # Skip layer norm folding for this layer if missing critical tensors
+            return
+
+        # Type assertions for mypy for required tensors
         assert isinstance(wq_tensor, torch.Tensor)
-        assert isinstance(wk_tensor, torch.Tensor)
-        assert isinstance(wv_tensor, torch.Tensor)
-        assert isinstance(bq_tensor, torch.Tensor)
-        assert isinstance(bk_tensor, torch.Tensor)
-        assert isinstance(bv_tensor, torch.Tensor)
         assert isinstance(keys, dict)
+
+        # For grouped query attention, K and V might be shared/grouped differently
+        # Only assert if they exist
+        if wk_tensor is not None:
+            assert isinstance(wk_tensor, torch.Tensor)
+        if wv_tensor is not None:
+            assert isinstance(wv_tensor, torch.Tensor)
+        if bq_tensor is not None:
+            assert isinstance(bq_tensor, torch.Tensor)
+        if bk_tensor is not None:
+            assert isinstance(bk_tensor, torch.Tensor)
+        if bv_tensor is not None:
+            assert isinstance(bv_tensor, torch.Tensor)
 
         # Apply layer norm folding if parameters exist
         if ln1_b is not None and ln1_w is not None:
@@ -341,22 +356,26 @@ class ProcessWeights:
 
             # Apply the individual math functions
             if fold_biases:
-                # TODO this is causing slight divergence - FIXED
-                bq_tensor, bk_tensor, bv_tensor = ProcessWeights.fold_layer_norm_biases(
-                    wq_tensor, wk_tensor, wv_tensor, bq_tensor, bk_tensor, bv_tensor, ln1_b
-                )
+                # Only fold biases if all tensors exist
+                if all(
+                    t is not None for t in [wk_tensor, wv_tensor, bq_tensor, bk_tensor, bv_tensor]
+                ):
+                    bq_tensor, bk_tensor, bv_tensor = ProcessWeights.fold_layer_norm_biases(  # type: ignore[arg-type]
+                        wq_tensor, wk_tensor, wv_tensor, bq_tensor, bk_tensor, bv_tensor, ln1_b  # type: ignore[arg-type]
+                    )
                 if keys["ln1_b"] in state_dict:
                     del state_dict[keys["ln1_b"]]
 
-            # TODO this is causing slight divergence
-            wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
-                wq_tensor, wk_tensor, wv_tensor, ln1_w
-            )
+            # Only fold weights if all tensors exist
+            if wk_tensor is not None and wv_tensor is not None:
+                wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
+                    wq_tensor, wk_tensor, wv_tensor, ln1_w
+                )
             if keys["ln1_w"] in state_dict:
                 del state_dict[keys["ln1_w"]]
 
         # Center the weights if requested
-        if center_weights:
+        if center_weights and wk_tensor is not None and wv_tensor is not None:
             wq_tensor, wk_tensor, wv_tensor = ProcessWeights.center_attention_weights(
                 wq_tensor, wk_tensor, wv_tensor
             )
@@ -500,12 +519,12 @@ class ProcessWeights:
     def _store_processed_attention_tensors(
         state_dict: Dict[str, torch.Tensor],
         keys: Dict[str, str],
-        wq_tensor: torch.Tensor,
-        wk_tensor: torch.Tensor,
-        wv_tensor: torch.Tensor,
-        bq_tensor: torch.Tensor,
-        bk_tensor: torch.Tensor,
-        bv_tensor: torch.Tensor,
+        wq_tensor: Optional[torch.Tensor],
+        wk_tensor: Optional[torch.Tensor],
+        wv_tensor: Optional[torch.Tensor],
+        bq_tensor: Optional[torch.Tensor],
+        bk_tensor: Optional[torch.Tensor],
+        bv_tensor: Optional[torch.Tensor],
         adapter,
         cfg,
         layer: int,
@@ -521,6 +540,10 @@ class ProcessWeights:
             cfg: Model configuration object
             layer: The layer index
         """
+        # Skip storing if critical tensors are None (e.g., for grouped query attention)
+        if wq_tensor is None:
+            return
+
         if adapter:
             # Check if we're dealing with combined QKV format (like HuggingFace GPT-2)
             # by checking if W_Q, W_K, W_V keys map to the same HuggingFace key
@@ -530,6 +553,16 @@ class ProcessWeights:
 
             if hf_w_q_key == hf_w_k_key == hf_w_v_key:
                 # Combined QKV format - combine back into single tensor
+                # Only proceed if we have all required tensors
+                if (
+                    wk_tensor is None
+                    or wv_tensor is None
+                    or bq_tensor is None
+                    or bk_tensor is None
+                    or bv_tensor is None
+                ):
+                    return
+
                 n_heads = cfg.n_heads
                 d_head = cfg.d_head
                 d_model = cfg.d_model
@@ -565,31 +598,31 @@ class ProcessWeights:
                 hf_b_v_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_V")
 
                 state_dict[hf_w_q_key] = ProcessWeights.convert_tensor_to_hf_format(
-                    wq_tensor, f"blocks.{layer}.attn.W_Q", adapter, cfg, layer
+                    wq_tensor, f"blocks.{layer}.attn.W_Q", adapter, cfg, layer  # type: ignore[arg-type]
                 )
                 state_dict[hf_w_k_key] = ProcessWeights.convert_tensor_to_hf_format(
-                    wk_tensor, f"blocks.{layer}.attn.W_K", adapter, cfg, layer
+                    wk_tensor, f"blocks.{layer}.attn.W_K", adapter, cfg, layer  # type: ignore[arg-type]
                 )
                 state_dict[hf_w_v_key] = ProcessWeights.convert_tensor_to_hf_format(
-                    wv_tensor, f"blocks.{layer}.attn.W_V", adapter, cfg, layer
+                    wv_tensor, f"blocks.{layer}.attn.W_V", adapter, cfg, layer  # type: ignore[arg-type]
                 )
                 state_dict[hf_b_q_key] = ProcessWeights.convert_tensor_to_hf_format(
-                    bq_tensor, f"blocks.{layer}.attn.b_Q", adapter, cfg, layer
+                    bq_tensor, f"blocks.{layer}.attn.b_Q", adapter, cfg, layer  # type: ignore[arg-type]
                 )
                 state_dict[hf_b_k_key] = ProcessWeights.convert_tensor_to_hf_format(
-                    bk_tensor, f"blocks.{layer}.attn.b_K", adapter, cfg, layer
+                    bk_tensor, f"blocks.{layer}.attn.b_K", adapter, cfg, layer  # type: ignore[arg-type]
                 )
                 state_dict[hf_b_v_key] = ProcessWeights.convert_tensor_to_hf_format(
-                    bv_tensor, f"blocks.{layer}.attn.b_V", adapter, cfg, layer
+                    bv_tensor, f"blocks.{layer}.attn.b_V", adapter, cfg, layer  # type: ignore[arg-type]
                 )
         else:
             # Store directly (TransformerLens format)
-            state_dict[keys["W_Q"]] = wq_tensor
-            state_dict[keys["W_K"]] = wk_tensor
-            state_dict[keys["W_V"]] = wv_tensor
-            state_dict[keys["b_Q"]] = bq_tensor
-            state_dict[keys["b_K"]] = bk_tensor
-            state_dict[keys["b_V"]] = bv_tensor
+            state_dict[keys["W_Q"]] = wq_tensor  # type: ignore[assignment]
+            state_dict[keys["W_K"]] = wk_tensor  # type: ignore[assignment]
+            state_dict[keys["W_V"]] = wv_tensor  # type: ignore[assignment]
+            state_dict[keys["b_Q"]] = bq_tensor  # type: ignore[assignment]
+            state_dict[keys["b_K"]] = bk_tensor  # type: ignore[assignment]
+            state_dict[keys["b_V"]] = bv_tensor  # type: ignore[assignment]
 
     @staticmethod
     def _detect_unembed_format(state_dict: Dict[str, torch.Tensor], adapter) -> tuple[bool, bool]:
@@ -2285,11 +2318,10 @@ class ProcessWeights:
 
             processed_weights = all_tl_weights
         else:
-            # Fall back to direct copy for HookedTransformer case
-            remaining_weights = {
-                k: v for k, v in raw_hf_state_dict.items() if k not in processed_weights
-            }
-            processed_weights.update(remaining_weights)
+            # When no adapter is provided, assume we're working with raw HF weights
+            # that should be returned as-is (HookedTransformer will handle conversion)
+            # Don't try to apply TL-specific processing like fold_ln
+            return raw_hf_state_dict
 
         # Step 3: Apply standard processing pipeline (with bypass support)
         if not bypass_default_processing.get("fold_ln", False) and fold_ln:

@@ -2,6 +2,8 @@
 
 from typing import Optional
 
+import torch
+
 from .TransformerLensConfig import TransformerLensConfig
 
 
@@ -58,7 +60,7 @@ class TransformerBridgeConfig(TransformerLensConfig):
         n_params: Optional[int] = None,
         use_hook_tokens: bool = False,
         gated_mlp: bool = False,
-        dtype: "torch.dtype" = None,  # Will be set to torch.float32 in __post_init__
+        dtype: Optional[torch.dtype] = torch.float32,
         post_embedding_ln: bool = False,
         rotary_base: int = 10000,
         trust_remote_code: bool = False,
@@ -127,7 +129,7 @@ class TransformerBridgeConfig(TransformerLensConfig):
         self.n_params = n_params
         self.use_hook_tokens = use_hook_tokens
         self.gated_mlp = gated_mlp
-        self.dtype = dtype
+        self.dtype = dtype if dtype is not None else torch.float32
         self.post_embedding_ln = post_embedding_ln
         self.rotary_base = rotary_base
         self.trust_remote_code = trust_remote_code
@@ -151,11 +153,7 @@ class TransformerBridgeConfig(TransformerLensConfig):
 
     def __post_init__(self):
         """Post-initialization processing."""
-        # Set default dtype if None
-        if self.dtype is None:
-            import torch
-
-            self.dtype = torch.float32
+        # dtype is guaranteed to be set at this point
 
         # Validate architecture if provided before calling super()
         if (

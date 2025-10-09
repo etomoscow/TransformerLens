@@ -104,6 +104,13 @@ class TransformerBridge(nn.Module):
         self.cfg = adapter.cfg
 
         self.tokenizer = tokenizer
+
+        # Infer vocab size from tokenizer (similar to HookedTransformer)
+        if self.cfg.d_vocab == -1:
+            self.cfg.d_vocab = max(self.tokenizer.vocab.values()) + 1
+        if self.cfg.d_vocab_out == -1:
+            self.cfg.d_vocab_out = self.cfg.d_vocab
+
         self.compatibility_mode = False
         self._hook_cache = None  # Cache for hook discovery results
         self._hook_registry: Dict[
@@ -135,6 +142,8 @@ class TransformerBridge(nn.Module):
     @property
     def original_model(self) -> nn.Module:
         """Get the original model."""
+        if "original_model" not in self.__dict__:
+            raise AttributeError("original_model has not been set")
         return self.__dict__["original_model"]
 
     @original_model.setter
@@ -725,7 +734,6 @@ class TransformerBridge(nn.Module):
             self.pos_embed.set_processed_weight(pos_embed_weight)
             print(f"  ✅ Positional embedding loaded: {pos_embed_weight.shape}")
 
-
     def _load_transformer_block_weights(self):
         """Load transformer block weights into attention and MLP components."""
         processed_weights = self._processed_tl_weights
@@ -744,7 +752,6 @@ class TransformerBridge(nn.Module):
             # Load MLP weights
             if hasattr(block, "mlp"):
                 self._load_mlp_weights(block.mlp, layer_idx, processed_weights)
-
 
     def _load_attention_weights(self, attn_component, layer_idx, processed_weights):
         """Load attention weights into the AttentionBridge component."""
@@ -920,7 +927,7 @@ class TransformerBridge(nn.Module):
         def add_hook_to_point(
             hook_point: HookPoint, hook_fn: Callable, name: str, dir: str = "fwd"
         ):
-            hook_point.add_hook(hook_fn, dir=dir)
+            hook_point.add_hook(hook_fn, dir=dir)  # type: ignore[arg-type]
             added_hooks.append((hook_point, name))
 
         try:
@@ -940,7 +947,7 @@ class TransformerBridge(nn.Module):
 
             # Run forward pass with ported components
             return self._ported_forward_pass(
-                tokens, return_type=return_type, stop_at_layer=stop_at_layer, **kwargs
+                tokens, return_type=return_type or "logits", stop_at_layer=stop_at_layer, **kwargs
             )
 
         finally:
@@ -1026,43 +1033,6 @@ class TransformerBridge(nn.Module):
         # def _create_minimal_structure_for_filling_keys - DELETED
         # def _create_folded_components_directly - DELETED
 
-        # Create minimal structure that matches what fill_missing_keys expects
-        temp_structure = nn.Module()
-        temp_structure.cfg = tl_cfg
-
-        # Create components without processing - just for fill_missing_keys
-        temp_structure.embed = Embed(tl_cfg)
-
-        if tl_cfg.positional_embedding_type != "rotary":
-            temp_structure.pos_embed = PosEmbed(tl_cfg)
-
-        temp_structure.blocks = nn.ModuleList(
-            [TransformerBlock(tl_cfg, block_index) for block_index in range(tl_cfg.n_layers)]
-        )
-
-        # Create ln_final based on original config (before folding)
-        if tl_cfg.normalization_type in ["RMS", "RMSPre"]:
-            temp_structure.ln_final = (
-                RMSNorm(tl_cfg) if tl_cfg.normalization_type == "RMS" else RMSNormPre(tl_cfg)
-            )
-        elif tl_cfg.normalization_type in ["LN", "LNPre"]:
-            if tl_cfg.final_rms:
-                temp_structure.ln_final = RMSNorm(tl_cfg)
-            else:
-                # Use NormalizationBridge for unified LayerNorm/LayerNormPre behavior
-                from transformer_lens.model_bridge.generalized_components.normalization import (
-                    NormalizationBridge,
-                )
-
-                temp_structure.ln_final = NormalizationBridge.create_normalization_bridge(
-                    name="ln_final",
-                    config=tl_cfg,
-                    original_component=LayerNorm(tl_cfg),  # Create LayerNorm component for weights
-                )
-
-        temp_structure.unembed = Unembed(tl_cfg)
-        return temp_structure
-
     def _create_folded_components_directly(self, tl_cfg, processed_weights, fold_ln):
         """Create components directly with processed weights, respecting folding."""
         import torch.nn as nn
@@ -1080,81 +1050,6 @@ class TransformerBridge(nn.Module):
         raise NotImplementedError(
             "This function requires TransformerLens components and is not used in simplified startup"
         )
-        from transformer_lens.hook_points import HookPoint
-
-        print("Creating components with folded configuration...")
-
-        # Get device from config
-        device = tl_cfg.device
-
-        # Create embed component
-        embed_component = Embed(tl_cfg).to(device)
-        hook_embed = HookPoint()
-
-        # Create pos_embed if needed
-        pos_embed_component = None
-        hook_pos_embed = None
-        if tl_cfg.positional_embedding_type != "rotary":
-            pos_embed_component = PosEmbed(tl_cfg).to(device)
-            hook_pos_embed = HookPoint()
-
-        # Create transformer blocks
-        blocks = nn.ModuleList(
-            [TransformerBlock(tl_cfg, block_index) for block_index in range(tl_cfg.n_layers)]
-        ).to(device)
-
-        # Create final layer norm using NormalizationBridge that adapts based on layer_norm_folding
-        from typing import Union
-
-        from transformer_lens.model_bridge.generalized_components.normalization import (
-            NormalizationBridge,
-        )
-
-        ln_final: Union[NormalizationBridge, RMSNorm, RMSNormPre, None] = None
-
-        # Set layer_norm_folding flag in config for NormalizationBridge behavior
-        tl_cfg.layer_norm_folding = fold_ln
-
-        if tl_cfg.normalization_type in ["LN", "LNPre"]:
-            # Create a dummy LayerNorm component to hold the weights
-            dummy_ln = LayerNorm(tl_cfg).to(device)
-            # Use NormalizationBridge that automatically switches between LayerNorm and LayerNormPre behavior
-            ln_final = NormalizationBridge.create_normalization_bridge(
-                name="ln_final",
-                config=tl_cfg,
-                original_component=dummy_ln,
-            )
-        elif tl_cfg.normalization_type == "RMS":
-            ln_final = RMSNorm(tl_cfg).to(device)
-        elif tl_cfg.normalization_type == "RMSPre":
-            ln_final = RMSNormPre(tl_cfg).to(device)
-
-        # Create unembed
-        unembed_component = Unembed(tl_cfg).to(device)
-
-        # Load processed weights directly into components
-        self._load_processed_weights_into_components(
-            processed_weights,
-            embed_component,
-            pos_embed_component,
-            blocks,
-            ln_final,
-            unembed_component,
-        )
-
-        # Set components on bridge
-        object.__setattr__(self, "embed", embed_component)
-        object.__setattr__(self, "hook_embed", hook_embed)
-        if pos_embed_component is not None:
-            object.__setattr__(self, "pos_embed", pos_embed_component)
-            object.__setattr__(self, "hook_pos_embed", hook_pos_embed)
-        object.__setattr__(self, "blocks", blocks)
-        if ln_final is not None:
-            object.__setattr__(self, "ln_final", ln_final)
-        object.__setattr__(self, "unembed", unembed_component)
-
-        # Extract hooks from all created components
-        self._extract_hooks_from_created_components()
 
     def _load_processed_weights_into_components(
         self,
@@ -2789,8 +2684,8 @@ class TransformerBridge(nn.Module):
         """
         # Update config for all layer norm components to enable LayerNormPre behavior
         for layer_idx in range(self.cfg.n_layers):
-            ln_1 = self.original_model.transformer.h[layer_idx].ln_1
-            ln_2 = self.original_model.transformer.h[layer_idx].ln_2
+            ln_1 = self.original_model.transformer.h[layer_idx].ln_1  # type: ignore[union-attr, index]
+            ln_2 = self.original_model.transformer.h[layer_idx].ln_2  # type: ignore[union-attr, index]
 
             # Update the config object for each normalization component
             if hasattr(ln_1, "config"):
@@ -2799,9 +2694,9 @@ class TransformerBridge(nn.Module):
                 ln_2.config.layer_norm_folding = True
 
         # Update final layer norm
-        ln_f = self.original_model.transformer.ln_f
+        ln_f = self.original_model.transformer.ln_f  # type: ignore[union-attr]
         if hasattr(ln_f, "config"):
-            ln_f.config.layer_norm_folding = True
+            ln_f.config.layer_norm_folding = True  # type: ignore[union-attr]
 
     def _load_tl_weights_into_bridge_components(self, tl_state_dict):
         """Load TransformerLens format weights into bridge components.
@@ -3602,8 +3497,13 @@ class TransformerBridge(nn.Module):
             Model output based on return_type
         """
 
-        # Use processed computation if weights have been processed
-        if hasattr(self, "_weights_processed") and self._weights_processed:
+        # Use processed computation if weights have been processed AND no KV cache is provided
+        # (KV cache support requires using the original HuggingFace forward path)
+        if (
+            hasattr(self, "_weights_processed")
+            and self._weights_processed
+            and past_kv_cache is None
+        ):
             # Check if we're using true HF format processing
             if hasattr(self, "_true_hf_format_processing") and self._true_hf_format_processing:
                 # Use custom HF format forward pass that works with processed weights
@@ -4422,7 +4322,7 @@ class TransformerBridge(nn.Module):
 
         # Generate using the original HuggingFace model
         with torch.no_grad():
-            outputs = self.original_model.generate(input_ids, **generation_kwargs)
+            outputs = self.original_model.generate(input_ids, **generation_kwargs)  # type: ignore[operator]
 
         # Return based on return_type and input format
         if return_type == "input" or return_type is None:
@@ -4769,8 +4669,6 @@ class TransformerBridge(nn.Module):
         except Exception as e:
             raise ValueError(f"Could not load fresh model for weight export: {e}")
 
-
-
     def get_params(self):
         """Access to model parameters in the format expected by SVDInterpreter.
 
@@ -4785,8 +4683,7 @@ class TransformerBridge(nn.Module):
         """
         return get_bridge_params(self)
 
-
-    def _load_processed_weights_into_bridge(self, tl_state_dict):
+    def _load_processed_weights_into_bridge_from_dict(self, tl_state_dict):
         """Load processed TransformerLens weights into bridge components."""
         print("Loading processed TL weights into bridge components...")
 
@@ -4958,7 +4855,7 @@ class TransformerBridge(nn.Module):
         print(f"Extracted {len(tl_state_dict)} processed weights from reference model")
 
         # Load the processed weights into bridge components
-        self._load_processed_weights_into_bridge(tl_state_dict)
+        self._load_processed_weights_into_bridge_from_dict(tl_state_dict)
 
         # Update config to reflect processing
         if fold_ln and self.cfg.normalization_type == "LN":

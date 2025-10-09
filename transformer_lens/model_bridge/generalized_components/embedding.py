@@ -45,9 +45,19 @@ class EmbeddingBridge(GeneralizedComponent):
         """Return the embedding weight matrix."""
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
+
+        # Handle rotary embeddings (have inv_freq instead of weight)
+        if hasattr(self.original_component, "inv_freq") and not hasattr(
+            self.original_component, "weight"
+        ):
+            inv_freq = self.original_component.inv_freq
+            assert isinstance(inv_freq, torch.Tensor), f"inv_freq is not a tensor for {self.name}"
+            return inv_freq
+
+        # Handle regular embeddings (have weight)
         assert hasattr(
             self.original_component, "weight"
-        ), f"Component {self.name} has no weight attribute"
+        ), f"Component {self.name} has neither weight nor inv_freq attribute"
         weight = self.original_component.weight
         assert isinstance(weight, torch.Tensor), f"Weight is not a tensor for {self.name}"
         return weight
@@ -71,12 +81,12 @@ class EmbeddingBridge(GeneralizedComponent):
 
         # Check if we're using processed weights from a reference model (layer norm folding case)
         # This happens when _port_embedding_components has been called
-        if hasattr(self, '_use_processed_weights') and self._use_processed_weights:
+        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
             # Apply input hook
             input_ids = self.hook_in(input_ids)
 
             # Use the processed weight directly with F.embedding
-            if hasattr(self, '_processed_weight'):
+            if hasattr(self, "_processed_weight"):
                 output = torch.nn.functional.embedding(input_ids, self._processed_weight)
             else:
                 # Fallback to original component's weight
