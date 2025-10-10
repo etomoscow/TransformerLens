@@ -88,7 +88,7 @@ class NormalizationBridge(GeneralizedComponent):
                 # No bias if using RMSNorm
                 hidden_states = hidden_states * self.weight
             else:
-                # Add bias if using LayerNorm
+                # Add bias if using LayerNorm and the original component has a bias
                 hidden_states = hidden_states * self.weight + self.bias
 
             result = hidden_states
