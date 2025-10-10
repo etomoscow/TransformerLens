@@ -339,10 +339,7 @@ class JointQKVAttentionBridge(AttentionBridge):
 
         # Check if we successfully extracted weights
         if not self._hooked_weights_extracted or not hasattr(self, "_W_V"):
-            print(f"⚠️  Weights not extracted for {self.name}, falling back to original forward")
             return super().forward(*args, **kwargs)
-        else:
-            print(f"🔧 Using compatibility mode with processed weights for {self.name}")
 
         # Import the exact function HookedTransformer uses
         from transformer_lens.utilities.attention import simple_attn_linear
@@ -929,8 +926,6 @@ class JointQKVAttentionBridge(AttentionBridge):
             model_name = getattr(self.config, "model_name", "gpt2")
             device = next(self.parameters()).device if list(self.parameters()) else "cpu"
 
-            print(f"Creating reference HookedTransformer to extract exact weights...")
-
             # Create a HookedTransformer with the same processing parameters as the bridge
             reference_model = HookedTransformer.from_pretrained(
                 model_name,
@@ -971,19 +966,14 @@ class JointQKVAttentionBridge(AttentionBridge):
             if hasattr(reference_attn, "b_O"):
                 self._b_O = reference_attn.b_O.clone()  # type: ignore[operator]  # [d_model]
 
-            print(f"✅ Extracted exact HookedTransformer weights for layer {layer_num}")
-            print(f"  W_V shape: {self._W_V.shape}")
-            print(f"  W_Q shape: {self._W_Q.shape}")
-            print(f"  W_K shape: {self._W_K.shape}")
-
             # Clean up reference model
             del reference_model
 
             self._hooked_weights_extracted = True
             return
 
-        except Exception as e:
-            print(f"⚠️  Failed to extract weights from reference HookedTransformer: {e}")
+        except Exception:
+            pass
 
         # Strategy 2: Fallback to processing weights manually
         if self._processed_weights is None:
