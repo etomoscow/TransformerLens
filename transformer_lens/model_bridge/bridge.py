@@ -747,13 +747,17 @@ class TransformerBridge(nn.Module):
 
             # Load attention weights
             if hasattr(block, "attn"):
-                self._load_attention_weights(block.attn, layer_idx, processed_weights, verbose=verbose)
+                self._load_attention_weights(
+                    block.attn, layer_idx, processed_weights, verbose=verbose
+                )
 
             # Load MLP weights
             if hasattr(block, "mlp"):
                 self._load_mlp_weights(block.mlp, layer_idx, processed_weights, verbose=verbose)
 
-    def _load_attention_weights(self, attn_component, layer_idx, processed_weights, verbose: bool = False):
+    def _load_attention_weights(
+        self, attn_component, layer_idx, processed_weights, verbose: bool = False
+    ):
         """Load attention weights into the AttentionBridge component.
 
         Args:

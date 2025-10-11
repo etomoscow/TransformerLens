@@ -251,8 +251,14 @@ class JointQKVAttentionBridge(AttentionBridge):
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=hidden_states.device))
         attn_scores = attn_scores.masked_fill(causal_mask == 0, float("-inf"))
 
+        # Apply attention scores hook (for compatibility with HookedTransformer)
+        attn_scores = self.hook_attn_scores(attn_scores)
+
         # Softmax attention weights
         attn_weights = F.softmax(attn_scores, dim=-1)
+
+        # Apply pattern hook (for compatibility with HookedTransformer)
+        attn_weights = self.hook_pattern(attn_weights)
 
         # Apply attention to values: [batch, n_heads, seq_len, d_head]
         attn_out = torch.matmul(attn_weights, v)
@@ -409,8 +415,14 @@ class JointQKVAttentionBridge(AttentionBridge):
         if "attention_mask" in kwargs and kwargs["attention_mask"] is not None:
             attn_scores = attn_scores + kwargs["attention_mask"]
 
+        # Apply attention scores hook
+        attn_scores = self.hook_attn_scores(attn_scores)
+
         # Apply softmax
         attn_weights = F.softmax(attn_scores, dim=-1)
+
+        # Apply pattern hook
+        attn_weights = self.hook_pattern(attn_weights)
 
         # Apply dropout if the original component has it
         if hasattr(original_component, "attn_dropout"):
