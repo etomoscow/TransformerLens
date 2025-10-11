@@ -163,13 +163,16 @@ class AbstractAttention(ABC, nn.Module):
             self.cfg.original_architecture == "OlmoeForCausalLM"
             or self.cfg.original_architecture == "Olmo2ForCausalLM"
         ):
-            self.q_norm = RMSNorm(self.cfg, self.cfg.d_model)
-            k_norm_dim = (
-                self.cfg.d_model
-                if self.cfg.original_architecture == "Olmo2ForCausalLM"
-                else self.cfg.d_head * self.cfg.n_key_value_heads
-            )
-            self.k_norm = RMSNorm(self.cfg, k_norm_dim)
+            self.q_norm: Optional[RMSNorm] = RMSNorm(self.cfg, self.cfg.d_model)
+            if self.cfg.original_architecture == "Olmo2ForCausalLM":
+                k_norm_dim = self.cfg.d_model
+            else:
+                assert self.cfg.n_key_value_heads is not None
+                k_norm_dim = self.cfg.d_head * self.cfg.n_key_value_heads
+            self.k_norm: Optional[RMSNorm] = RMSNorm(self.cfg, k_norm_dim)
+        else:
+            self.q_norm = None
+            self.k_norm = None
 
     @property
     def OV(self) -> FactoredMatrix:
@@ -231,6 +234,8 @@ class AbstractAttention(ABC, nn.Module):
             self.cfg.original_architecture == "OlmoeForCausalLM"
             or self.cfg.original_architecture == "Olmo2ForCausalLM"
         ):
+            assert self.q_norm is not None
+            assert self.k_norm is not None
             q = einops.rearrange(
                 self.q_norm(
                     einops.rearrange(
@@ -752,7 +757,7 @@ class AbstractAttention(ABC, nn.Module):
     @staticmethod
     def create_alibi_multipliers(
         n_heads: int, device: Optional[Union[str, torch.device]] = None
-    ) -> Float[torch.Tensor, "head_idx"]:
+    ) -> Float[torch.Tensor, "n_heads"]:
         """Create the ALiBi Scalar Multipliers for each Head.
 
         For n heads, the set of multipliers (m) is the geometric sequence that starts at 2^(-8/n), and
