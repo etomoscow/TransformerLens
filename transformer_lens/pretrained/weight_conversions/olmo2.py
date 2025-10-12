@@ -1,6 +1,6 @@
 import einops
 import torch
-from transformers.models.olmo2.modeling_olmo2 import Olmo2ForCausalLM, Olmo2DecoderLayer
+from transformers.models.olmo2.modeling_olmo2 import Olmo2DecoderLayer, Olmo2ForCausalLM
 
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 
