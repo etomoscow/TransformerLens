@@ -39,7 +39,7 @@ class GeneralizedComponent(nn.Module):
 
     def __init__(
         self,
-        name: str,
+        name: Optional[str],
         config: Optional[Any] = None,
         submodules: Optional[Dict[str, "GeneralizedComponent"]] = None,
         conversion_rule: Optional[BaseHookConversion] = None,
@@ -47,7 +47,7 @@ class GeneralizedComponent(nn.Module):
         """Initialize the generalized component.
 
         Args:
-            name: The name of this component
+            name: The name of this component (None if component has no container in remote model)
             config: Optional configuration object for the component
             submodules: Dictionary of GeneralizedComponent submodules to register
             conversion_rule: Optional conversion rule for this component's hooks
@@ -290,15 +290,6 @@ class GeneralizedComponent(nn.Module):
         # First check if it's a module attribute (like hook_in, hook_out)
         if hasattr(self, "_modules") and name in self._modules:
             return self._modules[name]
-
-        # For private attributes that should exist but don't, check __dict__ directly
-        # This handles the case where attributes may not have been fully initialized yet
-        if name.startswith("_") and hasattr(self, "__dict__"):
-            if name in self.__dict__:
-                return self.__dict__[name]
-            # If it's a private attribute that doesn't exist, it genuinely doesn't exist
-            # Don't try to delegate to original_component
-            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
         # Only try to resolve aliases if compatibility mode is enabled
         if self.compatibility_mode == True:
