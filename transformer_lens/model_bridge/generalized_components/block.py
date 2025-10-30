@@ -102,6 +102,7 @@ class BlockBridge(GeneralizedComponent):
             encoder_attention_mask=None,
             use_cache=False,
             output_attentions=False,
+            position_embeddings=None,  # Gemma2 and other models pass position_embeddings
             **kwargs,
         ):
             # Call original forward but intercept MLP output
@@ -159,6 +160,11 @@ class BlockBridge(GeneralizedComponent):
                 "output_attentions": output_attentions,
                 **kwargs,
             }
+
+            # Handle position_embeddings for models like Gemma2
+            # Position embeddings need to be passed through to attention
+            if position_embeddings is not None:
+                attn_kwargs["position_embeddings"] = position_embeddings
 
             # Add KV cache with the correct parameter name
             if past_key_value is not None:
