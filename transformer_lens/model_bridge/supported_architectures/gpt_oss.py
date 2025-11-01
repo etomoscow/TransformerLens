@@ -4,6 +4,10 @@ from typing import Any
 
 import torch
 
+from transformer_lens.conversion_utils.conversion_steps import (
+    HookConversionSet,
+    RearrangeHookConversion,
+)
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
     AttentionBridge,
@@ -26,6 +30,39 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
         self.cfg.gated_mlp = True
 
         self.cfg.uses_rms_norm = True
+        # GPT-OSS uses 'variance_epsilon' instead of 'eps' for RMSNorm
+        self.cfg.eps_attr = "variance_epsilon"
+
+        # Conversion rules for weight processing/folding
+        # GPT-OSS uses MoE with batched experts, so we need special handling
+        self.conversion_rules = HookConversionSet(
+            {
+                "embed.e": "model.embed_tokens.weight",
+                "blocks.{i}.ln1.w": "model.layers.{i}.input_layernorm.weight",
+                "blocks.{i}.ln2.w": "model.layers.{i}.post_attention_layernorm.weight",
+                "blocks.{i}.attn.q": (
+                    "model.layers.{i}.self_attn.q_proj.weight",
+                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.k": (
+                    "model.layers.{i}.self_attn.k_proj.weight",
+                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.v": (
+                    "model.layers.{i}.self_attn.v_proj.weight",
+                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.o": (
+                    "model.layers.{i}.self_attn.o_proj.weight",
+                    RearrangeHookConversion("m (n h) -> n h m", n=self.cfg.n_heads),
+                ),
+                # Note: MLP weights for MoE models with batched experts are not directly mappable
+                # The experts use batched tensors [num_experts, ...] which need special handling
+                # These mappings are for the router only
+                "ln_final.w": "model.norm.weight",
+                "unembed.u": "lm_head.weight.T",
+            }
+        )
 
         self.component_mapping = {
             "embed": EmbeddingBridge(name="model.embed_tokens"),
