@@ -47,9 +47,7 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
                     "ln2": NormalizationBridge(name="post_attention_layernorm", config=self.cfg),
                     "mlp": JointGateUpMLPBridge(
                         name="mlp.experts",
-                        gate_up_config={
-                            "split_gate_up_matrix": self.split_gate_up_matrix
-                        },
+                        gate_up_config={"split_gate_up_matrix": self.split_gate_up_matrix},
                     ),
                 },
             ),
