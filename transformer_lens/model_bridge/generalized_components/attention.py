@@ -174,8 +174,19 @@ class AttentionBridge(GeneralizedComponent):
 
         def apply_rotary_pos_emb(q, k, cos, sin):
             """Apply rotary position embeddings to query and key tensors."""
-            # This is a simplified version - the actual implementation may vary
-            # based on the specific model
+            # Try to use the model-specific apply_rotary_pos_emb if available
+            # This handles model-specific cases like partial rotary embeddings
+            model_module = hf_attn.__class__.__module__
+            if model_module:
+                try:
+                    import importlib
+                    module = importlib.import_module(model_module)
+                    if hasattr(module, 'apply_rotary_pos_emb'):
+                        return module.apply_rotary_pos_emb(q, k, cos, sin)
+                except (ImportError, AttributeError):
+                    pass
+
+            # Fallback to simplified version for models without specialized implementation
             q_embed = (q * cos) + (rotate_half(q) * sin)
             k_embed = (k * cos) + (rotate_half(k) * sin)
             return q_embed, k_embed
