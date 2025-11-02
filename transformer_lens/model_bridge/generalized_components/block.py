@@ -227,7 +227,13 @@ class BlockBridge(GeneralizedComponent):
             # Get architecture-specific MLP name (mlp, fc1+fc2, etc.)
             mlp = getattr(block_self, "mlp", None)
             if mlp is not None:
-                feed_forward_hidden_states = mlp(hidden_states)
+                mlp_output = mlp(hidden_states)
+                # Handle MoE models that return (hidden_states, router_scores)
+                if isinstance(mlp_output, tuple):
+                    feed_forward_hidden_states = mlp_output[0]
+                    # TODO: Could capture router_scores as a hook if needed
+                else:
+                    feed_forward_hidden_states = mlp_output
             else:
                 # OPT uses fc1 and fc2 instead of a combined mlp module
                 fc1 = getattr(block_self, "fc1", None)
@@ -279,9 +285,11 @@ class BlockBridge(GeneralizedComponent):
         # here in the wrapper to avoid double-wrapping.
         output = self.original_component(*args, **kwargs)
 
-        # If output is a single-element tuple, unwrap it
+        # If output is a tuple, extract just the hidden_states (first element)
         # This prevents tuples from being passed between blocks
-        if isinstance(output, tuple) and len(output) == 1:
+        # The patched_forward returns (hidden_states,) or (hidden_states, attn_weights)
+        # depending on output_attentions, but only hidden_states should flow between blocks
+        if isinstance(output, tuple):
             return output[0]
 
         return output
