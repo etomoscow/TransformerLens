@@ -14,11 +14,11 @@ from transformer_lens.model_bridge.generalized_components import (
     BlockBridge,
     EmbeddingBridge,
     LinearBridge,
+    MoEBridge,
     NormalizationBridge,
     RotaryEmbeddingBridge,
     UnembeddingBridge,
 )
-from transformer_lens.model_bridge.generalized_components.base import GeneralizedComponent
 
 
 class GPTOSSArchitectureAdapter(ArchitectureAdapter):
@@ -83,9 +83,9 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
                         },
                     ),
                     "ln2": NormalizationBridge(name="post_attention_layernorm", config=self.cfg),
-                    # GPT-OSS uses batched MoE experts which can't be split like regular MLPs
-                    # Use a simple GeneralizedComponent wrapper instead
-                    "mlp": GeneralizedComponent(name="mlp"),
+                    # GPT-OSS uses batched MoE experts with router scores
+                    # MoEBridge handles the (hidden_states, router_scores) tuple returns
+                    "mlp": MoEBridge(name="mlp", config=self.cfg),
                 },
             ),
             "ln_final": NormalizationBridge(name="model.norm", config=self.cfg),

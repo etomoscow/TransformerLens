@@ -228,10 +228,11 @@ class BlockBridge(GeneralizedComponent):
             mlp = getattr(block_self, "mlp", None)
             if mlp is not None:
                 mlp_output = mlp(hidden_states)
-                # Handle MoE models that return (hidden_states, router_scores)
+                # Handle MoE models that return (hidden_states, router_scores) tuples
+                # NOTE: If using MoEBridge, this tuple handling is done in the bridge itself
+                # This is a fallback for MoE models not using MoEBridge
                 if isinstance(mlp_output, tuple):
                     feed_forward_hidden_states = mlp_output[0]
-                    # TODO: Could capture router_scores as a hook if needed
                 else:
                     feed_forward_hidden_states = mlp_output
             else:
