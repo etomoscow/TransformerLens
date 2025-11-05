@@ -14,6 +14,7 @@ from transformer_lens.model_bridge.generalized_components import (
     LinearBridge,
     MLPBridge,
     NormalizationBridge,
+    RMSNormalizationBridge,
     RotaryEmbeddingBridge,
     UnembeddingBridge,
 )
@@ -78,11 +79,13 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
             "blocks": BlockBridge(
                 name="model.layers",
                 submodules={
-                    "ln1": NormalizationBridge(name="input_layernorm", config=self.cfg),
-                    "ln1_post": NormalizationBridge(
+                    "ln1": RMSNormalizationBridge(name="input_layernorm", config=self.cfg),
+                    "ln1_post": RMSNormalizationBridge(
                         name="post_attention_layernorm", config=self.cfg
                     ),
-                    "ln2": NormalizationBridge(name="pre_feedforward_layernorm", config=self.cfg),
+                    "ln2": RMSNormalizationBridge(
+                        name="pre_feedforward_layernorm", config=self.cfg
+                    ),
                     "ln2_post": NormalizationBridge(
                         name="post_feedforward_layernorm", config=self.cfg
                     ),
@@ -106,6 +109,6 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
                     ),
                 },
             ),
-            "ln_final": NormalizationBridge(name="model.norm", config=self.cfg),
+            "ln_final": RMSNormalizationBridge(name="model.norm", config=self.cfg),
             "unembed": UnembeddingBridge(name="lm_head"),
         }

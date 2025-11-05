@@ -1,6 +1,6 @@
 """Normalization bridge component implementation."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import torch
 
@@ -101,7 +101,12 @@ class NormalizationBridge(GeneralizedComponent):
                 hidden_states = hidden_states * self.weight
             else:
                 # Add bias if using LayerNorm and the original component has a bias
-                hidden_states = hidden_states * self.weight + self.bias
+                hidden_states = hidden_states * self.weight
+                if (
+                    hasattr(self.original_component, "bias")
+                    and self.original_component.bias is not None
+                ):
+                    hidden_states = hidden_states + cast(torch.Tensor, self.original_component.bias)
 
             result = hidden_states
 

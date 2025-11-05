@@ -13,7 +13,7 @@ from transformer_lens.model_bridge.generalized_components import (
     EmbeddingBridge,
     LinearBridge,
     MLPBridge,
-    NormalizationBridge,
+    RMSNormalizationBridge,
     RotaryEmbeddingBridge,
     UnembeddingBridge,
 )
@@ -74,8 +74,8 @@ class LlamaArchitectureAdapter(ArchitectureAdapter):
             "blocks": BlockBridge(
                 name="model.layers",
                 submodules={
-                    "ln1": NormalizationBridge(name="input_layernorm", config=self.cfg),
-                    "ln2": NormalizationBridge(name="post_attention_layernorm", config=self.cfg),
+                    "ln1": RMSNormalizationBridge(name="input_layernorm", config=self.cfg),
+                    "ln2": RMSNormalizationBridge(name="post_attention_layernorm", config=self.cfg),
                     "attn": AttentionBridge(
                         name="self_attn",
                         config=self.cfg,
@@ -96,6 +96,6 @@ class LlamaArchitectureAdapter(ArchitectureAdapter):
                     ),
                 },
             ),
-            "ln_final": NormalizationBridge(name="model.norm", config=self.cfg),
+            "ln_final": RMSNormalizationBridge(name="model.norm", config=self.cfg),
             "unembed": UnembeddingBridge(name="lm_head"),
         }
