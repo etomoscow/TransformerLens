@@ -1402,6 +1402,35 @@ class ProcessWeights:
         if fold_value_biases:
             processed_dict = ProcessWeights.fold_value_biases(processed_dict, cfg, adapter=adapter)
 
+            # Re-center b_O after folding value biases
+            # fold_value_biases adds to b_O (b_O_new = b_O + sum(b_V @ W_O)), which can make it non-centered
+            # We need to re-center it to maintain the property that writing weights have mean=0
+            if center_writing_weights and getattr(cfg, "normalization_type", "LN") in [
+                "LN",
+                "LNPre",
+            ]:
+                # Determine format to find correct b_O keys
+                uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(
+                    processed_dict, 0, adapter
+                )
+
+                for layer_idx in range(cfg.n_layers):
+                    # Get b_O key based on format
+                    if uses_hf_format and not uses_tl_format and adapter:
+                        try:
+                            b_O_key = ProcessWeights._get_param_key(
+                                f"blocks.{layer_idx}.attn.b_O", adapter
+                            )
+                        except (ValueError, KeyError):
+                            continue  # Skip if key doesn't exist
+                    else:
+                        b_O_key = f"blocks.{layer_idx}.attn.b_O"
+
+                    # Re-center b_O if it exists
+                    if b_O_key in processed_dict:
+                        b_O = processed_dict[b_O_key]
+                        processed_dict[b_O_key] = b_O - b_O.mean()
+
         if refactor_factored_attn_matrices:
             processed_dict = ProcessWeights.refactor_factored_attn_matrices(
                 processed_dict, cfg, adapter=adapter
