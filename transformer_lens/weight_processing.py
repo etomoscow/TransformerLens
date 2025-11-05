@@ -428,26 +428,31 @@ class ProcessWeights:
         )
 
         # Get appropriate MLP parameter keys based on format detection
-        if uses_tl_format:
-            # State dict is in TransformerLens format - use TL keys directly
-            mlp_b_in_key = f"blocks.{layer}.mlp.b_in"
-            mlp_W_in_key = f"blocks.{layer}.mlp.W_in"
-            mlp_W_gate_key = (
-                f"blocks.{layer}.mlp.W_gate" if getattr(cfg, "gated_mlp", False) else None
-            )
-            ln2_b_key = f"blocks.{layer}.ln2.b"
-            ln2_w_key = f"blocks.{layer}.ln2.w"
-        else:
-            # State dict is in HuggingFace format - use translated keys
-            mlp_b_in_key = ProcessWeights._get_param_key(f"blocks.{layer}.mlp.b_in", adapter)
-            mlp_W_in_key = ProcessWeights._get_param_key(f"blocks.{layer}.mlp.W_in", adapter)
-            mlp_W_gate_key = (
-                ProcessWeights._get_param_key(f"blocks.{layer}.mlp.W_gate", adapter)
-                if getattr(cfg, "gated_mlp", False)
-                else None
-            )
-            ln2_b_key = ProcessWeights._get_param_key(f"blocks.{layer}.ln2.b", adapter)
-            ln2_w_key = ProcessWeights._get_param_key(f"blocks.{layer}.ln2.w", adapter)
+        try:
+            if uses_tl_format:
+                # State dict is in TransformerLens format - use TL keys directly
+                mlp_b_in_key = f"blocks.{layer}.mlp.b_in"
+                mlp_W_in_key = f"blocks.{layer}.mlp.W_in"
+                mlp_W_gate_key = (
+                    f"blocks.{layer}.mlp.W_gate" if getattr(cfg, "gated_mlp", False) else None
+                )
+                ln2_b_key = f"blocks.{layer}.ln2.b"
+                ln2_w_key = f"blocks.{layer}.ln2.w"
+            else:
+                # State dict is in HuggingFace format - use translated keys
+                mlp_b_in_key = ProcessWeights._get_param_key(f"blocks.{layer}.mlp.b_in", adapter)
+                mlp_W_in_key = ProcessWeights._get_param_key(f"blocks.{layer}.mlp.W_in", adapter)
+                mlp_W_gate_key = (
+                    ProcessWeights._get_param_key(f"blocks.{layer}.mlp.W_gate", adapter)
+                    if getattr(cfg, "gated_mlp", False)
+                    else None
+                )
+                ln2_b_key = ProcessWeights._get_param_key(f"blocks.{layer}.ln2.b", adapter)
+                ln2_w_key = ProcessWeights._get_param_key(f"blocks.{layer}.ln2.w", adapter)
+        except ValueError:
+            # MLP parameters don't exist in this architecture (e.g., MoE models)
+            # Skip MLP LayerNorm folding for this model
+            return
 
         # Check if MLP LayerNorm parameters exist (they might not for already processed models)
         if ln2_b_key in state_dict and ln2_w_key in state_dict:
@@ -889,7 +894,16 @@ class ProcessWeights:
         elif adapter and uses_hf_format and not uses_tl_format:
             # State dict is in HuggingFace format - use adapter translation
             embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
-            pos_embed_W_pos_key = ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
+            # Only try to get positional embedding key if not using rotary embeddings
+            try:
+                pos_embed_W_pos_key = (
+                    ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
+                    if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+                    else None
+                )
+            except ValueError:
+                # Model doesn't have positional embeddings (e.g., uses RoPE)
+                pos_embed_W_pos_key = None
         else:
             # Fallback: prefer TL format if possible, otherwise use adapter translation
             if uses_tl_format:
@@ -897,7 +911,14 @@ class ProcessWeights:
                 pos_embed_W_pos_key = "pos_embed.W_pos"
             else:
                 embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
-                pos_embed_W_pos_key = ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
+                try:
+                    pos_embed_W_pos_key = (
+                        ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
+                        if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+                        else None
+                    )
+                except ValueError:
+                    pos_embed_W_pos_key = None
 
         # Validate that the embedding key exists before accessing it
         if embed_W_E_key not in state_dict:
@@ -909,7 +930,10 @@ class ProcessWeights:
         state_dict[embed_W_E_key] = state_dict[embed_W_E_key] - state_dict[embed_W_E_key].mean(
             -1, keepdim=True
         )
-        if getattr(cfg, "positional_embedding_type", "standard") != "rotary":
+        if (
+            getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+            and pos_embed_W_pos_key is not None
+        ):
             # Validate that the positional embedding key exists before accessing it
             if pos_embed_W_pos_key not in state_dict:
                 raise KeyError(
@@ -922,6 +946,9 @@ class ProcessWeights:
 
         for l in range(cfg.n_layers):
             # Get parameter keys for this layer based on format detection
+            mlp_W_out_key = None
+            mlp_b_out_key = None
+
             if uses_tl_format and not uses_hf_format:
                 # State dict is in TransformerLens format - use TL keys directly
                 attn_W_O_key = f"blocks.{l}.attn.W_O"
@@ -932,8 +959,13 @@ class ProcessWeights:
                 # State dict is in HuggingFace format - use adapter translation
                 attn_W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
                 attn_b_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_O", adapter)
-                mlp_W_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_out", adapter)
-                mlp_b_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_out", adapter)
+                try:
+                    mlp_W_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_out", adapter)
+                    mlp_b_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_out", adapter)
+                except ValueError:
+                    # MLP parameters don't exist (e.g., MoE models)
+                    mlp_W_out_key = None
+                    mlp_b_out_key = None
             else:
                 # Fallback: prefer TL format if possible, otherwise use adapter translation
                 if uses_tl_format:
@@ -944,8 +976,16 @@ class ProcessWeights:
                 else:
                     attn_W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
                     attn_b_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_O", adapter)
-                    mlp_W_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_out", adapter)
-                    mlp_b_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_out", adapter)
+                    try:
+                        mlp_W_out_key = ProcessWeights._get_param_key(
+                            f"blocks.{l}.mlp.W_out", adapter
+                        )
+                        mlp_b_out_key = ProcessWeights._get_param_key(
+                            f"blocks.{l}.mlp.b_out", adapter
+                        )
+                    except ValueError:
+                        mlp_W_out_key = None
+                        mlp_b_out_key = None
 
             # Validate that attention keys exist before accessing them
             if attn_W_O_key not in state_dict:
@@ -965,7 +1005,11 @@ class ProcessWeights:
             state_dict[attn_b_O_key] = (
                 state_dict[attn_b_O_key] - state_dict[attn_b_O_key].mean()
             )  # b_O is [d_model]
-            if not getattr(cfg, "attn_only", False):
+            if (
+                not getattr(cfg, "attn_only", False)
+                and mlp_W_out_key is not None
+                and mlp_b_out_key is not None
+            ):
                 # Validate that MLP keys exist before accessing them
                 if mlp_W_out_key not in state_dict:
                     raise KeyError(
@@ -1118,6 +1162,11 @@ class ProcessWeights:
             # Check if we have combined QKV format (HuggingFace) or separate format (TransformerLens)
             if b_V_key in state_dict:
                 b_V = state_dict[b_V_key]
+
+                # Skip if bias is empty (model doesn't use biases)
+                if b_V.numel() == 0:
+                    continue
+
                 W_O = state_dict[W_O_key]
                 b_O_original = state_dict[b_O_key]
 
@@ -1133,6 +1182,11 @@ class ProcessWeights:
                     v_bias_start = 2 * n_heads * d_head  # Start of V bias
                     v_bias_end = 3 * n_heads * d_head  # End of V bias
                     b_V_only = b_V[v_bias_start:v_bias_end]  # [n_heads * d_head]
+
+                    # Check if the bias is actually present (not empty)
+                    if b_V_only.numel() == 0:
+                        # No bias to fold - skip this layer
+                        continue
 
                     # Reshape for computation: [n_heads * d_head] -> [n_heads, d_head]
                     b_V_reshaped = b_V_only.reshape(n_heads, d_head)
