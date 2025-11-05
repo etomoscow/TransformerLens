@@ -116,7 +116,11 @@ class AttentionBridge(GeneralizedComponent):
         # Wrap HF attention forward to capture scores before softmax (unless maintaining native)
         # Models with custom attention (e.g., GPT-OSS with attention sinks) set
         # maintain_native_attention=True to preserve their original behavior
-        if not self.maintain_native_attention and hasattr(self, "original_component") and self.original_component is not None:
+        if (
+            not self.maintain_native_attention
+            and hasattr(self, "original_component")
+            and self.original_component is not None
+        ):
             self._wrap_hf_attention_forward()
 
         self._hf_forward_wrapped = True
@@ -189,8 +193,9 @@ class AttentionBridge(GeneralizedComponent):
             if model_module:
                 try:
                     import importlib
+
                     module = importlib.import_module(model_module)
-                    if hasattr(module, 'apply_rotary_pos_emb'):
+                    if hasattr(module, "apply_rotary_pos_emb"):
                         return module.apply_rotary_pos_emb(q, k, cos, sin)
                 except (ImportError, AttributeError):
                     pass
@@ -433,7 +438,9 @@ class AttentionBridge(GeneralizedComponent):
 
                 # Return in HF format - check config for expected format
                 # Some models return (output, attn_weights), others return (output, attn_weights, past)
-                return_format = getattr(attention_bridge.config, "attention_output_format", "tuple_3")
+                return_format = getattr(
+                    attention_bridge.config, "attention_output_format", "tuple_3"
+                )
 
                 if return_format == "tuple_2":
                     # Models like GPT-OSS return (output, attn_weights)

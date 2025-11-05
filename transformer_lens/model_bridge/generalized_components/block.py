@@ -294,7 +294,9 @@ class BlockBridge(GeneralizedComponent):
             # Check if this is an MoE model by looking for MoEBridge in MLP
             is_moe = hasattr(self, "submodules") and "mlp" in self.submodules
             if is_moe:
-                from transformer_lens.model_bridge.generalized_components.moe import MoEBridge
+                from transformer_lens.model_bridge.generalized_components.moe import (
+                    MoEBridge,
+                )
 
                 is_moe = isinstance(self.submodules["mlp"], MoEBridge)
 

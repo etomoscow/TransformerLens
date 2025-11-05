@@ -4,9 +4,6 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from transformer_lens.factories.architecture_adapter_factory import (
-    ArchitectureAdapterFactory,
-)
 from transformer_lens.model_bridge.bridge import TransformerBridge
 
 
