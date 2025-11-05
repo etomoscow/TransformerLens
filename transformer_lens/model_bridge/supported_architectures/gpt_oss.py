@@ -19,6 +19,7 @@ from transformer_lens.model_bridge.generalized_components import (
     RotaryEmbeddingBridge,
     UnembeddingBridge,
 )
+from transformer_lens.model_bridge.generalized_components.base import GeneralizedComponent
 
 
 class GPTOSSArchitectureAdapter(ArchitectureAdapter):
@@ -71,7 +72,11 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
             "blocks": BlockBridge(
                 name="model.layers",
                 submodules={
-                    "ln1": NormalizationBridge(name="input_layernorm", config=self.cfg),
+                    "ln1": NormalizationBridge(
+                        name="input_layernorm",
+                        config=self.cfg,
+                        use_native_layernorm_autograd=False,  # Avoid activation mismatches with RMSNorm
+                    ),
                     "attn": AttentionBridge(
                         name="self_attn",
                         config=self.cfg,
@@ -81,13 +86,22 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
                             "v": LinearBridge(name="v_proj"),
                             "o": LinearBridge(name="o_proj"),
                         },
+                        maintain_native_attention=True,  # Preserve GPT-OSS attention sinks
                     ),
-                    "ln2": NormalizationBridge(name="post_attention_layernorm", config=self.cfg),
+                    "ln2": NormalizationBridge(
+                        name="post_attention_layernorm",
+                        config=self.cfg,
+                        use_native_layernorm_autograd=False,  # Avoid activation mismatches with RMSNorm
+                    ),
                     # GPT-OSS uses batched MoE experts with router scores
                     # MoEBridge handles the (hidden_states, router_scores) tuple returns
                     "mlp": MoEBridge(name="mlp", config=self.cfg),
                 },
             ),
-            "ln_final": NormalizationBridge(name="model.norm", config=self.cfg),
+            "ln_final": NormalizationBridge(
+                name="model.norm",
+                config=self.cfg,
+                use_native_layernorm_autograd=False,  # Avoid activation mismatches with RMSNorm
+            ),
             "unembed": UnembeddingBridge(name="lm_head"),
         }

@@ -286,12 +286,22 @@ class BlockBridge(GeneralizedComponent):
         # here in the wrapper to avoid double-wrapping.
         output = self.original_component(*args, **kwargs)
 
-        # If output is a tuple, extract just the hidden_states (first element)
-        # This prevents tuples from being passed between blocks
-        # The patched_forward returns (hidden_states,) or (hidden_states, attn_weights)
-        # depending on output_attentions, but only hidden_states should flow between blocks
+        # Handle tuple unwrapping based on model architecture
+        # For MoE models: Always unwrap to hidden_states (discard router scores)
+        # For non-MoE models: Only unwrap single-element tuples to preserve
+        # multi-element tuples like (hidden_states, attn_weights) for HF
         if isinstance(output, tuple):
-            return output[0]
+            # Check if this is an MoE model by looking for MoEBridge in MLP
+            is_moe = hasattr(self, "submodules") and "mlp" in self.submodules
+            if is_moe:
+                from transformer_lens.model_bridge.generalized_components.moe import MoEBridge
+
+                is_moe = isinstance(self.submodules["mlp"], MoEBridge)
+
+            # MoE models: always unwrap tuples (router scores are handled in MoEBridge)
+            # Non-MoE models: only unwrap single-element tuples
+            if is_moe or len(output) == 1:
+                return output[0]
 
         return output
 

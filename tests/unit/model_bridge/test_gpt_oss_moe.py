@@ -78,16 +78,18 @@ def test_gpt_oss_bridge_creation(gpt_oss_bridge):
     assert hasattr(gpt_oss_bridge.blocks[0], "mlp")
 
 
-def test_gpt_oss_mlp_is_joint_gate_up_bridge(gpt_oss_bridge):
-    """Test that GPT-OSS MLP uses JointGateUpMLPBridge (not regular MLPBridge)."""
-    from transformer_lens.model_bridge.generalized_components.joint_gate_up_mlp import (
-        JointGateUpMLPBridge,
-    )
+def test_gpt_oss_mlp_is_moe_bridge(gpt_oss_bridge):
+    """Test that GPT-OSS MLP uses MoEBridge (batched MoE experts)."""
+    from transformer_lens.model_bridge.generalized_components import MoEBridge
 
     mlp = gpt_oss_bridge.blocks[0].mlp
-    assert isinstance(mlp, JointGateUpMLPBridge)
-    assert hasattr(mlp, "gate")
-    assert hasattr(mlp, "up")
+    # GPT-OSS uses batched MoE experts, so we use MoEBridge
+    # which handles (hidden_states, router_scores) tuple returns
+    assert isinstance(mlp, MoEBridge)
+    # Verify the original component is the MoE MLP
+    assert hasattr(mlp.original_component, "experts")
+    # Verify MoEBridge has router_scores hook
+    assert hasattr(mlp, "hook_router_scores")
 
 
 def test_gpt_oss_compatibility_mode_hooks(gpt_oss_bridge):
@@ -132,7 +134,7 @@ def test_gpt_oss_moe_experts_not_iterable(gpt_oss_model_meta):
 
 
 def test_gpt_oss_hook_aliases_resolved(gpt_oss_bridge):
-    """Test that JointGateUpMLPBridge hook aliases resolve correctly."""
+    """Test that MLP hooks are accessible."""
     gpt_oss_bridge.enable_compatibility_mode(no_processing=True)
 
     mlp = gpt_oss_bridge.blocks[0].mlp
@@ -140,8 +142,9 @@ def test_gpt_oss_hook_aliases_resolved(gpt_oss_bridge):
     # Get hooks from the MLP component
     hooks = mlp.get_hooks()
 
-    # Check that hook_pre alias is present (should resolve to gate.hook_out)
-    assert "hook_pre" in hooks
+    # Check that basic hooks are present
+    assert "hook_in" in hooks
+    assert "hook_out" in hooks
 
     # hook_pre should NOT try to resolve to in.hook_out or input.hook_out
     # (which would fail since JointGateUpMLPBridge doesn't have those submodules)
@@ -162,3 +165,84 @@ def test_gpt_oss_no_block_bridge_for_experts(gpt_oss_bridge):
     # and should NOT have an 'experts' attribute that's a BlockBridge
     if hasattr(mlp, "experts"):
         assert not isinstance(mlp.experts, BlockBridge)
+
+
+def test_gpt_oss_run_with_cache_with_random_weights():
+    """Test that run_with_cache works with GPT-OSS using random weights.
+
+    This test creates a small GPT-OSS model with random weights and verifies
+    that both forward pass and run_with_cache work correctly. This ensures
+    proper tuple handling in BlockBridge.forward.
+    """
+    from transformer_lens.config import TransformerBridgeConfig
+    from transformer_lens.model_bridge.sources.transformers import (
+        map_default_transformer_lens_config,
+    )
+    from transformer_lens.model_bridge.supported_architectures.gpt_oss import (
+        GPTOSSArchitectureAdapter,
+    )
+
+    # Create a small GPT-OSS config with random weights
+    config = AutoConfig.from_pretrained("openai/gpt-oss-20b", trust_remote_code=True)
+    config.num_hidden_layers = 2  # Reduce to 2 layers for faster testing
+    config.hidden_size = 128  # Smaller size
+    config.intermediate_size = 256
+    config.num_attention_heads = 8
+    config.num_key_value_heads = 2
+
+    # Create model with random weights
+    model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+
+    # Map to TL config
+    tl_config = map_default_transformer_lens_config(config)
+
+    # Create bridge config
+    bridge_config = TransformerBridgeConfig(
+        d_model=tl_config.d_model,
+        d_head=tl_config.d_head,
+        n_layers=tl_config.n_layers,
+        n_ctx=tl_config.n_ctx,
+        architecture="GptOssForCausalLM",
+    )
+
+    # Create adapter
+    adapter = GPTOSSArchitectureAdapter(bridge_config)
+
+    # Get tokenizer
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("openai/gpt-oss-20b", trust_remote_code=True)
+
+    # Create bridge
+    bridge = TransformerBridge(
+        model=model,
+        adapter=adapter,
+        tokenizer=tokenizer,
+    )
+
+    # Enable compatibility mode
+    bridge.enable_compatibility_mode(no_processing=True)
+
+    # Create test input
+    tokens = torch.randint(0, 1000, (1, 5))
+
+    # Test forward pass
+    logits = bridge(tokens)
+    assert logits.shape == (1, 5, config.vocab_size)
+
+    # Test run_with_cache (this was failing before the tuple handling fix)
+    logits_cached, cache = bridge.run_with_cache(tokens)
+    assert logits_cached.shape == (1, 5, config.vocab_size)
+    assert len(cache) > 0  # Verify cache has entries
+
+    # Verify logits match between forward and run_with_cache
+    assert torch.allclose(logits, logits_cached, atol=1e-5)
+
+    # Verify router scores are captured in the cache (new MoEBridge feature)
+    assert "blocks.0.mlp.hook_router_scores" in cache
+    assert "blocks.1.mlp.hook_router_scores" in cache
+
+    # Router scores should have shape [seq_len, num_experts]
+    # GPT-OSS has 32 experts
+    router_scores_0 = cache["blocks.0.mlp.hook_router_scores"]
+    assert router_scores_0.shape == (5, 32)  # seq_len=5, num_experts=32
