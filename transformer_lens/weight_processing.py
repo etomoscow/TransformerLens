@@ -568,20 +568,26 @@ class ProcessWeights:
                 ):
                     return
 
+                import einops
+
                 n_heads = cfg.n_heads
                 d_head = cfg.d_head
                 d_model = cfg.d_model
 
                 # Convert back to HuggingFace format
-                # Convert weights: [n_heads, d_model, d_head] -> [d_model, d_model]
-                W_Q_hf = wq_tensor.reshape(d_model, d_model).T
-                W_K_hf = wk_tensor.reshape(d_model, d_model).T
-                W_V_hf = wv_tensor.reshape(d_model, d_model).T
+                # Reverse the rearrangement: [n_heads, d_model, d_head] -> [d_model, d_model]
+                # Original conversion was: "m (i h) -> i m h" with i=n_heads
+                # So reverse is: "i m h -> m (i h)"
+                W_Q_hf = einops.rearrange(wq_tensor, "i m h -> m (i h)")
+                W_K_hf = einops.rearrange(wk_tensor, "i m h -> m (i h)")
+                W_V_hf = einops.rearrange(wv_tensor, "i m h -> m (i h)")
 
                 # Convert biases: [n_heads, d_head] -> [d_model]
-                b_Q_hf = bq_tensor.reshape(d_model)
-                b_K_hf = bk_tensor.reshape(d_model)
-                b_V_hf = bv_tensor.reshape(d_model)
+                # Original conversion used QKVBiasConversion which rearranges the combined bias
+                # Reverse is just flattening in the correct order
+                b_Q_hf = einops.rearrange(bq_tensor, "i h -> (i h)")
+                b_K_hf = einops.rearrange(bk_tensor, "i h -> (i h)")
+                b_V_hf = einops.rearrange(bv_tensor, "i h -> (i h)")
 
                 # Combine back into HuggingFace format
                 new_qkv_weight = torch.cat([W_Q_hf, W_K_hf, W_V_hf], dim=1)  # [d_model, 3*d_model]
@@ -728,15 +734,17 @@ class ProcessWeights:
             # Center the weights that read in from the LayerNormPre
             unembed_weight = state_dict[unembed_W_U_key]
             if len(unembed_weight.shape) == 2:
-                if unembed_weight.shape[0] > unembed_weight.shape[1]:
-                    # TransformerLens format: [d_model, vocab_size] - center along d_model
-                    state_dict[unembed_W_U_key] -= einops.reduce(
-                        unembed_weight, "d_model d_vocab -> 1 d_vocab", "mean"
-                    )
-                else:
+                # Use proper format detection instead of shape heuristic
+                # The shape heuristic is unreliable - GPT-2's [50257, 768] looks like TL but is HF!
+                if uses_hf_format and not uses_tl_format:
                     # HuggingFace format: [vocab_size, d_model] - center along d_model
                     state_dict[unembed_W_U_key] -= einops.reduce(
                         unembed_weight, "vocab_size d_model -> vocab_size 1", "mean"
+                    )
+                else:
+                    # TransformerLens format: [d_model, vocab_size] - center along d_model
+                    state_dict[unembed_W_U_key] -= einops.reduce(
+                        unembed_weight, "d_model d_vocab -> 1 d_vocab", "mean"
                     )
             else:
                 raise ValueError(f"Unexpected unembedding weight shape: {unembed_weight.shape}")
@@ -1080,9 +1088,19 @@ class ProcessWeights:
                 f"Available keys: {list(state_dict.keys())[:10]}..."
             )
 
-        state_dict[unembed_W_U_key] = state_dict[unembed_W_U_key] - state_dict[
-            unembed_W_U_key
-        ].mean(-1, keepdim=True)
+        # Center along the vocab dimension
+        # For HF format [vocab_size, d_model], center along dim=0 (vocab)
+        # For TL format [d_model, vocab_size], center along dim=-1 (vocab)
+        W_U = state_dict[unembed_W_U_key]
+        if uses_hf_format:
+            # HF format: [vocab_size, d_model] - center along vocab (dim=-1 is d_model, so use dim=0)
+            # Actually wait - we want to subtract the mean across vocab for each d_model dimension
+            # That means for each of the 768 dimensions, subtract its mean across all 50257 tokens
+            # Shape: [vocab_size, d_model] -> mean(dim=0) -> [d_model] -> unsqueeze(0) -> [1, d_model]
+            state_dict[unembed_W_U_key] = W_U - W_U.mean(0, keepdim=True)
+        else:
+            # TL format: [d_model, vocab_size] - center along vocab (dim=-1)
+            state_dict[unembed_W_U_key] = W_U - W_U.mean(-1, keepdim=True)
 
         # Only center bias if it exists (some models like GPT-2 don't have unembedding bias)
         if unembed_b_U_key in state_dict:

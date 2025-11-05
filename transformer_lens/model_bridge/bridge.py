@@ -1124,6 +1124,9 @@ class TransformerBridge(nn.Module):
         # Get architecture adapter for path translation
         adapter = self.adapter
 
+        # NOTE: Weight processing code (ProcessWeights) handles splitting joint QKV internally
+        # via convert_tensor_to_tl_format(), so we don't need to pre-split here
+
         # Apply weight processing in order (matches HookedTransformer processing order)
         if fold_ln:
             if verbose:
@@ -1182,6 +1185,79 @@ class TransformerBridge(nn.Module):
 
         if verbose:
             print("✓ Weight processing complete!")
+
+    def _split_joint_weights(
+        self, state_dict: Dict[str, torch.Tensor], adapter: Any, verbose: bool = False
+    ) -> Dict[str, torch.Tensor]:
+        """Split joint weights (QKV, gate-up MLP) into separate components.
+
+        Weight processing expects weights in split format. Models like GPT-2 store
+        Q, K, V as a single joint tensor that needs to be split first.
+
+        Args:
+            state_dict: HuggingFace format state dict with potentially joint weights
+            adapter: Architecture adapter for key translation
+            verbose: If True, print detailed progress messages
+
+        Returns:
+            State dict with split weights
+        """
+        import torch
+
+        cfg = self.cfg
+        new_state_dict = state_dict.copy()
+
+        # Split QKV for each layer
+        for layer_idx in range(cfg.n_layers):
+            # Try to get the joint QKV key
+            try:
+                # Get HF key for joint QKV (e.g., "transformer.h.0.attn.c_attn.weight")
+                qkv_weight_key = adapter.translate_transformer_lens_path(
+                    f"blocks.{layer_idx}.attn.W_Q"
+                )
+
+                if qkv_weight_key in state_dict:
+                    # This is a joint QKV weight that needs splitting
+                    qkv_weight = state_dict[qkv_weight_key]  # [d_model, 3 * d_model] for GPT-2
+
+                    # Split into Q, K, V
+                    d_model = cfg.d_model
+                    if qkv_weight.shape[-1] == 3 * d_model:
+                        # Joint QKV format
+                        q_weight, k_weight, v_weight = torch.split(
+                            qkv_weight, [d_model, d_model, d_model], dim=-1
+                        )
+
+                        # Create separate keys for Q, K, V
+                        # For now, we'll use a naming convention that includes .q, .k, .v
+                        # to distinguish them in the state dict
+                        base_key = qkv_weight_key.replace(".weight", "")
+                        new_state_dict[f"{base_key}.q.weight"] = q_weight
+                        new_state_dict[f"{base_key}.k.weight"] = k_weight
+                        new_state_dict[f"{base_key}.v.weight"] = v_weight
+
+                        # Also handle bias if it exists
+                        qkv_bias_key = qkv_weight_key.replace(".weight", ".bias")
+                        if qkv_bias_key in state_dict:
+                            qkv_bias = state_dict[qkv_bias_key]
+                            if qkv_bias.shape[-1] == 3 * d_model:
+                                q_bias, k_bias, v_bias = torch.split(
+                                    qkv_bias, [d_model, d_model, d_model], dim=-1
+                                )
+                                new_state_dict[f"{base_key}.q.bias"] = q_bias
+                                new_state_dict[f"{base_key}.k.bias"] = k_bias
+                                new_state_dict[f"{base_key}.v.bias"] = v_bias
+
+                        if verbose:
+                            print(f"    Split QKV for layer {layer_idx}")
+            except (ValueError, KeyError):
+                # Not a joint QKV model, or keys don't exist - skip
+                pass
+
+            # TODO: Handle joint gate-up MLP weights if needed (e.g., Llama)
+            # For now, GPT-2 doesn't use this so we can add it later if needed
+
+        return new_state_dict
 
     def _configure_components_for_processing(self, verbose: bool = False):
         """Configure all components for processed weight loading (Phase 1).
