@@ -41,12 +41,14 @@ class UnembeddingBridge(GeneralizedComponent):
     @property
     def W_U(self) -> torch.Tensor:
         """Return the unembedding weight matrix."""
-        # Check if we have processed weights (from weight processing/layer norm folding)
-        # Access _parameters directly since __getattr__ may block hasattr/getattr access
-        if "_processed_W_U" in self._parameters and self._parameters["_processed_W_U"] is not None:
-            return self._parameters["_processed_W_U"]
+        # Check if we're using processed weights (after compatibility mode / weight folding)
+        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
+            if "_processed_W_U" in self._parameters:
+                processed_W_U = self._parameters["_processed_W_U"]
+                if processed_W_U is not None:
+                    return processed_W_U
 
-        # Fall back to original component's weight
+        # Fall back to original component weight
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
         assert hasattr(
