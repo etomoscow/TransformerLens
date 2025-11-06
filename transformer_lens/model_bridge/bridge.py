@@ -1165,8 +1165,10 @@ class TransformerBridge(nn.Module):
                 if unembed_b_U_key not in state_dict:
                     # Create zero bias matching vocab size
                     state_dict[unembed_b_U_key] = torch.zeros(
-                        self.cfg.d_vocab_out if hasattr(self.cfg, 'd_vocab_out') else self.cfg.d_vocab,
-                        dtype=self.cfg.dtype if hasattr(self.cfg, 'dtype') else torch.float32
+                        self.cfg.d_vocab_out
+                        if hasattr(self.cfg, "d_vocab_out")
+                        else self.cfg.d_vocab,
+                        dtype=self.cfg.dtype if hasattr(self.cfg, "dtype") else torch.float32,
                     )
             except (ValueError, KeyError):
                 # If we can't get the key, skip this step
