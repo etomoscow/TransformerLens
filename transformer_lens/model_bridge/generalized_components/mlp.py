@@ -77,7 +77,17 @@ class MLPBridge(GeneralizedComponent):
                 # Input projection using TransformerLens format weights [d_model, d_mlp]
                 # Use batch_addmm to match HookedTransformer exactly - no transpose needed!
                 # HookedTransformer: batch_addmm(self.b_in, self.W_in, x) where W_in is [d_model, d_mlp]
-                hidden = batch_addmm(self._processed_b_in, self._processed_W_in, hidden_states)
+                # Handle None bias by creating a zero tensor with the appropriate shape
+                b_in = (
+                    self._processed_b_in
+                    if self._processed_b_in is not None
+                    else torch.zeros(
+                        self._processed_W_in.shape[-1],
+                        device=hidden_states.device,
+                        dtype=hidden_states.dtype,
+                    )
+                )
+                hidden = batch_addmm(b_in, self._processed_W_in, hidden_states)
 
                 # Apply hook_pre (in.hook_out or input.hook_out) - pre-activation hidden state
                 # In compatibility mode, this hook is aliased as "blocks.L.mlp.hook_pre"
@@ -97,7 +107,15 @@ class MLPBridge(GeneralizedComponent):
                 # Output projection using TransformerLens format weights [d_mlp, d_model]
                 # Use batch_addmm to match HookedTransformer exactly - no transpose needed!
                 # HookedTransformer: batch_addmm(self.b_out, self.W_out, post_act) where W_out is [d_mlp, d_model]
-                output = batch_addmm(self._processed_b_out, self._processed_W_out, hidden)
+                # Handle None bias by creating a zero tensor with the appropriate shape
+                b_out = (
+                    self._processed_b_out
+                    if self._processed_b_out is not None
+                    else torch.zeros(
+                        self._processed_W_out.shape[-1], device=hidden.device, dtype=hidden.dtype
+                    )
+                )
+                output = batch_addmm(b_out, self._processed_W_out, hidden)
             else:
                 # Fallback to original component
                 new_args = (hidden_states,) + args[1:]

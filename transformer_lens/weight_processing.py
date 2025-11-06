@@ -895,6 +895,7 @@ class ProcessWeights:
         )
 
         # Get parameter keys based on format detection
+        pos_embed_W_pos_key: str | None
         if uses_tl_format and not uses_hf_format:
             # State dict is in TransformerLens format - use TL keys directly
             embed_W_E_key = "embed.W_E"
