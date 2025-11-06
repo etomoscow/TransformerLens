@@ -1828,13 +1828,9 @@ class TransformerBridge(nn.Module):
                 "No processed weights available. Call enable_compatibility_mode() first."
             )
 
-        # Convert TL format processed weights to HF format on demand
-        try:
-            from transformer_lens.weight_processing import ProcessWeights
-
-            return ProcessWeights.convert_tl_to_hf_format(self._processed_tl_weights, self.cfg)
-        except Exception as e:
-            raise ValueError(f"Failed to convert processed weights to HF format: {e}")
+        # The _processed_tl_weights is actually in HF format (despite the name)
+        # because process_compatibility_weights() processes HF format weights in-place
+        return self._processed_tl_weights
 
         print("Bridge set up with processed components created directly")
 
