@@ -1136,21 +1136,19 @@ class TransformerBridge(nn.Module):
         if verbose:
             print(f"Processing weights for {self.cfg.model_name}...")
 
-        # Get a fresh state dict from HuggingFace without any Bridge wrapping
-        # We need the raw HF state dict before it was wrapped by TransformerBridge
+        # Load a fresh HF model to avoid dealing with wrapped keys
         import torch
         from transformers import AutoModelForCausalLM
 
         if verbose:
-            print("  Loading fresh HF model to get unwrapped state dict...")
+            print("  Loading fresh HF model for processing...")
 
-        # Load the model with the same config to get clean state dict
-        temp_model = AutoModelForCausalLM.from_pretrained(
+        # Load fresh model with clean state dict
+        fresh_model = AutoModelForCausalLM.from_pretrained(
             self.cfg.model_name,
             torch_dtype=self.cfg.dtype if hasattr(self.cfg, "dtype") else torch.float32,
         )
-        state_dict = temp_model.state_dict()
-        del temp_model  # Free memory
+        state_dict = fresh_model.state_dict()
 
         # Get architecture adapter for path translation
         adapter = self.adapter
@@ -1159,6 +1157,13 @@ class TransformerBridge(nn.Module):
         # via convert_tensor_to_tl_format(), so we don't need to pre-split here
 
         # Apply weight processing in order (matches HookedTransformer processing order)
+        # IMPORTANT: The order must match ProcessWeights.process_weights() exactly:
+        # 1. fold_ln
+        # 2. center_writing_weights
+        # 3. center_unembed
+        # 4. fold_value_biases (uses the W_O AFTER fold_ln and centering)
+        # 5. Re-center b_O (done automatically by fold_value_biases in new code)
+
         if fold_ln:
             if verbose:
                 print("  Folding LayerNorm/RMSNorm...")
@@ -1211,6 +1216,49 @@ class TransformerBridge(nn.Module):
         # Configure components and load processed weights
         self._configure_components_for_processing(verbose=verbose)
         self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
+
+        # Load processed weights into the fresh model
+        if verbose:
+            print("  Loading processed weights into fresh model...")
+
+        load_result = fresh_model.load_state_dict(state_dict, strict=False)
+
+        if verbose and (load_result.missing_keys or load_result.unexpected_keys):
+            if load_result.missing_keys:
+                print(f"    Warning: Missing keys: {len(load_result.missing_keys)}")
+            if load_result.unexpected_keys:
+                print(f"    Warning: Unexpected keys: {len(load_result.unexpected_keys)}")
+
+        # Replace original_model with the processed fresh model
+        # This ensures forward pass uses processed weights
+        self.__dict__["original_model"] = fresh_model
+
+        # Enable processed weights mode on all components
+        # This makes components use _forward_with_processed_weights instead of calling HF modules
+        if verbose:
+            print("  Enabling processed weights mode on components...")
+
+        def enable_processed_weights(component):
+            """Enable processed weights mode on a component and all subcomponents."""
+            # Always set the attribute, even if it didn't exist before
+            component._use_processed_weights = True
+            # Recursively enable for subcomponents
+            if hasattr(component, "submodules"):
+                for subcomp in component.submodules.values():
+                    enable_processed_weights(subcomp)
+
+        # Enable for all blocks
+        if hasattr(self, "blocks"):
+            for block in self.blocks:
+                enable_processed_weights(block)
+
+        # Enable for embed/unembed
+        if hasattr(self, "embed"):
+            enable_processed_weights(self.embed)
+        if hasattr(self, "pos_embed"):
+            enable_processed_weights(self.pos_embed)
+        if hasattr(self, "unembed"):
+            enable_processed_weights(self.unembed)
 
         object.__setattr__(self, "_weights_processed", True)
 

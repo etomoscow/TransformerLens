@@ -1211,7 +1211,9 @@ class ProcessWeights:
 
                     # W_O is [d_model, d_model], we need to reshape it to [n_heads, d_head, d_model]
                     # W_O represents the output projection, so we need to split it by heads
-                    W_O_reshaped = W_O.T.reshape(n_heads, d_head, d_model)
+                    # NOTE: Using einops.rearrange to match HookedTransformer's weight conversion method
+                    # DO NOT use W_O.T.reshape() - the transpose causes incorrect weight ordering!
+                    W_O_reshaped = einops.rearrange(W_O, "(i h) m -> i h m", i=n_heads)
 
                     # Compute the folded bias: sum over heads and d_head dimensions
                     folded_b_O = b_O_original + (b_V_reshaped[:, :, None] * W_O_reshaped).sum(
@@ -1244,7 +1246,9 @@ class ProcessWeights:
                         )
 
                     # Convert W_O from HuggingFace format [d_model, d_model] to TransformerLens format [n_heads, d_head, d_model]
-                    W_O_reshaped = W_O.T.reshape(n_heads, d_head, d_model)
+                    # NOTE: Using einops.rearrange to match HookedTransformer's weight conversion method
+                    # DO NOT use W_O.T.reshape() - the transpose causes incorrect weight ordering!
+                    W_O_reshaped = einops.rearrange(W_O, "(i h) m -> i h m", i=n_heads)
 
                     # Compute the folded bias: sum over heads and d_head dimensions
                     folded_b_O = b_O_original + (b_V[:, :, None] * W_O_reshaped).sum([0, 1])
