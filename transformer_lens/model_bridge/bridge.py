@@ -1255,12 +1255,22 @@ class TransformerBridge(nn.Module):
 
         # Extract TransformerLens format weights
         W_Q = processed_weights.get(W_Q_key)
+        # For GQA models, K and V weights may have underscore prefix (_W_K, _W_V)
         W_K = processed_weights.get(W_K_key)
+        if W_K is None:
+            W_K = processed_weights.get(f"blocks.{layer_idx}.attn._W_K")
         W_V = processed_weights.get(W_V_key)
+        if W_V is None:
+            W_V = processed_weights.get(f"blocks.{layer_idx}.attn._W_V")
         W_O = processed_weights.get(W_O_key)
         b_Q = processed_weights.get(b_Q_key)
+        # For GQA models, K and V biases may have underscore prefix (_b_K, _b_V)
         b_K = processed_weights.get(b_K_key)
+        if b_K is None:
+            b_K = processed_weights.get(f"blocks.{layer_idx}.attn._b_K")
         b_V = processed_weights.get(b_V_key)
+        if b_V is None:
+            b_V = processed_weights.get(f"blocks.{layer_idx}.attn._b_V")
         b_O = processed_weights.get(b_O_key)
 
         if reference_model is not None:
@@ -1321,8 +1331,21 @@ class TransformerBridge(nn.Module):
 
         # Embeddings
         token_embed = self.embed(tokens)
-        pos_embed = self.pos_embed(tokens)
-        residual = token_embed + pos_embed
+
+        # Handle positional embeddings based on positional_embedding_type
+        if (
+            hasattr(self.cfg, "positional_embedding_type")
+            and self.cfg.positional_embedding_type == "rotary"
+        ):
+            # Rotary embeddings don't add to residual stream - they're applied in attention
+            residual = token_embed
+        elif hasattr(self, "pos_embed"):
+            # Standard/shortformer/alibi positional embeddings
+            pos_embed = self.pos_embed(tokens)
+            residual = token_embed + pos_embed
+        else:
+            # No positional embeddings (shouldn't happen, but handle gracefully)
+            residual = token_embed
 
         # Transformer blocks
         start_layer = start_at_layer or 0
