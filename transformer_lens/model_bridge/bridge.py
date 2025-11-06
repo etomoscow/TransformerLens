@@ -1156,6 +1156,22 @@ class TransformerBridge(nn.Module):
         # NOTE: Weight processing code (ProcessWeights) handles splitting joint QKV internally
         # via convert_tensor_to_tl_format(), so we don't need to pre-split here
 
+        # Create unembed.b_U if it doesn't exist (needed for fold_layer_norm to fold ln_final.b)
+        # Some models like GPT-2 don't have unembed bias, but we need it as a zero tensor
+        # so that fold_layer_norm can fold ln_final.b into it
+        if adapter:
+            try:
+                unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
+                if unembed_b_U_key not in state_dict:
+                    # Create zero bias matching vocab size
+                    state_dict[unembed_b_U_key] = torch.zeros(
+                        self.cfg.d_vocab_out if hasattr(self.cfg, 'd_vocab_out') else self.cfg.d_vocab,
+                        dtype=self.cfg.dtype if hasattr(self.cfg, 'dtype') else torch.float32
+                    )
+            except (ValueError, KeyError):
+                # If we can't get the key, skip this step
+                pass
+
         # Apply weight processing in order (matches HookedTransformer processing order)
         # IMPORTANT: The order must match ProcessWeights.process_weights() exactly:
         # 1. fold_ln
