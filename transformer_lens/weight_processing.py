@@ -663,15 +663,24 @@ class ProcessWeights:
                 hf_b_k_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_K")
                 hf_b_v_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_V")
 
-                state_dict[hf_w_q_key] = ProcessWeights.convert_tensor_to_hf_format(
+                # Convert weights back to HF format (weights are required, should never be None)
+                converted_wq = ProcessWeights.convert_tensor_to_hf_format(
                     wq_tensor, f"blocks.{layer}.attn.W_Q", adapter, cfg, layer  # type: ignore[arg-type]
                 )
-                state_dict[hf_w_k_key] = ProcessWeights.convert_tensor_to_hf_format(
+                converted_wk = ProcessWeights.convert_tensor_to_hf_format(
                     wk_tensor, f"blocks.{layer}.attn.W_K", adapter, cfg, layer  # type: ignore[arg-type]
                 )
-                state_dict[hf_w_v_key] = ProcessWeights.convert_tensor_to_hf_format(
+                converted_wv = ProcessWeights.convert_tensor_to_hf_format(
                     wv_tensor, f"blocks.{layer}.attn.W_V", adapter, cfg, layer  # type: ignore[arg-type]
                 )
+
+                # Weights should never be None (required parameters)
+                if converted_wq is None or converted_wk is None or converted_wv is None:
+                    raise ValueError(f"Required attention weights missing for layer {layer}")
+
+                state_dict[hf_w_q_key] = converted_wq
+                state_dict[hf_w_k_key] = converted_wk
+                state_dict[hf_w_v_key] = converted_wv
 
                 # Only store biases if they exist (models like Qwen2/LLaMA may not have attention biases)
                 converted_bq = ProcessWeights.convert_tensor_to_hf_format(
