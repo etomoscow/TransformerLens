@@ -799,7 +799,12 @@ class TransformerBridge(nn.Module):
         transformer.forward = fixed_transformer_forward
 
     def enable_compatibility_mode(
-        self, disable_warnings: bool = False, no_processing: bool = False
+        self,
+        disable_warnings: bool = False,
+        no_processing: bool = False,
+        fold_ln: bool = True,
+        center_writing_weights: bool = True,
+        center_unembed: bool = True,
     ) -> None:
         """Enable compatibility mode for the bridge.
 
@@ -808,7 +813,14 @@ class TransformerBridge(nn.Module):
 
         Args:
             disable_warnings: Whether to disable warnings about legacy components/hooks
-            no_processing: Whether to disable pre-processing steps of the model (e.g. folding layer norm weights, folding value biases)
+            no_processing: Whether to disable ALL pre-processing steps of the model.
+                If True, overrides fold_ln, center_writing_weights, and center_unembed to False.
+            fold_ln: Whether to fold layer norm weights into the subsequent linear layers.
+                Default: True. Ignored if no_processing=True.
+            center_writing_weights: Whether to center the writing weights (W_out in attention and MLPs).
+                Default: True. Ignored if no_processing=True.
+            center_unembed: Whether to center the unembedding matrix.
+                Default: True. Ignored if no_processing=True.
         """
         # Avoid circular import
         from transformer_lens.utilities.bridge_components import (
@@ -831,20 +843,30 @@ class TransformerBridge(nn.Module):
         # Fix backward hook gradients by overriding transformer forward
         self._fix_backward_hook_gradients()
 
-        # Setup attention hooks for no_processing mode to match HookedTransformer
+        # Setup attention hooks to match HookedTransformer (needed for both modes)
+        # This wraps HF attention forward to:
+        # 1. Capture attention scores before softmax
+        # 2. Ensure Q/K/V/Z hooks fire properly
+        self._setup_no_processing_hooks()
+
         if no_processing:
-            # Setup attention hooks (architecture adapters configure behavior via parameters
-            # like maintain_native_attention, use_native_layernorm_autograd)
-            self._setup_no_processing_hooks()
+            # Override weight processing parameters when no_processing is True
+            fold_ln = False
+            center_writing_weights = False
+            center_unembed = False
 
             # Extract split Q/K/V weights for attention layers (uses architecture adapter)
             self._enable_split_qkv_attention()
             # Re-initialize hook registry to pick up any changes
             self.clear_hook_registry()
             self._initialize_hook_registry()
-
-        if not no_processing:
-            self.process_compatibility_weights()
+        else:
+            # Apply weight processing with the specified parameters
+            self.process_compatibility_weights(
+                fold_ln=fold_ln,
+                center_writing_weights=center_writing_weights,
+                center_unembed=center_unembed,
+            )
 
     def _setup_no_processing_hooks(self) -> None:
         """Setup hooks for no_processing mode in all attention layers.
@@ -1117,11 +1139,20 @@ class TransformerBridge(nn.Module):
                     block.original_component.mlp = new_mlp
                 print(f"  Replaced blocks.{i}.mlp with HT-compatible version")
 
-    def process_compatibility_weights(self, verbose: bool = False) -> None:
+    def process_compatibility_weights(
+        self,
+        verbose: bool = False,
+        fold_ln: bool = True,
+        center_writing_weights: bool = True,
+        center_unembed: bool = True,
+    ) -> None:
         """Process and load weights from a reference HookedTransformer model.
 
         Args:
             verbose: If True, print detailed progress messages. Default: False
+            fold_ln: Whether to fold layer norm weights. Default: True
+            center_writing_weights: Whether to center writing weights. Default: True
+            center_unembed: Whether to center unembedding matrix. Default: True
         """
         # Import here to avoid circular imports
         from transformer_lens import HookedTransformer
@@ -1131,9 +1162,9 @@ class TransformerBridge(nn.Module):
         reference_hooked = HookedTransformer.from_pretrained(
             self.cfg.model_name,
             device=self.cfg.device,
-            fold_ln=True,
-            center_writing_weights=True,
-            center_unembed=True,
+            fold_ln=fold_ln,
+            center_writing_weights=center_writing_weights,
+            center_unembed=center_unembed,
             fold_value_biases=True,
             refactor_factored_attn_matrices=False,
         )
@@ -1289,24 +1320,52 @@ class TransformerBridge(nn.Module):
         attn_component.set_processed_weights(W_Q, W_K, W_V, W_O, b_Q, b_K, b_V, b_O)
 
     def _load_mlp_weights(self, mlp_component, layer_idx, processed_weights, verbose: bool = False):
-        """Load MLP weights into the MLPBridge component.
+        """Load MLP weights into the MLPBridge or JointGateUpMLPBridge component.
 
         Args:
             verbose: If True, print detailed progress messages. Default: False
         """
-        W_in_key = f"blocks.{layer_idx}.mlp.W_in"
-        W_out_key = f"blocks.{layer_idx}.mlp.W_out"
-        b_in_key = f"blocks.{layer_idx}.mlp.b_in"
-        b_out_key = f"blocks.{layer_idx}.mlp.b_out"
+        from transformer_lens.model_bridge.generalized_components.joint_gate_up_mlp import (
+            JointGateUpMLPBridge,
+        )
 
-        W_in = processed_weights.get(W_in_key)
-        W_out = processed_weights.get(W_out_key)
-        b_in = processed_weights.get(b_in_key)
-        b_out = processed_weights.get(b_out_key)
+        # Check if this is a gated MLP (requires W_gate in addition to W_in/W_out)
+        is_gated = isinstance(mlp_component, JointGateUpMLPBridge)
 
-        if W_in is None or W_out is None:
-            return
-        mlp_component.set_processed_weights(W_in, W_out, b_in, b_out)
+        if is_gated:
+            # JointGateUpMLPBridge requires W_gate, W_in, W_out (and their biases)
+            W_gate_key = f"blocks.{layer_idx}.mlp.W_gate"
+            W_in_key = f"blocks.{layer_idx}.mlp.W_in"
+            W_out_key = f"blocks.{layer_idx}.mlp.W_out"
+            b_gate_key = f"blocks.{layer_idx}.mlp.b_gate"
+            b_in_key = f"blocks.{layer_idx}.mlp.b_in"
+            b_out_key = f"blocks.{layer_idx}.mlp.b_out"
+
+            W_gate = processed_weights.get(W_gate_key)
+            W_in = processed_weights.get(W_in_key)
+            W_out = processed_weights.get(W_out_key)
+            b_gate = processed_weights.get(b_gate_key)
+            b_in = processed_weights.get(b_in_key)
+            b_out = processed_weights.get(b_out_key)
+
+            if W_gate is None or W_in is None or W_out is None:
+                return
+            mlp_component.set_processed_weights(W_gate, W_in, W_out, b_gate, b_in, b_out)
+        else:
+            # Standard MLPBridge only needs W_in and W_out
+            W_in_key = f"blocks.{layer_idx}.mlp.W_in"
+            W_out_key = f"blocks.{layer_idx}.mlp.W_out"
+            b_in_key = f"blocks.{layer_idx}.mlp.b_in"
+            b_out_key = f"blocks.{layer_idx}.mlp.b_out"
+
+            W_in = processed_weights.get(W_in_key)
+            W_out = processed_weights.get(W_out_key)
+            b_in = processed_weights.get(b_in_key)
+            b_out = processed_weights.get(b_out_key)
+
+            if W_in is None or W_out is None:
+                return
+            mlp_component.set_processed_weights(W_in, W_out, b_in, b_out)
 
     def _load_unembed_weights(self, verbose: bool = False):
         """Load unembedding weights into the UnembeddingBridge component.
@@ -2081,7 +2140,9 @@ class TransformerBridge(nn.Module):
         q_pre = x
         if f"blocks.{layer}.attn.q.hook_in" in self.hook_dict:
             q_pre = self.hook_dict[f"blocks.{layer}.attn.q.hook_in"](q_pre)
-        q = torch.einsum("bsd,hdk->bhsk", q_pre, W_Q) + b_Q.unsqueeze(
+        # W_Q shape: [n_heads, d_model, d_head], x shape: [batch, seq, d_model]
+        # Result: [batch, n_heads, seq, d_head]
+        q = torch.stack([q_pre @ W_Q[h] for h in range(self.cfg.n_heads)], dim=1) + b_Q.unsqueeze(
             1
         )  # [batch, n_heads, seq, d_head]
         # Use bridge hook point for Q output - reshape to match expected format
@@ -2095,7 +2156,8 @@ class TransformerBridge(nn.Module):
         k_pre = x
         if f"blocks.{layer}.attn.k.hook_in" in self.hook_dict:
             k_pre = self.hook_dict[f"blocks.{layer}.attn.k.hook_in"](k_pre)
-        k = torch.einsum("bsd,hdk->bhsk", k_pre, W_K) + b_K.unsqueeze(
+        # W_K shape: [n_heads, d_model, d_head], x shape: [batch, seq, d_model]
+        k = torch.stack([k_pre @ W_K[h] for h in range(self.cfg.n_heads)], dim=1) + b_K.unsqueeze(
             1
         )  # [batch, n_heads, seq, d_head]
         # Use bridge hook point for K output - reshape to match expected format
@@ -2109,7 +2171,8 @@ class TransformerBridge(nn.Module):
         v_pre = x
         if f"blocks.{layer}.attn.v.hook_in" in self.hook_dict:
             v_pre = self.hook_dict[f"blocks.{layer}.attn.v.hook_in"](v_pre)
-        v = torch.einsum("bsd,hdk->bhsk", v_pre, W_V) + b_V.unsqueeze(
+        # W_V shape: [n_heads, d_model, d_head], x shape: [batch, seq, d_model]
+        v = torch.stack([v_pre @ W_V[h] for h in range(self.cfg.n_heads)], dim=1) + b_V.unsqueeze(
             1
         )  # [batch, n_heads, seq, d_head]
         # Use bridge hook point for V output - reshape to match expected format
@@ -2121,7 +2184,7 @@ class TransformerBridge(nn.Module):
         )
 
         # Scaled dot-product attention
-        scores = torch.einsum("bhqk,bhsk->bhqs", q, k) / (self.cfg.d_head**0.5)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.cfg.d_head**0.5)
 
         # Apply attention scores hook
         if f"blocks.{layer}.attn.hook_attn_scores" in self.hook_dict:
@@ -2137,13 +2200,19 @@ class TransformerBridge(nn.Module):
         if f"blocks.{layer}.attn.hook_pattern" in self.hook_dict:
             attn_weights = self.hook_dict[f"blocks.{layer}.attn.hook_pattern"](attn_weights)
 
-        attn_out = torch.einsum("bhqs,bhsk->bhqk", attn_weights, v)  # [batch, n_heads, seq, d_head]
+        # attn_weights: [batch, n_heads, seq, seq], v: [batch, n_heads, seq, d_head]
+        attn_out = torch.matmul(attn_weights, v)  # [batch, n_heads, seq, d_head]
 
         # Output projection with hooks
         o_pre = attn_out
         if f"blocks.{layer}.attn.o.hook_in" in self.hook_dict:
             o_pre = self.hook_dict[f"blocks.{layer}.attn.o.hook_in"](o_pre)
-        out = torch.einsum("bhsk,hkd->bsd", o_pre, W_O) + b_O  # [batch, seq, d_model]
+        # W_O shape: [n_heads, d_head, d_model], o_pre: [batch, n_heads, seq, d_head]
+        # Result: [batch, seq, d_model]
+        out = (
+            torch.stack([o_pre[:, h] @ W_O[h] for h in range(self.cfg.n_heads)], dim=1).sum(dim=1)
+            + b_O
+        )
         if f"blocks.{layer}.attn.o.hook_out" in self.hook_dict:
             out = self.hook_dict[f"blocks.{layer}.attn.o.hook_out"](out)
 
@@ -2171,28 +2240,33 @@ class TransformerBridge(nn.Module):
         b_O = processed_weights[f"blocks.{layer}.attn.b_O"]  # [d_model]
 
         # Apply Q, K, V projections
-        q = torch.einsum("bsd,hdk->bhsk", x, W_Q) + b_Q.unsqueeze(
+        q = torch.stack([x @ W_Q[h] for h in range(self.cfg.n_heads)], dim=1) + b_Q.unsqueeze(
             1
         )  # [batch, n_heads, seq, d_head]
-        k = torch.einsum("bsd,hdk->bhsk", x, W_K) + b_K.unsqueeze(
+        k = torch.stack([x @ W_K[h] for h in range(self.cfg.n_heads)], dim=1) + b_K.unsqueeze(
             1
         )  # [batch, n_heads, seq, d_head]
-        v = torch.einsum("bsd,hdk->bhsk", x, W_V) + b_V.unsqueeze(
+        v = torch.stack([x @ W_V[h] for h in range(self.cfg.n_heads)], dim=1) + b_V.unsqueeze(
             1
         )  # [batch, n_heads, seq, d_head]
 
         # Scaled dot-product attention
-        scores = torch.einsum("bhqk,bhsk->bhqs", q, k) / (self.cfg.d_head**0.5)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.cfg.d_head**0.5)
 
         # Apply causal mask
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
         scores.masked_fill_(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
         attn_weights = F.softmax(scores, dim=-1)
-        attn_out = torch.einsum("bhqs,bhsk->bhqk", attn_weights, v)  # [batch, n_heads, seq, d_head]
+        attn_out = torch.matmul(attn_weights, v)  # [batch, n_heads, seq, d_head]
 
         # Output projection
-        out = torch.einsum("bhsk,hkd->bsd", attn_out, W_O) + b_O  # [batch, seq, d_model]
+        out = (
+            torch.stack([attn_out[:, h] @ W_O[h] for h in range(self.cfg.n_heads)], dim=1).sum(
+                dim=1
+            )
+            + b_O
+        )  # [batch, seq, d_model]
 
         return out
 
