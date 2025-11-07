@@ -75,7 +75,7 @@ class BlockBridge(GeneralizedComponent):
         super().set_original_component(component)
 
         # Monkey-patch the block's forward method to insert hook_mlp_out
-        self._patch_block_forward()
+        # self._patch_block_forward()
 
     def _patch_block_forward(self):
         """Monkey-patch the HuggingFace block's forward method.

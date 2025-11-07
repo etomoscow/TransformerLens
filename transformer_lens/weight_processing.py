@@ -51,6 +51,43 @@ class ProcessWeights:
         return adapter.translate_transformer_lens_path(tl_key)
 
     @staticmethod
+    def _safe_get_tensor(
+        state_dict: Dict[str, torch.Tensor],
+        tl_key: str,
+        adapter=None,
+        default: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """Safely get a tensor from state_dict, handling optional parameters.
+
+        This is the recommended way to access parameters that may not exist in all architectures
+        (e.g., biases in Qwen2/LLaMA/Gemma). Returns None if the parameter doesn't exist,
+        rather than raising a KeyError.
+
+        Args:
+            state_dict: Model state dictionary
+            tl_key: TransformerLens format parameter key (e.g., "blocks.0.attn.b_Q")
+            adapter: Optional architecture adapter for key translation
+            default: Optional default value to return if key not found (defaults to None)
+
+        Returns:
+            The tensor if found, otherwise the default value (None if not specified)
+
+        Examples:
+            # Get optional bias (may be None for Qwen2/LLaMA)
+            b_Q = ProcessWeights._safe_get_tensor(state_dict, "blocks.0.attn.b_Q", adapter)
+
+            # Get required weight (will be None if missing, can check explicitly)
+            W_Q = ProcessWeights._safe_get_tensor(state_dict, "blocks.0.attn.W_Q", adapter)
+            if W_Q is None:
+                raise ValueError("Required weight W_Q not found")
+        """
+        # Translate key using adapter if provided
+        actual_key = ProcessWeights._get_param_key(tl_key, adapter)
+
+        # Return the tensor if it exists, otherwise the default
+        return state_dict.get(actual_key, default)
+
+    @staticmethod
     def fold_layer_norm_bias_single(
         w_tensor: torch.Tensor,
         b_tensor: torch.Tensor,
@@ -105,24 +142,37 @@ class ProcessWeights:
         wq_tensor: torch.Tensor,
         wk_tensor: torch.Tensor,
         wv_tensor: torch.Tensor,
-        bq_tensor: torch.Tensor,
-        bk_tensor: torch.Tensor,
-        bv_tensor: torch.Tensor,
+        bq_tensor: Optional[torch.Tensor],
+        bk_tensor: Optional[torch.Tensor],
+        bv_tensor: Optional[torch.Tensor],
         ln_bias: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Fold LayerNorm bias into attention biases.
 
         Args:
             wq_tensor, wk_tensor, wv_tensor: Weight tensors [n_heads, d_model, d_head]
-            bq_tensor, bk_tensor, bv_tensor: Bias tensors [n_heads, d_head]
+            bq_tensor, bk_tensor, bv_tensor: Bias tensors [n_heads, d_head] or None if no bias
             ln_bias: LayerNorm bias [d_model]
 
         Returns:
-            Tuple of (new_bq, new_bk, new_bv) with folded biases
+            Tuple of (new_bq, new_bk, new_bv) with folded biases (None if input bias was None)
         """
-        new_bq = ProcessWeights.fold_layer_norm_bias_single(wq_tensor, bq_tensor, ln_bias)
-        new_bk = ProcessWeights.fold_layer_norm_bias_single(wk_tensor, bk_tensor, ln_bias)
-        new_bv = ProcessWeights.fold_layer_norm_bias_single(wv_tensor, bv_tensor, ln_bias)
+        # Only fold biases if they exist - models like Qwen2 don't have biases
+        new_bq = (
+            ProcessWeights.fold_layer_norm_bias_single(wq_tensor, bq_tensor, ln_bias)
+            if bq_tensor is not None
+            else None
+        )
+        new_bk = (
+            ProcessWeights.fold_layer_norm_bias_single(wk_tensor, bk_tensor, ln_bias)
+            if bk_tensor is not None
+            else None
+        )
+        new_bv = (
+            ProcessWeights.fold_layer_norm_bias_single(wv_tensor, bv_tensor, ln_bias)
+            if bv_tensor is not None
+            else None
+        )
 
         return new_bq, new_bk, new_bv
 
@@ -248,19 +298,24 @@ class ProcessWeights:
             )
         else:
             # State dict is already in TransformerLens format - use directly
-            # Handle case where some keys might not exist (e.g., grouped query attention)
-            wq_tensor = state_dict.get(f"blocks.{layer}.attn.W_Q", None)  # type: ignore[assignment]
-            wk_tensor = state_dict.get(f"blocks.{layer}.attn.W_K", None)  # type: ignore[assignment]
-            wv_tensor = state_dict.get(f"blocks.{layer}.attn.W_V", None)  # type: ignore[assignment]
-            bq_tensor = state_dict.get(f"blocks.{layer}.attn.b_Q", None)  # type: ignore[assignment]
-            bk_tensor = state_dict.get(f"blocks.{layer}.attn.b_K", None)  # type: ignore[assignment]
-            bv_tensor = state_dict.get(f"blocks.{layer}.attn.b_V", None)  # type: ignore[assignment]
+            # Handle case where some keys might not exist (e.g., grouped query attention or optional biases)
+            wq_tensor = ProcessWeights._safe_get_tensor(state_dict, f"blocks.{layer}.attn.W_Q", adapter=None)  # type: ignore[assignment]
+            wk_tensor = ProcessWeights._safe_get_tensor(state_dict, f"blocks.{layer}.attn.W_K", adapter=None)  # type: ignore[assignment]
+            wv_tensor = ProcessWeights._safe_get_tensor(state_dict, f"blocks.{layer}.attn.W_V", adapter=None)  # type: ignore[assignment]
+            bq_tensor = ProcessWeights._safe_get_tensor(state_dict, f"blocks.{layer}.attn.b_Q", adapter=None)  # type: ignore[assignment]
+            bk_tensor = ProcessWeights._safe_get_tensor(state_dict, f"blocks.{layer}.attn.b_K", adapter=None)  # type: ignore[assignment]
+            bv_tensor = ProcessWeights._safe_get_tensor(state_dict, f"blocks.{layer}.attn.b_V", adapter=None)  # type: ignore[assignment]
 
         # Extract LayerNorm parameters using same format detection
         if uses_tl_format:
-            ln1_b = state_dict.get(f"blocks.{layer}.ln1.b", None)
-            ln1_w = state_dict.get(f"blocks.{layer}.ln1.w", None)
+            ln1_b = ProcessWeights._safe_get_tensor(
+                state_dict, f"blocks.{layer}.ln1.b", adapter=None
+            )
+            ln1_w = ProcessWeights._safe_get_tensor(
+                state_dict, f"blocks.{layer}.ln1.w", adapter=None
+            )
         else:
+            # For HF format, we already have the translated keys - use them directly
             ln1_b = state_dict.get(ln1_b_key, None)
             ln1_w = state_dict.get(ln1_w_key, None)
 
@@ -617,23 +672,38 @@ class ProcessWeights:
                 state_dict[hf_w_v_key] = ProcessWeights.convert_tensor_to_hf_format(
                     wv_tensor, f"blocks.{layer}.attn.W_V", adapter, cfg, layer  # type: ignore[arg-type]
                 )
-                state_dict[hf_b_q_key] = ProcessWeights.convert_tensor_to_hf_format(
+
+                # Only store biases if they exist (models like Qwen2/LLaMA may not have attention biases)
+                converted_bq = ProcessWeights.convert_tensor_to_hf_format(
                     bq_tensor, f"blocks.{layer}.attn.b_Q", adapter, cfg, layer  # type: ignore[arg-type]
                 )
-                state_dict[hf_b_k_key] = ProcessWeights.convert_tensor_to_hf_format(
+                if converted_bq is not None:
+                    state_dict[hf_b_q_key] = converted_bq
+
+                converted_bk = ProcessWeights.convert_tensor_to_hf_format(
                     bk_tensor, f"blocks.{layer}.attn.b_K", adapter, cfg, layer  # type: ignore[arg-type]
                 )
-                state_dict[hf_b_v_key] = ProcessWeights.convert_tensor_to_hf_format(
+                if converted_bk is not None:
+                    state_dict[hf_b_k_key] = converted_bk
+
+                converted_bv = ProcessWeights.convert_tensor_to_hf_format(
                     bv_tensor, f"blocks.{layer}.attn.b_V", adapter, cfg, layer  # type: ignore[arg-type]
                 )
+                if converted_bv is not None:
+                    state_dict[hf_b_v_key] = converted_bv
         else:
             # Store directly (TransformerLens format)
             state_dict[keys["W_Q"]] = wq_tensor  # type: ignore[assignment]
             state_dict[keys["W_K"]] = wk_tensor  # type: ignore[assignment]
             state_dict[keys["W_V"]] = wv_tensor  # type: ignore[assignment]
-            state_dict[keys["b_Q"]] = bq_tensor  # type: ignore[assignment]
-            state_dict[keys["b_K"]] = bk_tensor  # type: ignore[assignment]
-            state_dict[keys["b_V"]] = bv_tensor  # type: ignore[assignment]
+
+            # Only store biases if they exist (models like Qwen2/LLaMA may not have attention biases)
+            if bq_tensor is not None:
+                state_dict[keys["b_Q"]] = bq_tensor  # type: ignore[assignment]
+            if bk_tensor is not None:
+                state_dict[keys["b_K"]] = bk_tensor  # type: ignore[assignment]
+            if bv_tensor is not None:
+                state_dict[keys["b_V"]] = bv_tensor  # type: ignore[assignment]
 
     @staticmethod
     def _detect_unembed_format(state_dict: Dict[str, torch.Tensor], adapter) -> tuple[bool, bool]:
@@ -996,47 +1066,39 @@ class ProcessWeights:
                         mlp_W_out_key = None
                         mlp_b_out_key = None
 
-            # Validate that attention keys exist before accessing them
+            # Validate that attention weight key exists before accessing it
             if attn_W_O_key not in state_dict:
                 raise KeyError(
                     f"Expected attention W_O key '{attn_W_O_key}' not found in state_dict for layer {l}. "
-                    f"Available keys: {list(state_dict.keys())[:10]}..."
-                )
-            if attn_b_O_key not in state_dict:
-                raise KeyError(
-                    f"Expected attention b_O key '{attn_b_O_key}' not found in state_dict for layer {l}. "
                     f"Available keys: {list(state_dict.keys())[:10]}..."
                 )
 
             state_dict[attn_W_O_key] = state_dict[attn_W_O_key] - state_dict[attn_W_O_key].mean(
                 -1, keepdim=True
             )  # W_O is [head_index, d_model, d_head]
-            state_dict[attn_b_O_key] = (
-                state_dict[attn_b_O_key] - state_dict[attn_b_O_key].mean()
-            )  # b_O is [d_model]
-            if (
-                not getattr(cfg, "attn_only", False)
-                and mlp_W_out_key is not None
-                and mlp_b_out_key is not None
-            ):
-                # Validate that MLP keys exist before accessing them
+
+            # Only center bias if it exists (models like Qwen2/LLaMA may not have attention biases)
+            if attn_b_O_key in state_dict:
+                state_dict[attn_b_O_key] = (
+                    state_dict[attn_b_O_key] - state_dict[attn_b_O_key].mean()
+                )  # b_O is [d_model]
+            if not getattr(cfg, "attn_only", False) and mlp_W_out_key is not None:
+                # Validate that MLP weight key exists before accessing it
                 if mlp_W_out_key not in state_dict:
                     raise KeyError(
                         f"Expected MLP W_out key '{mlp_W_out_key}' not found in state_dict for layer {l}. "
-                        f"Available keys: {list(state_dict.keys())[:10]}..."
-                    )
-                if mlp_b_out_key not in state_dict:
-                    raise KeyError(
-                        f"Expected MLP b_out key '{mlp_b_out_key}' not found in state_dict for layer {l}. "
                         f"Available keys: {list(state_dict.keys())[:10]}..."
                     )
 
                 state_dict[mlp_W_out_key] = state_dict[mlp_W_out_key] - state_dict[
                     mlp_W_out_key
                 ].mean(-1, keepdim=True)
-                state_dict[mlp_b_out_key] = (
-                    state_dict[mlp_b_out_key] - state_dict[mlp_b_out_key].mean()
-                )
+
+                # Only center bias if it exists (models like Qwen2/LLaMA may not have MLP biases)
+                if mlp_b_out_key is not None and mlp_b_out_key in state_dict:
+                    state_dict[mlp_b_out_key] = (
+                        state_dict[mlp_b_out_key] - state_dict[mlp_b_out_key].mean()
+                    )
         return state_dict
 
     @staticmethod
@@ -1184,6 +1246,10 @@ class ProcessWeights:
 
                 # Skip if bias is empty (model doesn't use biases)
                 if b_V.numel() == 0:
+                    continue
+
+                # Skip if b_O doesn't exist (models like Qwen2/LLaMA may not have output biases)
+                if b_O_key not in state_dict:
                     continue
 
                 W_O = state_dict[W_O_key]
@@ -2129,7 +2195,7 @@ class ProcessWeights:
         model_state_dict: Dict[str, torch.Tensor],
         cfg: Any,
         layer_idx: Optional[int] = None,
-    ) -> torch.Tensor:
+    ) -> Optional[torch.Tensor]:
         """Convert a tensor from its original format to TransformerLens format.
 
         Args:
@@ -2140,7 +2206,8 @@ class ProcessWeights:
             layer_idx: Layer index (required for layer-specific parameters)
 
         Returns:
-            The tensor converted to TransformerLens format
+            The tensor converted to TransformerLens format, or None if the parameter doesn't exist
+            (which is valid for optional parameters like biases in models that don't use them)
         """
         if adapter is None:
             raise ValueError("Adapter must be provided for tensor conversion")
@@ -2149,8 +2216,10 @@ class ProcessWeights:
         hf_key = adapter.translate_transformer_lens_path(param_name)
 
         # Get the tensor from the model's state dict
+        # Return None if key doesn't exist - this is valid for optional parameters
+        # (e.g., biases in Qwen2, LLaMA which don't have biases on all layers)
         if hf_key not in model_state_dict:
-            raise KeyError(f"Key {hf_key} not found in model state dict")
+            return None
 
         tensor = model_state_dict[hf_key]
 
@@ -2194,24 +2263,27 @@ class ProcessWeights:
 
     @staticmethod
     def convert_tensor_to_hf_format(
-        tensor: torch.Tensor,
+        tensor: Optional[torch.Tensor],
         param_name: str,
         adapter: Any,
         cfg: Any,
         layer_idx: Optional[int] = None,
-    ) -> torch.Tensor:
+    ) -> Optional[torch.Tensor]:
         """Convert a tensor from TransformerLens format back to its original format.
 
         Args:
-            tensor: The tensor to convert (in TransformerLens format)
+            tensor: The tensor to convert (in TransformerLens format), or None if parameter is optional
             param_name: The parameter name in TransformerLens format (e.g., "blocks.0.attn.W_Q")
             adapter: The architecture adapter for component retrieval and key translation
             cfg: Model configuration
             layer_idx: Layer index (required for layer-specific parameters)
 
         Returns:
-            The tensor converted back to original format
+            The tensor converted back to original format, or None if tensor was None
         """
+        if tensor is None:
+            return None  # Parameter is optional (e.g., biases in Qwen2/LLaMA)
+
         if adapter is None:
             raise ValueError("Adapter must be provided for tensor conversion")
 
