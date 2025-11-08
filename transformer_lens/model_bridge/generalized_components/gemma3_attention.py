@@ -122,3 +122,38 @@ class Gemma3AttentionBridge(AttentionBridge):
         inputs["attention_mask"] = None
 
         return inputs
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        """Simplified forward pass - minimal wrapping around original component.
+
+        This override strips back the complex processing in AttentionBridge._process_output()
+        to do minimal wrapping: hook_in → delegate → hook_out.
+
+        This ensures we match HuggingFace's exact output without any intermediate
+        pattern extraction or re-application logic.
+
+        Args:
+            *args: Input arguments to pass to the original component
+            **kwargs: Input keyword arguments to pass to the original component
+
+        Returns:
+            The output from the original component, with only input/output hooks applied
+        """
+        if self.original_component is None:
+            raise RuntimeError(
+                f"Original component not set for {self.name}. Call set_original_component() first."
+            )
+
+        # Apply input hook to hidden_states
+        # Gemma3Attention always expects hidden_states kwarg
+        kwargs["hidden_states"] = self.hook_in(kwargs["hidden_states"])
+
+        # Forward through original component
+        output = self.original_component(*args, **kwargs)
+
+        # Apply hook_out to the output
+        # HF Gemma3Attention returns a tuple: (hidden_states, attention_weights)
+        # We only hook the first element (hidden_states)
+        output = (self.hook_out(output[0]),) + output[1:]
+
+        return output

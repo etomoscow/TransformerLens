@@ -114,10 +114,10 @@ class NormalizationBridge(GeneralizedComponent):
         return output
 
     def _hf_autograd_forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass matching HookedTransformer's LayerNorm computation exactly.
+        """Forward pass delegating directly to HuggingFace's normalization implementation.
 
-        This replicates HookedTransformer's LayerNorm forward method to ensure
-        the same computational graph and gradients.
+        This ensures we match HF's computation exactly by delegating to the
+        original component rather than reimplementing the logic.
 
         Args:
             x: Input tensor
@@ -129,39 +129,9 @@ class NormalizationBridge(GeneralizedComponent):
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
 
-        # Handle different eps attribute names based on config
-        # Most models use 'eps', but some (like Llama) use 'variance_epsilon'
-        eps_attr = getattr(self.config, "eps_attr", "eps")
-        eps = getattr(self.original_component, eps_attr, 1e-5)
-        weight = self.original_component.weight
-        bias = getattr(self.original_component, "bias", None)  # RMSNorm doesn't have bias
-
-        # Match HookedTransformer LayerNorm computation exactly
-        # dtype handling: convert to float32 if not float32/float64
-        original_dtype = x.dtype
-        if (
-            self.config is not None
-            and hasattr(self.config, "dtype")
-            and self.config.dtype not in [torch.float32, torch.float64]
-        ):
-            x = x.to(torch.float32)
-
-        x = x - x.mean(-1, keepdim=True)
-        scale = self.hook_scale((x.pow(2).mean(-1, keepdim=True) + eps).sqrt())  # type: ignore[operator]
-        x = self.hook_normalized(x / scale)
-
-        # Convert back to original dtype or config dtype
-        if self.config is not None and hasattr(self.config, "dtype"):
-            x = x.to(self.config.dtype)  # type: ignore[union-attr]
-        else:
-            # If no config dtype, use the weight's dtype to ensure consistency
-            x = x.to(weight.dtype)  # type: ignore[arg-type]
-
-        # Apply weight and bias (bias may be None for RMSNorm)
-        if bias is not None:
-            return x * weight + bias  # type: ignore[operator]
-        else:
-            return x * weight  # type: ignore[operator]
+        # Simply delegate to the original HuggingFace component
+        # This ensures exact numerical match including all dtype handling and computational graph
+        return self.original_component(x)
 
     def _layernorm_pre_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass matching LayerNormPre behavior exactly.

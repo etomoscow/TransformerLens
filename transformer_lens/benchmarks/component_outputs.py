@@ -324,11 +324,11 @@ class ComponentBenchmarker:
                 batch, seq_len, _ = test_input.shape
                 shared_token_indices = torch.randint(0, self.cfg.d_vocab, (batch, seq_len))
 
-            # Generate shared inputs for attention/MLP components that have get_random_inputs()
+            # Generate shared inputs for attention/MLP/rotary components that have get_random_inputs()
             # This is needed for model-specific inputs like position_embeddings or attention_mask
             shared_inputs = None
             if (
-                ("attn" in component_path or "mlp" in component_path)
+                ("attn" in component_path or "mlp" in component_path or "rotary" in component_path)
                 and hasattr(bridge_component, "get_random_inputs")
                 and callable(getattr(bridge_component, "get_random_inputs"))
             ):
@@ -414,7 +414,13 @@ class ComponentBenchmarker:
         """
         # Use shared inputs if provided (generated from bridge component's get_random_inputs())
         if shared_inputs is not None:
-            return component(**shared_inputs)
+            # Check if shared_inputs contains positional args
+            if "args" in shared_inputs:
+                # Call with positional args (e.g., for rotary embeddings)
+                return component(*shared_inputs["args"])
+            else:
+                # Call with keyword args (e.g., for attention)
+                return component(**shared_inputs)
 
         # Fallback: Use legacy calling conventions for components without get_random_inputs()
         if "attn" in component_path and "attn" == component_path.split(".")[-1]:
@@ -570,10 +576,25 @@ def benchmark_model(
     # Load models
     print(f"Loading models: {model_name}")
     bridge_model = TransformerBridge.boot_transformers(model_name, device=device)  # type: ignore[attr-defined]
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, device_map=device)
+
+    # Load HF model with same attn_implementation as bridge model (if specified)
+    # This ensures numerical consistency between bridge and HF models
+    hf_kwargs = {"device_map": device}
+    if hasattr(bridge_model.adapter.cfg, 'attn_implementation') and bridge_model.adapter.cfg.attn_implementation is not None:
+        hf_kwargs["attn_implementation"] = bridge_model.adapter.cfg.attn_implementation
+
+    hf_model = AutoModelForCausalLM.from_pretrained(model_name, **hf_kwargs)
+
+    # Set models to eval mode (disable dropout, etc.)
+    bridge_model.eval()
+    hf_model.eval()
 
     # Get adapter
     adapter = bridge_model.adapter
+
+    # Set up component testing (e.g., sync rotary_emb references for Gemma-3)
+    # Pass bridge_model so adapter can set up actual bridge instances, not just templates
+    adapter.setup_component_testing(hf_model, bridge_model=bridge_model)
 
     # Create benchmarker
     benchmarker = ComponentBenchmarker(
