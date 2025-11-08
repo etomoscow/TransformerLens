@@ -124,12 +124,12 @@ class AttentionBridge(GeneralizedComponent):
         # Wrap HF attention forward to capture scores before softmax (unless maintaining native)
         # Models with custom attention (e.g., GPT-OSS with attention sinks) set
         # maintain_native_attention=True to preserve their original behavior
-        if (
-            not self.maintain_native_attention
-            and hasattr(self, "original_component")
-            and self.original_component is not None
-        ):
-            self._wrap_hf_attention_forward()
+        # if (
+        #     not self.maintain_native_attention
+        #     and hasattr(self, "original_component")
+        #     and self.original_component is not None
+        # ):
+        #     self._wrap_hf_attention_forward()
 
         self._hf_forward_wrapped = True
 
@@ -771,7 +771,8 @@ class AttentionBridge(GeneralizedComponent):
         """Forward pass through the attention layer.
 
         This method forwards all arguments to the original component and applies hooks
-        to the output, or uses processed weights if available.
+        to the output. If processed weights have been set via set_processed_weights(),
+        the original_component will use those weights directly.
 
         Args:
             *args: Input arguments to pass to the original component
@@ -780,10 +781,6 @@ class AttentionBridge(GeneralizedComponent):
         Returns:
             The output from the original component, with hooks applied
         """
-        # Check if we're using processed weights from a reference model (layer norm folding case)
-        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
-            return self._forward_with_processed_weights(*args, **kwargs)
-
         if self.original_component is None:
             raise RuntimeError(
                 f"Original component not set for {self.name}. Call set_original_component() first."
@@ -797,7 +794,7 @@ class AttentionBridge(GeneralizedComponent):
         elif len(args) > 0 and isinstance(args[0], torch.Tensor):
             args = (self.hook_in(args[0]),) + args[1:]
 
-        # Forward through original component
+        # Forward through original component (uses processed weights if set_processed_weights was called)
         output = self.original_component(*args, **kwargs)
 
         # Process output
@@ -816,7 +813,10 @@ class AttentionBridge(GeneralizedComponent):
         b_V: Optional[torch.Tensor] = None,
         b_O: Optional[torch.Tensor] = None,
     ) -> None:
-        """Set the processed weights to use when layer norm is folded.
+        """Set the processed weights by loading them into the original component.
+
+        This loads the processed weights directly into the original_component's parameters,
+        so when forward() delegates to original_component, it uses the processed weights.
 
         Args:
             W_Q: Query weight tensor [n_heads, d_model, d_head]
@@ -828,15 +828,80 @@ class AttentionBridge(GeneralizedComponent):
             b_V: Value bias tensor [n_heads, d_head] (optional)
             b_O: Output bias tensor [d_model] (optional)
         """
-        self._processed_W_Q = W_Q
-        self._processed_W_K = W_K
-        self._processed_W_V = W_V
-        self._processed_W_O = W_O
-        self._processed_b_Q = b_Q
-        self._processed_b_K = b_K
-        self._processed_b_V = b_V
-        self._processed_b_O = b_O
-        self._use_processed_weights = True
+        if self.original_component is None:
+            raise RuntimeError(f"Original component not set for {self.name}")
+
+        # Convert from TransformerLens 3D format to HuggingFace 2D format
+        # TL: W_Q/W_K/W_V [n_heads, d_model, d_head], W_O [n_heads, d_head, d_model]
+        # HF: weights are [d_model, d_model] (or [d_model, 3*d_model] for combined c_attn)
+
+        n_heads = W_Q.shape[0]
+        d_model = W_Q.shape[1]
+        d_head = W_Q.shape[2]
+
+        # Flatten 3D to 2D: [n_heads, d_model, d_head] -> [d_model, n_heads * d_head]
+        W_Q_2d = W_Q.transpose(0, 1).reshape(d_model, n_heads * d_head)
+        W_K_2d = W_K.transpose(0, 1).reshape(d_model, n_heads * d_head)
+        W_V_2d = W_V.transpose(0, 1).reshape(d_model, n_heads * d_head)
+        # W_O: [n_heads, d_head, d_model] -> [n_heads * d_head, d_model]
+        W_O_2d = W_O.transpose(0, 1).reshape(n_heads * d_head, d_model)
+
+        # Flatten biases if present
+        b_Q_1d = b_Q.reshape(-1) if b_Q is not None else None
+        b_K_1d = b_K.reshape(-1) if b_K is not None else None
+        b_V_1d = b_V.reshape(-1) if b_V is not None else None
+
+        # Load processed weights into the original component's parameters
+        for name, param in self.original_component.named_parameters():
+            if 'weight' in name.lower():
+                # GPT-2 style: c_attn (combined QKV), c_proj (output)
+                # GPT-2 uses Conv1D with weight shape [in_features, out_features] (NO transpose)
+                # Other models use Linear with weight shape [out_features, in_features] (transpose needed)
+                if 'c_attn' in name:
+                    # Combined QKV projection
+                    combined = torch.cat([W_Q_2d, W_K_2d, W_V_2d], dim=1)  # [d_model, 3*d_model]
+                    # Check original shape to determine if we need transpose
+                    if param.shape[0] == combined.shape[0]:
+                        # Conv1D format [in_features, out_features] - no transpose
+                        param.data = combined.contiguous()
+                    else:
+                        # Linear format [out_features, in_features] - transpose needed
+                        param.data = combined.T.contiguous()
+                elif 'c_proj' in name or 'out_proj' in name or 'o_proj' in name or 'dense' in name:
+                    # Output projection
+                    # Check original shape to determine if we need transpose
+                    if param.shape[0] == W_O_2d.shape[1]:
+                        # Conv1D format [in_features, out_features] - transpose needed
+                        param.data = W_O_2d.contiguous()
+                    else:
+                        # Linear format [out_features, in_features] - no transpose
+                        param.data = W_O_2d.T.contiguous()
+                # Llama/Gemma style: separate q_proj, k_proj, v_proj, o_proj (always Linear, always transpose)
+                elif 'q_proj' in name or name.endswith('q.weight'):
+                    param.data = W_Q_2d.T.contiguous()
+                elif 'k_proj' in name or name.endswith('k.weight'):
+                    param.data = W_K_2d.T.contiguous()
+                elif 'v_proj' in name or name.endswith('v.weight'):
+                    param.data = W_V_2d.T.contiguous()
+            elif 'bias' in name.lower():
+                # GPT-2 style biases
+                if 'c_attn' in name:
+                    if b_Q_1d is not None and b_K_1d is not None and b_V_1d is not None:
+                        combined_bias = torch.cat([b_Q_1d, b_K_1d, b_V_1d])
+                        param.data = combined_bias.contiguous()
+                elif 'c_proj' in name or 'out_proj' in name or 'o_proj' in name or 'dense' in name:
+                    if b_O is not None:
+                        param.data = b_O.contiguous()
+                # Llama/Gemma style biases
+                elif 'q_proj' in name or name.endswith('q.bias'):
+                    if b_Q_1d is not None:
+                        param.data = b_Q_1d.contiguous()
+                elif 'k_proj' in name or name.endswith('k.bias'):
+                    if b_K_1d is not None:
+                        param.data = b_K_1d.contiguous()
+                elif 'v_proj' in name or name.endswith('v.bias'):
+                    if b_V_1d is not None:
+                        param.data = b_V_1d.contiguous()
 
     def _forward_with_processed_weights(self, *args: Any, **kwargs: Any) -> tuple[Any, Any]:
         """Direct implementation of reference model's attention computation with hooks."""
