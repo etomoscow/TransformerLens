@@ -124,12 +124,12 @@ class AttentionBridge(GeneralizedComponent):
         # Wrap HF attention forward to capture scores before softmax (unless maintaining native)
         # Models with custom attention (e.g., GPT-OSS with attention sinks) set
         # maintain_native_attention=True to preserve their original behavior
-        # if (
-        #     not self.maintain_native_attention
-        #     and hasattr(self, "original_component")
-        #     and self.original_component is not None
-        # ):
-        #     self._wrap_hf_attention_forward()
+        if (
+            not self.maintain_native_attention
+            and hasattr(self, "original_component")
+            and self.original_component is not None
+        ):
+            self._wrap_hf_attention_forward()
 
         self._hf_forward_wrapped = True
 
@@ -830,6 +830,16 @@ class AttentionBridge(GeneralizedComponent):
         """
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
+
+        self._processed_W_Q = W_Q
+        self._processed_W_K = W_K
+        self._processed_W_V = W_V
+        self._processed_W_O = W_O
+        self._processed_b_Q = b_Q
+        self._processed_b_K = b_K
+        self._processed_b_V = b_V
+        self._processed_b_O = b_O
+        self._use_processed_weights = True
 
         # Convert from TransformerLens 3D format to HuggingFace 2D format
         # TL: W_Q/W_K/W_V [n_heads, d_model, d_head], W_O [n_heads, d_head, d_model]
