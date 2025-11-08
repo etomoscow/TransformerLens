@@ -250,6 +250,14 @@ class GeneralizedComponent(nn.Module):
                 f"Original component not set for {self.name}. Call set_original_component() first."
             )
 
+        # Get the target dtype from the original component's parameters
+        target_dtype = None
+        try:
+            target_dtype = next(original_component.parameters()).dtype
+        except StopIteration:
+            # Component has no parameters, keep inputs as-is
+            pass
+
         # Try to find the main input
         input_arg_names = [
             "input",
@@ -263,12 +271,19 @@ class GeneralizedComponent(nn.Module):
         # Try kwargs first
         for name in input_arg_names:
             if name in kwargs:
-                kwargs[name] = self.hook_in(kwargs[name])
+                hooked = self.hook_in(kwargs[name])
+                # Cast to target dtype if needed and input is a float tensor
+                if target_dtype is not None and isinstance(hooked, torch.Tensor) and hooked.is_floating_point():
+                    hooked = hooked.to(dtype=target_dtype)
+                kwargs[name] = hooked
                 input_found = True
                 break
         # If not in kwargs, try first positional arg
         if not input_found and len(args) > 0 and isinstance(args[0], torch.Tensor):
             hooked_input = self.hook_in(args[0])
+            # Cast to target dtype if needed and input is a float tensor
+            if target_dtype is not None and hooked_input.is_floating_point():
+                hooked_input = hooked_input.to(dtype=target_dtype)
             args = (hooked_input,) + args[1:]
             input_found = True
         # Call the original component's forward

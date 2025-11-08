@@ -103,8 +103,11 @@ def map_default_transformer_lens_config(hf_config):
     elif hasattr(tl_config, "d_model"):  # Default to 4x for GPT2-style
         tl_config.d_mlp = getattr(hf_config, "n_inner", 4 * tl_config.d_model)
 
-    # Calculate d_head if we have both d_model and n_heads
-    if hasattr(tl_config, "d_model") and hasattr(tl_config, "n_heads"):
+    # Map head dimension (prefer explicit head_dim from config over calculation)
+    if hasattr(hf_config, "head_dim") and hf_config.head_dim is not None:
+        tl_config.d_head = hf_config.head_dim
+    elif hasattr(tl_config, "d_model") and hasattr(tl_config, "n_heads"):
+        # Calculate d_head if we have both d_model and n_heads
         tl_config.d_head = tl_config.d_model // tl_config.n_heads
 
     # Set activation function
@@ -118,6 +121,10 @@ def map_default_transformer_lens_config(hf_config):
     # Set number of experts per token
     if hasattr(hf_config, "num_experts_per_tok"):
         tl_config.experts_per_token = hf_config.num_experts_per_tok
+
+    # Set sliding window size for models with local attention
+    if hasattr(hf_config, "sliding_window") and hf_config.sliding_window is not None:
+        tl_config.sliding_window = hf_config.sliding_window
 
     # Set common defaults for transformer models
     tl_config.default_prepend_bos = True

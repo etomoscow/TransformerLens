@@ -133,7 +133,14 @@ def run_benchmark_suite(
     try:
         if verbose:
             print("Loading TransformerBridge (unprocessed)...")
-        bridge_unprocessed = TransformerBridge.boot_transformers(model_name, device=device)  # type: ignore[attr-defined]
+        # Detect dtype from HF model if available, otherwise use float32
+        bridge_dtype = torch.float32
+        if hf_model is not None:
+            try:
+                bridge_dtype = next(hf_model.parameters()).dtype
+            except StopIteration:
+                pass
+        bridge_unprocessed = TransformerBridge.boot_transformers(model_name, device=device, dtype=bridge_dtype)  # type: ignore[attr-defined]
         if verbose:
             print("✓ TransformerBridge loaded (unprocessed)\n")
     except Exception as e:
@@ -316,7 +323,14 @@ def run_benchmark_suite(
     try:
         if verbose:
             print("Loading TransformerBridge (processed)...")
-        bridge_processed = TransformerBridge.boot_transformers(model_name, device=device)  # type: ignore[attr-defined]
+        # Use same dtype detection as Phase 1
+        bridge_dtype = torch.float32
+        if hf_model is not None:
+            try:
+                bridge_dtype = next(hf_model.parameters()).dtype
+            except StopIteration:
+                pass
+        bridge_processed = TransformerBridge.boot_transformers(model_name, device=device, dtype=bridge_dtype)  # type: ignore[attr-defined]
         bridge_processed.enable_compatibility_mode(disable_warnings=True)
         if verbose:
             print("✓ TransformerBridge compatibility mode enabled (processed)\n")

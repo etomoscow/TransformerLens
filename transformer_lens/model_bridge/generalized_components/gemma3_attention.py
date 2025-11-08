@@ -145,14 +145,30 @@ class PositionEmbeddingsAttentionBridge(AttentionBridge):
                 f"Original component not set for {self.name}. Call set_original_component() first."
             )
 
+        # Get the target dtype from the original component's parameters
+        target_dtype = None
+        try:
+            target_dtype = next(self.original_component.parameters()).dtype
+        except StopIteration:
+            # Component has no parameters, keep inputs as-is
+            pass
+
         # Apply input hook to hidden_states
         # Gemma3Attention expects hidden_states kwarg, but in compatibility mode
         # it may be passed as a positional argument
         if "hidden_states" in kwargs:
-            kwargs["hidden_states"] = self.hook_in(kwargs["hidden_states"])
+            hooked = self.hook_in(kwargs["hidden_states"])
+            # Cast to target dtype if needed
+            if target_dtype is not None and isinstance(hooked, torch.Tensor) and hooked.is_floating_point():
+                hooked = hooked.to(dtype=target_dtype)
+            kwargs["hidden_states"] = hooked
         elif len(args) > 0:
             # hidden_states passed as first positional argument (compatibility mode)
-            args = (self.hook_in(args[0]),) + args[1:]
+            hooked = self.hook_in(args[0])
+            # Cast to target dtype if needed
+            if target_dtype is not None and isinstance(hooked, torch.Tensor) and hooked.is_floating_point():
+                hooked = hooked.to(dtype=target_dtype)
+            args = (hooked,) + args[1:]
             # Move it to kwargs for HF compatibility
             kwargs["hidden_states"] = args[0]
             args = args[1:]

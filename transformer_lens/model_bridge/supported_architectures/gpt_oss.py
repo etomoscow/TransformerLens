@@ -8,12 +8,12 @@ from transformer_lens.conversion_utils.conversion_steps import (
 )
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
-    AttentionBridge,
     BlockBridge,
     EmbeddingBridge,
     LinearBridge,
     MoEBridge,
     NormalizationBridge,
+    PositionEmbeddingsAttentionBridge,
     RotaryEmbeddingBridge,
     UnembeddingBridge,
 )
@@ -74,18 +74,15 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
                         config=self.cfg,
                         use_native_layernorm_autograd=False,  # Avoid activation mismatches with RMSNorm
                     ),
-                    "attn": AttentionBridge(
+                    "attn": PositionEmbeddingsAttentionBridge(
                         name="self_attn",
                         config=self.cfg,
-                        requires_position_embeddings=True,  # GPT-OSS requires position_embeddings (rotary)
-                        requires_attention_mask=True,  # GPT-OSS requires attention_mask
                         submodules={
                             "q": LinearBridge(name="q_proj"),
                             "k": LinearBridge(name="k_proj"),
                             "v": LinearBridge(name="v_proj"),
                             "o": LinearBridge(name="o_proj"),
                         },
-                        maintain_native_attention=True,  # Preserve GPT-OSS attention sinks
                     ),
                     "ln2": NormalizationBridge(
                         name="post_attention_layernorm",
