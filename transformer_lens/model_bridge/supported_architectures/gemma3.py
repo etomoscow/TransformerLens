@@ -19,6 +19,9 @@ from transformer_lens.model_bridge.generalized_components import (
 from transformer_lens.model_bridge.generalized_components.gemma2_rms_normalization import (
     Gemma2RMSNormalizationBridge,
 )
+from transformer_lens.model_bridge.generalized_components.gemma3_attention import (
+    Gemma3AttentionBridge,
+)
 
 
 class Gemma3ArchitectureAdapter(ArchitectureAdapter):
@@ -100,10 +103,9 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
                     "ln2_post": Gemma2RMSNormalizationBridge(
                         name="post_feedforward_layernorm", config=self.cfg
                     ),
-                    "attn": AttentionBridge(
+                    "attn": Gemma3AttentionBridge(
                         name="self_attn",
                         config=self.cfg,
-                        requires_position_embeddings=True,  # Gemma-3 requires position_embeddings for dual RoPE
                         submodules={
                             "q": LinearBridge(name="q_proj"),
                             "k": LinearBridge(name="k_proj"),

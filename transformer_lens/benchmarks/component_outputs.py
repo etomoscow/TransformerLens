@@ -324,17 +324,20 @@ class ComponentBenchmarker:
                 batch, seq_len, _ = test_input.shape
                 shared_token_indices = torch.randint(0, self.cfg.d_vocab, (batch, seq_len))
 
-            # Generate shared inputs for attention components that have get_random_inputs()
+            # Generate shared inputs for attention/MLP components that have get_random_inputs()
             # This is needed for model-specific inputs like position_embeddings or attention_mask
             shared_inputs = None
-            if ("attn" in component_path and
-                hasattr(bridge_component, 'get_random_inputs') and
-                callable(getattr(bridge_component, 'get_random_inputs'))):
+            if (
+                ("attn" in component_path or "mlp" in component_path)
+                and hasattr(bridge_component, "get_random_inputs")
+                and callable(getattr(bridge_component, "get_random_inputs"))
+            ):
                 batch_size, seq_len = test_input.shape[:2]
                 shared_inputs = bridge_component.get_random_inputs(
                     batch_size=batch_size,
                     seq_len=seq_len,
-                    device=test_input.device
+                    device=test_input.device,
+                    dtype=test_input.dtype,
                 )
 
             # Run through both components with shared inputs (for attention) or standard inputs (for others)

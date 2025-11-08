@@ -147,7 +147,8 @@ class AttentionBridge(GeneralizedComponent):
         self,
         batch_size: int = 2,
         seq_len: int = 8,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
     ) -> Dict[str, Any]:
         """Get random inputs for testing this attention component.
 
@@ -158,56 +159,48 @@ class AttentionBridge(GeneralizedComponent):
             batch_size: Batch size for the test inputs
             seq_len: Sequence length for the test inputs
             device: Device to create tensors on (defaults to CPU)
+            dtype: Dtype for generated tensors (defaults to float32)
 
         Returns:
             Dictionary of keyword arguments to pass to forward()
         """
         if device is None:
             device = torch.device("cpu")
+        if dtype is None:
+            dtype = torch.float32
 
         # Start with base hidden_states
         d_model = self.config.d_model if self.config and hasattr(self.config, "d_model") else 768
         inputs = {
-            "hidden_states": torch.randn(batch_size, seq_len, d_model, device=device)
+            "hidden_states": torch.randn(batch_size, seq_len, d_model, device=device, dtype=dtype)
         }
 
         # Add position_embeddings if required (e.g., Gemma-3)
         if self.requires_position_embeddings:
-            # Try to get rotary_emb from the original model to compute position embeddings
-            position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+            # Generate dummy cos/sin tensors for testing
+            # Note: We use a fallback approach instead of calling rotary_emb directly
+            # because different models have different rotary_emb interfaces and shapes
 
-            # Check if we have access to rotary_emb through the model
-            rotary_emb = None
-            if (
-                hasattr(self, "original_component")
-                and self.original_component is not None
-            ):
-                # Navigate to find rotary_emb (model-specific paths)
-                # Common patterns: model.rotary_emb, model.model.rotary_emb
-                parent = self.original_component
-                while parent is not None:
-                    if hasattr(parent, "rotary_emb"):
-                        rotary_emb = parent.rotary_emb
-                        break
-                    # Try going up one level
-                    parent = getattr(parent, "_parent_module", None) if hasattr(parent, "_parent_module") else None
-
-            if rotary_emb is not None:
-                # Compute position embeddings
-                test_hidden = inputs["hidden_states"]
-                cos, sin = rotary_emb(test_hidden, position_ids)
-                inputs["position_embeddings"] = (cos, sin)
+            # Try to get head dimension from config (different models use different attribute names)
+            if self.config:
+                if hasattr(self.config, "d_head"):
+                    d_head = self.config.d_head
+                elif hasattr(self.config, "head_dim"):
+                    d_head = self.config.head_dim
+                else:
+                    d_head = 64  # fallback
             else:
-                # Fallback: generate dummy cos/sin tensors for testing
-                # Many models expect (cos, sin) tuple even if rotary_emb is not accessible
-                d_head = self.config.d_head if self.config and hasattr(self.config, "d_head") else 64
-                # Calculate rotary dimension (some models use partial rotary)
-                rotary_pct = getattr(self.config, "rotary_pct", 1.0) if self.config else 1.0
-                rotary_ndims = int(rotary_pct * d_head)
-                # Create dummy rotary embeddings: shape [batch, seq_len, rotary_ndims]
-                cos = torch.ones(batch_size, seq_len, rotary_ndims, device=device)
-                sin = torch.zeros(batch_size, seq_len, rotary_ndims, device=device)
-                inputs["position_embeddings"] = (cos, sin)
+                d_head = 64
+
+            # Calculate rotary dimension (some models use partial rotary)
+            rotary_pct = getattr(self.config, "rotary_pct", 1.0) if self.config else 1.0
+            rotary_ndims = int(rotary_pct * d_head)
+            # Create dummy rotary embeddings: shape [1, seq_len, rotary_ndims]
+            # Note: First dimension is 1 (not batch_size) because RoPE embeddings
+            # are typically broadcast across the batch dimension
+            cos = torch.ones(1, seq_len, rotary_ndims, device=device, dtype=dtype)
+            sin = torch.zeros(1, seq_len, rotary_ndims, device=device, dtype=dtype)
+            inputs["position_embeddings"] = (cos, sin)
 
         # Add attention_mask if required (e.g., GPTNeoX/Pythia)
         if self.requires_attention_mask:
