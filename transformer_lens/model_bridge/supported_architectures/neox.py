@@ -37,6 +37,9 @@ class NeoxArchitectureAdapter(ArchitectureAdapter):
         # Note: We DON'T set default_prepend_bos to match HookedTransformer's default behavior
         # NeoX/Pythia models use rotary position embeddings
         self.cfg.positional_embedding_type = "rotary"
+        # Ensure attention weights are split into separate Q, K, V matrices like GPT-2
+        self.cfg.split_attention_weights = True
+        self.cfg.uses_split_attention = True
 
         self.conversion_rules = HookConversionSet(
             {

@@ -2093,11 +2093,10 @@ class TransformerBridge(nn.Module):
             if conversion:
                 # Apply reverse conversion if needed
                 try:
-                    # Most conversions are symmetric, try the same conversion
-                    converted_weight = conversion.convert(weight)
+                    converted_weight = conversion.revert(weight)
                     hf_state_dict[hf_key] = converted_weight
-                except:
-                    # If conversion fails, use weight as-is
+                except Exception:
+                    # If conversion fails, fall back to original tensor
                     hf_state_dict[hf_key] = weight
             else:
                 hf_state_dict[hf_key] = weight
@@ -2390,18 +2389,33 @@ class TransformerBridge(nn.Module):
             1, 2
         )
 
-        # Scaled dot-product attention
-        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.cfg.d_head**0.5)
+        # Scaled dot-product attention (match GPT-Neo implementation)
+        query = q.to(torch.float32)
+        key = k.to(torch.float32)
+
+        scores = torch.matmul(query, key.transpose(-2, -1))
+
+        # Retrieve original attention module to access GPT-Neo causal mask
+        original_attn = self.blocks[layer].attn.original_component  # type: ignore[attr-defined]
+        bias = getattr(original_attn, "bias", None)
+        if bias is not None:
+            key_length = key.size(-2)
+            query_length = query.size(-2)
+            causal_mask = bias[:, :, key_length - query_length : key_length, :key_length]
+            mask_value = torch.finfo(scores.dtype).min
+            mask_value = torch.tensor(mask_value, dtype=scores.dtype, device=scores.device)
+            scores = torch.where(causal_mask, scores, mask_value)
+        else:
+            # Fallback to standard causal mask
+            causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
+            scores.masked_fill_(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
         # Apply attention scores hook
         if f"blocks.{layer}.attn.hook_attn_scores" in self.hook_dict:
             scores = self.hook_dict[f"blocks.{layer}.attn.hook_attn_scores"](scores)
 
-        # Apply causal mask
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
-        scores.masked_fill_(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
-
         attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = attn_weights.to(v.dtype)
 
         # Apply attention pattern hook
         if f"blocks.{layer}.attn.hook_pattern" in self.hook_dict:
@@ -2457,14 +2471,26 @@ class TransformerBridge(nn.Module):
             1
         )  # [batch, n_heads, seq, d_head]
 
-        # Scaled dot-product attention
-        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.cfg.d_head**0.5)
+        # Scaled dot-product attention (match GPT-Neo implementation)
+        query = q.to(torch.float32)
+        key = k.to(torch.float32)
+        scores = torch.matmul(query, key.transpose(-2, -1))
 
-        # Apply causal mask
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
-        scores.masked_fill_(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+        original_attn = self.blocks[layer].attn.original_component  # type: ignore[attr-defined]
+        bias = getattr(original_attn, "bias", None)
+        if bias is not None:
+            key_length = key.size(-2)
+            query_length = query.size(-2)
+            causal_mask = bias[:, :, key_length - query_length : key_length, :key_length]
+            mask_value = torch.finfo(scores.dtype).min
+            mask_value = torch.tensor(mask_value, dtype=scores.dtype, device=scores.device)
+            scores = torch.where(causal_mask, scores, mask_value)
+        else:
+            causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
+            scores.masked_fill_(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
         attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = attn_weights.to(v.dtype)
         attn_out = torch.matmul(attn_weights, v)  # [batch, n_heads, seq, d_head]
 
         # Output projection
@@ -3180,11 +3206,11 @@ class TransformerBridge(nn.Module):
         q, k, v = qkv.chunk(3, dim=-1)  # Each: [batch, seq, d_model]
 
         # Reshape for multi-head attention
-        q = q.view(batch_size, seq_len, n_heads, head_dim).transpose(
+        q = q.reshape(batch_size, seq_len, n_heads, head_dim).transpose(
             1, 2
         )  # [batch, n_heads, seq, head_dim]
-        k = k.view(batch_size, seq_len, n_heads, head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, n_heads, head_dim).transpose(1, 2)
+        k = k.reshape(batch_size, seq_len, n_heads, head_dim).transpose(1, 2)
+        v = v.reshape(batch_size, seq_len, n_heads, head_dim).transpose(1, 2)
 
         # Scaled dot-product attention
         scale = head_dim**-0.5
@@ -3201,7 +3227,9 @@ class TransformerBridge(nn.Module):
         attn_output = torch.matmul(attn_weights, v)  # [batch, n_heads, seq, head_dim]
 
         # Concatenate heads
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        attn_output = (
+            attn_output.transpose(1, 2).contiguous().reshape(batch_size, seq_len, d_model)
+        )
 
         # Output projection
         out_weight = weights[f"{prefix}.attn.c_proj.weight"]

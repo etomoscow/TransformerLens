@@ -201,13 +201,13 @@ class JointQKVAttentionBridge(AttentionBridge):
                 # Convert to format needed for matrix multiplication
                 # Reshape weights: [n_heads, d_model, d_head] -> [d_model, n_heads * d_head]
                 W_Q_flat = (
-                    W_Q.transpose(0, 1).contiguous().view(cfg.d_model, -1)  # type: ignore[union-attr]
+                W_Q.transpose(0, 1).contiguous().reshape(cfg.d_model, -1)  # type: ignore[union-attr]
                 )  # [d_model, n_heads*d_head]
                 W_K_flat = (
-                    W_K.transpose(0, 1).contiguous().view(cfg.d_model, -1)  # type: ignore[union-attr]
+                W_K.transpose(0, 1).contiguous().reshape(cfg.d_model, -1)  # type: ignore[union-attr]
                 )  # [d_model, n_heads*d_head]
                 W_V_flat = (
-                    W_V.transpose(0, 1).contiguous().view(cfg.d_model, -1)  # type: ignore[union-attr]
+                W_V.transpose(0, 1).contiguous().reshape(cfg.d_model, -1)  # type: ignore[union-attr]
                 )  # [d_model, n_heads*d_head]
 
                 # Apply projections
@@ -217,13 +217,13 @@ class JointQKVAttentionBridge(AttentionBridge):
 
                 # Add biases if they exist
                 if b_Q is not None:
-                    b_Q_flat = b_Q.view(-1)  # [n_heads*d_head]
+                    b_Q_flat = b_Q.reshape(-1)  # [n_heads*d_head]
                     q_flat = q_flat + b_Q_flat
                 if b_K is not None:
-                    b_K_flat = b_K.view(-1)  # [n_heads*d_head]
+                    b_K_flat = b_K.reshape(-1)  # [n_heads*d_head]
                     k_flat = k_flat + b_K_flat
                 if b_V is not None:
-                    b_V_flat = b_V.view(-1)  # [n_heads*d_head]
+                    b_V_flat = b_V.reshape(-1)  # [n_heads*d_head]
                     v_flat = v_flat + b_V_flat
 
                 # Split into separate Q, K, V tensors
@@ -241,9 +241,9 @@ class JointQKVAttentionBridge(AttentionBridge):
             q, k, v = qkv.split(cfg.d_model, dim=2)  # type: ignore[union-attr]
 
         # Reshape to multi-head format: [batch, n_heads, seq_len, d_head]
-        q = q.view(batch_size, seq_len, cfg.n_heads, cfg.d_head).transpose(1, 2)  # type: ignore[union-attr]
-        k = k.view(batch_size, seq_len, cfg.n_heads, cfg.d_head).transpose(1, 2)  # type: ignore[union-attr]
-        v = v.view(batch_size, seq_len, cfg.n_heads, cfg.d_head).transpose(1, 2)  # type: ignore[union-attr]
+        q = q.reshape(batch_size, seq_len, cfg.n_heads, cfg.d_head).transpose(1, 2)  # type: ignore[union-attr]
+        k = k.reshape(batch_size, seq_len, cfg.n_heads, cfg.d_head).transpose(1, 2)  # type: ignore[union-attr]
+        v = v.reshape(batch_size, seq_len, cfg.n_heads, cfg.d_head).transpose(1, 2)  # type: ignore[union-attr]
 
         # Apply V hook if it exists (important for interpretability)
         # Note: We need to apply hooks directly to the correct format without conversion
@@ -286,7 +286,7 @@ class JointQKVAttentionBridge(AttentionBridge):
         attn_out = torch.matmul(attn_weights, v)
 
         # Reshape back to [batch, seq_len, d_model]
-        attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        attn_out = attn_out.transpose(1, 2).contiguous().reshape(batch_size, seq_len, d_model)
 
         # Apply output projection (GPT-2 uses c_proj)
         result = original_attn.c_proj(attn_out)  # type: ignore[operator, union-attr]
@@ -496,7 +496,7 @@ class JointQKVAttentionBridge(AttentionBridge):
         attn_output = attn_output.transpose(1, 2).contiguous()
 
         # Reshape to flat: [batch, seq, heads * d_head]
-        attn_output = attn_output.view(attn_output.shape[0], attn_output.shape[1], -1)
+        attn_output = attn_output.reshape(attn_output.shape[0], attn_output.shape[1], -1)
 
         # Apply output projection using the W_O weight
         if self._W_O is not None:
@@ -504,7 +504,7 @@ class JointQKVAttentionBridge(AttentionBridge):
             batch_size, seq_len = attn_output.shape[:2]
             n_heads = self._W_O.shape[0]
             d_head = self._W_O.shape[1]
-            attn_reshaped = attn_output.view(batch_size, seq_len, n_heads, d_head)
+            attn_reshaped = attn_output.reshape(batch_size, seq_len, n_heads, d_head)
 
             # Apply hook_z (aliased as "blocks.L.attn.hook_z" in compatibility mode)
             if hasattr(self, "o") and hasattr(self.o, "hook_in"):
@@ -514,7 +514,7 @@ class JointQKVAttentionBridge(AttentionBridge):
             if attn_reshaped.ndim == 3:
                 # Reshape from [batch, seq, d_model] to [batch, seq, n_heads, d_head]
                 batch_size, seq_len = attn_reshaped.shape[:2]
-                attn_reshaped = attn_reshaped.view(batch_size, seq_len, n_heads, d_head)
+                attn_reshaped = attn_reshaped.reshape(batch_size, seq_len, n_heads, d_head)
 
             # Apply W_O and sum across heads
             attn_output = torch.stack(
@@ -585,9 +585,9 @@ class JointQKVAttentionBridge(AttentionBridge):
                 num_heads = int(original_component.num_heads)  # type: ignore[arg-type]
                 head_dim: int = hidden_size // num_heads
 
-                q_attn = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-                k_attn = k.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-                v_attn = v.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+                q_attn = q.reshape(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+                k_attn = k.reshape(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+                v_attn = v.reshape(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
             else:
                 raise ValueError(f"Unexpected Q tensor shape: {q.shape}")
 
@@ -616,7 +616,7 @@ class JointQKVAttentionBridge(AttentionBridge):
                 batch_size, num_heads, seq_len, head_dim = attn_output.shape
                 hidden_size = num_heads * head_dim
                 attn_output_merged = (
-                    attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
+                    attn_output.transpose(1, 2).contiguous().reshape(batch_size, seq_len, hidden_size)
                 )
 
             if hasattr(self, "o") and self.o is not None:
@@ -642,9 +642,9 @@ class JointQKVAttentionBridge(AttentionBridge):
         if len(q.shape) == 3:
             batch_size, seq_len, hidden_size = q.shape
             head_dim: int = hidden_size // num_heads
-            q = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-            k = k.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-            v = v.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+            q = q.reshape(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+            k = k.reshape(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+            v = v.reshape(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
         elif len(q.shape) == 4:
             batch_size, seq_len, num_heads_tensor, head_dim = q.shape
             assert (
@@ -686,7 +686,7 @@ class JointQKVAttentionBridge(AttentionBridge):
         # Reshape back to original format
         final_hidden_size: int = num_heads * head_dim
         attn_output = (
-            attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, final_hidden_size)
+            attn_output.transpose(1, 2).contiguous().reshape(batch_size, seq_len, final_hidden_size)
         )
 
         # Apply output projection - use functional linear if available
@@ -737,7 +737,7 @@ class JointQKVAttentionBridge(AttentionBridge):
         )
 
         # Split into Q, K, V - reshape to separate the 3 components
-        qkv = qkv.view(batch_size, seq_len, 3, d_model)
+        qkv = qkv.reshape(batch_size, seq_len, 3, d_model)
         q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
 
         return q, k, v

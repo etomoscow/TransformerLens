@@ -152,7 +152,7 @@ class AttentionBridge(GeneralizedComponent):
                 if len(input_value.shape) == 3:
                     b, s, d = input_value.shape
                     if d == self.n_heads * self.d_head:
-                        return input_value.view(b, s, self.n_heads, self.d_head)
+                        return input_value.reshape(b, s, self.n_heads, self.d_head)
                 return input_value
 
             def revert(self, input_value, *full_context):
@@ -160,7 +160,7 @@ class AttentionBridge(GeneralizedComponent):
                 if len(input_value.shape) == 4:
                     b, s, n_h, d_h = input_value.shape
                     if n_h == self.n_heads and d_h == self.d_head:
-                        return input_value.view(b, s, n_h * d_h)
+                        return input_value.reshape(b, s, n_h * d_h)
                 return input_value
 
         # Get dimensions
@@ -190,7 +190,7 @@ class AttentionBridge(GeneralizedComponent):
         def split_heads(tensor, num_heads, attn_head_size):
             """Split hidden states into attention heads."""
             new_shape = tensor.size()[:-1] + (num_heads, attn_head_size)
-            tensor = tensor.view(new_shape)
+            tensor = tensor.reshape(new_shape)
             return tensor.permute(0, 2, 1, 3)  # (batch, head, seq_length, head_features)
 
         def apply_rotary_pos_emb(q, k, cos, sin):
@@ -308,7 +308,7 @@ class AttentionBridge(GeneralizedComponent):
                 # Merge heads
                 attn_output = attn_output.transpose(1, 2).contiguous()
                 new_shape = attn_output.size()[:-2] + (hf_attn.embed_dim,)  # type: ignore[union-attr,operator]
-                attn_output = attn_output.view(new_shape)
+                attn_output = attn_output.reshape(new_shape)
 
                 # Output projection
                 attn_output = hf_attn.c_proj(attn_output)  # type: ignore[union-attr,operator]
@@ -439,10 +439,17 @@ class AttentionBridge(GeneralizedComponent):
                 # Merge heads
                 attn_output = attn_output.transpose(1, 2).contiguous()
                 new_shape = attn_output.size()[:-2] + (num_heads * head_dim,)  # type: ignore[operator]
-                attn_output = attn_output.view(new_shape)
+                attn_output = attn_output.reshape(new_shape)
 
-                # Output projection
-                attn_output = hf_attn.o_proj(attn_output)  # type: ignore[union-attr,operator]
+                # Output projection (different architectures use different attribute names)
+                out_proj = getattr(hf_attn, "o_proj", None)
+                if out_proj is None:
+                    out_proj = getattr(hf_attn, "out_proj", None)
+                if out_proj is None:
+                    raise AttributeError(
+                        f"{hf_attn.__class__.__name__} does not define an output projection module."
+                    )
+                attn_output = out_proj(attn_output)  # type: ignore[call-arg]
 
                 # Return in HF format - check config for expected format
                 # Some models return (output, attn_weights), others return (output, attn_weights, past)
@@ -840,6 +847,25 @@ class AttentionBridge(GeneralizedComponent):
 
     def _forward_with_processed_weights(self, *args: Any, **kwargs: Any) -> tuple[Any, Any]:
         """Direct implementation of reference model's attention computation with hooks."""
+        architecture_name = getattr(self.config, "architecture", "")
+        if isinstance(architecture_name, str) and "neo" in architecture_name.lower():
+            if self.original_component is None:
+                raise RuntimeError("Original component not set; cannot fall back to HF attention.")
+
+            mutable_args = args
+            mutable_kwargs = dict(kwargs)
+
+            if len(mutable_args) > 0 and isinstance(mutable_args[0], torch.Tensor):
+                mutable_args = (self.hook_in(mutable_args[0]),) + mutable_args[1:]
+            elif "hidden_states" in mutable_kwargs:
+                mutable_kwargs["hidden_states"] = self.hook_in(mutable_kwargs["hidden_states"])
+            else:
+                raise ValueError("No valid hidden_states tensor provided to attention module.")
+
+            output = self.original_component(*mutable_args, **mutable_kwargs)
+            output = self._process_output(output)
+            return output
+
         # Extract input from args/kwargs
         if len(args) > 0 and isinstance(args[0], torch.Tensor):
             x = args[0]
@@ -903,19 +929,32 @@ class AttentionBridge(GeneralizedComponent):
             k = k.repeat_interleave(repeats, dim=1)  # [batch, n_heads, seq, d_head]
             v = v.repeat_interleave(repeats, dim=1)  # [batch, n_heads, seq, d_head]
 
-        # Compute attention scores
-        d_head = self._processed_W_Q.shape[-1]  # Get d_head from weight shape
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (d_head**0.5)
+        # Compute attention scores (match original attention implementation when possible)
+        query = q.to(torch.float32)
+        key = k.to(torch.float32)
+        attn_scores = torch.matmul(query, key.transpose(-2, -1))
 
-        # Apply causal mask
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device))
-        attn_scores = attn_scores.masked_fill(causal_mask == 0, float("-inf"))
+        bias = None
+        if hasattr(self, "original_component") and self.original_component is not None:
+            bias = getattr(self.original_component, "bias", None)
+
+        if bias is not None:
+            key_length = key.size(-2)
+            query_length = key.size(-2) if query.size(-2) != key.size(-2) else query.size(-2)
+            causal_mask = bias[:, :, key_length - query_length : key_length, :key_length]
+            mask_value = torch.finfo(attn_scores.dtype).min
+            mask_value = torch.tensor(mask_value, dtype=attn_scores.dtype, device=attn_scores.device)
+            attn_scores = torch.where(causal_mask, attn_scores, mask_value)
+        else:
+            causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device))
+            attn_scores = attn_scores.masked_fill(causal_mask == 0, float("-inf"))
 
         # Apply attention scores hook (for compatibility with HookedTransformer)
         attn_scores = self.hook_attn_scores(attn_scores)
 
         # Apply softmax
         attn_weights = torch.nn.functional.softmax(attn_scores, dim=-1)
+        attn_weights = attn_weights.to(v.dtype)
 
         # Apply pattern hook (for compatibility with HookedTransformer)
         attn_weights = self.hook_pattern(attn_weights)

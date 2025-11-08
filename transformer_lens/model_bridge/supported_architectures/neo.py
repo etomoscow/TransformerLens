@@ -26,6 +26,10 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
         """Initialize the Neo architecture adapter."""
         super().__init__(cfg)
 
+        # Ensure attention weights use split Q/K/V format when initializing the bridge
+        self.cfg.split_attention_weights = True
+        self.cfg.uses_split_attention = True
+
         self.conversion_rules = HookConversionSet(
             {
                 "embed.e": "transformer.wte.weight",
@@ -50,14 +54,39 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
                 ),
                 "blocks.{i}.ln2.w": "transformer.h.{i}.ln_2.weight",
                 "blocks.{i}.ln2.b": "transformer.h.{i}.ln_2.bias",
-                "blocks.{i}.mlp.in": "transformer.h.{i}.mlp.c_fc.weight",
-                "blocks.{i}.mlp.b_in": "transformer.h.{i}.mlp.c_fc.bias",
-                "blocks.{i}.mlp.out": "transformer.h.{i}.mlp.c_proj.weight",
-                "blocks.{i}.mlp.b_out": "transformer.h.{i}.mlp.c_proj.bias",
+                "blocks.{i}.mlp.in": "transformer.h.{i}.mlp.c_fc.weight.T",
+                "blocks.{i}.mlp.out": "transformer.h.{i}.mlp.c_proj.weight.T",
                 "ln_final.w": "transformer.ln_f.weight",
                 "ln_final.b": "transformer.ln_f.bias",
                 "unembed.u": "lm_head.weight",
                 "unembed.b_U": "lm_head.bias",
+                # TransformerLens parameter mappings for processed weights
+                "blocks.{i}.attn.W_Q": (
+                    "transformer.h.{i}.attn.attention.q_proj.weight",
+                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.W_K": (
+                    "transformer.h.{i}.attn.attention.k_proj.weight",
+                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.W_V": (
+                    "transformer.h.{i}.attn.attention.v_proj.weight",
+                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.W_O": (
+                    "transformer.h.{i}.attn.attention.out_proj.weight",
+                    RearrangeHookConversion("m (n h) -> n h m", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.mlp.W_in": (
+                    "transformer.h.{i}.mlp.c_fc.weight",
+                    RearrangeHookConversion("o i -> i o"),
+                ),
+                "blocks.{i}.mlp.W_out": (
+                    "transformer.h.{i}.mlp.c_proj.weight",
+                    RearrangeHookConversion("o i -> i o"),
+                ),
+                "blocks.{i}.mlp.b_in": "transformer.h.{i}.mlp.c_fc.bias",
+                "blocks.{i}.mlp.b_out": "transformer.h.{i}.mlp.c_proj.bias",
             }
         )
 

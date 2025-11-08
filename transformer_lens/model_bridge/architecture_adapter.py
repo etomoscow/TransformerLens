@@ -152,14 +152,17 @@ class ArchitectureAdapter:
             if subcomponent_name in bridge_component.submodules:
                 subcomponent_bridge = bridge_component.submodules[subcomponent_name]
 
-                # If there are more parts (like blocks.0.attn.W_Q), navigate deeper
+                # Decide if we're navigating a bridge component (GeneralizedComponent) or the raw HF module
+                is_bridge_item = isinstance(item, GeneralizedComponent)
+
+                if is_bridge_item:
+                    current = getattr(item, subcomponent_name)
+                else:
+                    current = self.get_remote_component(item, subcomponent_bridge.name)
+
                 if len(parts) > 3:
                     # Navigate through the deeper subcomponents
                     current_bridge = subcomponent_bridge
-                    if subcomponent_bridge.name is None:
-                        current = item
-                    else:
-                        current = getattr(item, subcomponent_bridge.name)
 
                     for i in range(3, len(parts)):
                         deeper_component_name = parts[i]
@@ -174,11 +177,13 @@ class ArchitectureAdapter:
                         # Check submodules for deeper components
                         if deeper_component_name in current_bridge.submodules:
                             current_bridge = current_bridge.submodules[deeper_component_name]
-                            if current_bridge.name is None:
+                            if isinstance(current, GeneralizedComponent):
+                                current = getattr(current, deeper_component_name)
+                            elif current_bridge.name is None:
                                 # No container, stay at current level
                                 pass
                             else:
-                                current = getattr(current, current_bridge.name)
+                                current = self.get_remote_component(current, current_bridge.name)
                         else:
                             raise ValueError(
                                 f"Component {deeper_component_name} not found in {'.'.join(parts[:i])} components"
@@ -187,10 +192,7 @@ class ArchitectureAdapter:
                     return current
                 else:
                     # Just the 3-level path
-                    if subcomponent_bridge.name is None:
-                        return item
-                    else:
-                        return getattr(item, subcomponent_bridge.name)
+                    return current
             else:
                 raise ValueError(
                     f"Component {subcomponent_name} not found in {parts[0]} components"

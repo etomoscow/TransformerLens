@@ -511,30 +511,59 @@ class ProcessWeights:
 
         # Check if MLP LayerNorm parameters exist (they might not for already processed models)
         if ln2_b_key in state_dict and ln2_w_key in state_dict:
+            # Work with MLP weights in TransformerLens format regardless of original layout
+            if uses_hf_format:
+                W_in_tl = ProcessWeights.convert_tensor_to_tl_format(
+                    f"blocks.{layer}.mlp.W_in", adapter, state_dict, cfg, layer
+                )
+                if W_in_tl is None:
+                    return
+            else:
+                W_in_tl = state_dict[mlp_W_in_key]
+
             if fold_biases:
-                # TODO this is causing slight divergence - FIXED
                 state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
-                    state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
+                    W_in_tl * state_dict[ln2_b_key][:, None]
                 ).sum(-2)
                 del state_dict[ln2_b_key]
 
-            # TODO this is causing slight divergence
-            state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
+            W_in_tl = W_in_tl * state_dict[ln2_w_key][:, None]
 
             if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
-                state_dict[mlp_W_gate_key] = (
-                    state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
-                )
+                if uses_hf_format:
+                    W_gate_tl = ProcessWeights.convert_tensor_to_tl_format(
+                        f"blocks.{layer}.mlp.W_gate", adapter, state_dict, cfg, layer
+                    )
+                    if W_gate_tl is not None:
+                        W_gate_tl = W_gate_tl * state_dict[ln2_w_key][:, None]
+                        converted_gate = ProcessWeights.convert_tensor_to_hf_format(
+                            W_gate_tl, f"blocks.{layer}.mlp.W_gate", adapter, cfg, layer
+                        )
+                        if converted_gate is not None:
+                            state_dict[mlp_W_gate_key] = converted_gate
+                else:
+                    state_dict[mlp_W_gate_key] = (
+                        state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
+                    )
 
             del state_dict[ln2_w_key]
 
         if center_weights:
             # Center the weights that read in from the LayerNormPre
-            state_dict[mlp_W_in_key] -= einops.reduce(
-                state_dict[mlp_W_in_key],
+            W_in_tl -= einops.reduce(
+                W_in_tl,
                 "d_model d_mlp -> 1 d_mlp",
                 "mean",
             )
+
+        if uses_hf_format:
+            converted_W_in = ProcessWeights.convert_tensor_to_hf_format(
+                W_in_tl, f"blocks.{layer}.mlp.W_in", adapter, cfg, layer
+            )
+            if converted_W_in is not None:
+                state_dict[mlp_W_in_key] = converted_W_in
+        else:
+            state_dict[mlp_W_in_key] = W_in_tl
 
         if getattr(cfg, "act_fn", None) is not None and cfg.act_fn.startswith("solu"):
             # Get appropriate SoLU LayerNorm parameter keys based on format detection
@@ -1037,12 +1066,17 @@ class ProcessWeights:
             mlp_W_out_key = None
             mlp_b_out_key = None
 
+            attn_format = "tl"
+            mlp_format = "tl"
+
             if uses_tl_format and not uses_hf_format:
                 # State dict is in TransformerLens format - use TL keys directly
                 attn_W_O_key = f"blocks.{l}.attn.W_O"
                 attn_b_O_key = f"blocks.{l}.attn.b_O"
                 mlp_W_out_key = f"blocks.{l}.mlp.W_out"
                 mlp_b_out_key = f"blocks.{l}.mlp.b_out"
+                attn_format = "tl"
+                mlp_format = "tl"
             elif adapter and uses_hf_format and not uses_tl_format:
                 # State dict is in HuggingFace format - use adapter translation
                 attn_W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
@@ -1054,6 +1088,8 @@ class ProcessWeights:
                     # MLP parameters don't exist (e.g., MoE models)
                     mlp_W_out_key = None
                     mlp_b_out_key = None
+                attn_format = "hf"
+                mlp_format = "hf"
             else:
                 # Fallback: prefer TL format if possible, otherwise use adapter translation
                 if uses_tl_format:
@@ -1061,6 +1097,8 @@ class ProcessWeights:
                     attn_b_O_key = f"blocks.{l}.attn.b_O"
                     mlp_W_out_key = f"blocks.{l}.mlp.W_out"
                     mlp_b_out_key = f"blocks.{l}.mlp.b_out"
+                    attn_format = "tl"
+                    mlp_format = "tl"
                 else:
                     attn_W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
                     attn_b_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_O", adapter)
@@ -1074,40 +1112,78 @@ class ProcessWeights:
                     except ValueError:
                         mlp_W_out_key = None
                         mlp_b_out_key = None
+                    attn_format = "hf"
+                    mlp_format = "hf"
 
-            # Validate that attention weight key exists before accessing it
-            if attn_W_O_key not in state_dict:
-                raise KeyError(
-                    f"Expected attention W_O key '{attn_W_O_key}' not found in state_dict for layer {l}. "
-                    f"Available keys: {list(state_dict.keys())[:10]}..."
+            if attn_format == "hf" and adapter is not None:
+                W_O_tl = ProcessWeights.convert_tensor_to_tl_format(
+                    f"blocks.{l}.attn.W_O", adapter, state_dict, cfg, l
                 )
-
-            state_dict[attn_W_O_key] = state_dict[attn_W_O_key] - state_dict[attn_W_O_key].mean(
-                -1, keepdim=True
-            )  # W_O is [head_index, d_model, d_head]
+                if W_O_tl is None:
+                    raise KeyError(
+                        f"Unable to retrieve attention W_O for layer {l} via adapter to center weights."
+                    )
+                W_O_tl = W_O_tl - W_O_tl.mean(-1, keepdim=True)
+                converted_W_O = ProcessWeights.convert_tensor_to_hf_format(
+                    W_O_tl, f"blocks.{l}.attn.W_O", adapter, cfg, l
+                )
+                if converted_W_O is None:
+                    raise KeyError(
+                        f"Failed to convert centered attention W_O for layer {l} back to HuggingFace format."
+                    )
+                state_dict[attn_W_O_key] = converted_W_O  # type: ignore[assignment]
+            else:
+                if attn_W_O_key not in state_dict:
+                    raise KeyError(
+                        f"Expected attention W_O key '{attn_W_O_key}' not found in state_dict for layer {l}. "
+                        f"Available keys: {list(state_dict.keys())[:10]}..."
+                    )
+                attn_tensor = state_dict[attn_W_O_key]
+                if attn_tensor.ndim == 3:
+                    centered_attn = attn_tensor - attn_tensor.mean(-1, keepdim=True)
+                elif attn_tensor.ndim == 2 and attn_tensor.shape[0] == cfg.d_model:
+                    centered_attn = attn_tensor - attn_tensor.mean(0, keepdim=True)
+                else:
+                    centered_attn = attn_tensor - attn_tensor.mean(-1, keepdim=True)
+                state_dict[attn_W_O_key] = centered_attn
 
             # Only center bias if it exists (models like Qwen2/LLaMA may not have attention biases)
             if attn_b_O_key in state_dict:
                 state_dict[attn_b_O_key] = (
                     state_dict[attn_b_O_key] - state_dict[attn_b_O_key].mean()
                 )  # b_O is [d_model]
+
             if not getattr(cfg, "attn_only", False) and mlp_W_out_key is not None:
-                # Validate that MLP weight key exists before accessing it
-                if mlp_W_out_key not in state_dict:
-                    raise KeyError(
-                        f"Expected MLP W_out key '{mlp_W_out_key}' not found in state_dict for layer {l}. "
-                        f"Available keys: {list(state_dict.keys())[:10]}..."
+                if mlp_format == "hf" and adapter is not None:
+                    W_out_tl = ProcessWeights.convert_tensor_to_tl_format(
+                        f"blocks.{l}.mlp.W_out", adapter, state_dict, cfg, l
                     )
-
-                state_dict[mlp_W_out_key] = state_dict[mlp_W_out_key] - state_dict[
-                    mlp_W_out_key
-                ].mean(-1, keepdim=True)
-
-                # Only center bias if it exists (models like Qwen2/LLaMA may not have MLP biases)
-                if mlp_b_out_key is not None and mlp_b_out_key in state_dict:
-                    state_dict[mlp_b_out_key] = (
-                        state_dict[mlp_b_out_key] - state_dict[mlp_b_out_key].mean()
+                    if W_out_tl is None:
+                        raise KeyError(
+                            f"Unable to retrieve MLP W_out for layer {l} via adapter to center weights."
+                        )
+                    W_out_tl = W_out_tl - W_out_tl.mean(-1, keepdim=True)
+                    converted_W_out = ProcessWeights.convert_tensor_to_hf_format(
+                        W_out_tl, f"blocks.{l}.mlp.W_out", adapter, cfg, l
                     )
+                    if converted_W_out is None:
+                        raise KeyError(
+                            f"Failed to convert centered MLP W_out for layer {l} back to HuggingFace format."
+                        )
+                    state_dict[mlp_W_out_key] = converted_W_out  # type: ignore[assignment]
+                else:
+                    if mlp_W_out_key not in state_dict:
+                        raise KeyError(
+                            f"Expected MLP W_out key '{mlp_W_out_key}' not found in state_dict for layer {l}. "
+                            f"Available keys: {list(state_dict.keys())[:10]}..."
+                        )
+                    mlp_tensor = state_dict[mlp_W_out_key]
+                    if mlp_tensor.ndim == 2 and mlp_tensor.shape[0] == cfg.d_model:
+                        centered_mlp = mlp_tensor - mlp_tensor.mean(0, keepdim=True)
+                    else:
+                        centered_mlp = mlp_tensor - mlp_tensor.mean(-1, keepdim=True)
+                    state_dict[mlp_W_out_key] = centered_mlp
+
         return state_dict
 
     @staticmethod

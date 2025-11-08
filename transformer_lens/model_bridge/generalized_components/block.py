@@ -75,7 +75,11 @@ class BlockBridge(GeneralizedComponent):
         super().set_original_component(component)
 
         # Monkey-patch the block's forward method to insert hook_mlp_out
-        self._patch_block_forward()
+        # Some architectures rely on a patched forward pass to match legacy TransformerLens
+        # behaviour. Allow adapters to opt-in explicitly via config.patch_block_forward.
+        patch_forward = getattr(self.config, "patch_block_forward", False) if self.config else False
+        if patch_forward:
+            self._patch_block_forward()
 
     def _patch_block_forward(self):
         """Monkey-patch the HuggingFace block's forward method.
