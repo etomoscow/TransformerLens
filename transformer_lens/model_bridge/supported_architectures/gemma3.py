@@ -14,9 +14,10 @@ from transformer_lens.model_bridge.generalized_components import (
     EmbeddingBridge,
     LinearBridge,
     MLPBridge,
-    NormalizationBridge,
-    RMSNormalizationBridge,
     UnembeddingBridge,
+)
+from transformer_lens.model_bridge.generalized_components.gemma2_rms_normalization import (
+    Gemma2RMSNormalizationBridge,
 )
 
 
@@ -82,33 +83,34 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
         )
 
         # Set up component mapping with actual bridge instances
+        # Note: rotary_emb and rotary_emb_local are internal to attention and shouldn't be tested standalone
         self.component_mapping = {
             "embed": EmbeddingBridge(name="model.embed_tokens"),
-            "rotary_emb": EmbeddingBridge(name="model.rotary_emb"),
-            "rotary_emb_local": EmbeddingBridge(name="model.rotary_emb_local"),
             "blocks": BlockBridge(
                 name="model.layers",
                 submodules={
-                    "ln1": RMSNormalizationBridge(name="input_layernorm", config=self.cfg),
-                    "ln1_post": NormalizationBridge(
+                    # All Gemma-3 normalizations use the Gemma (1 + weight) formula
+                    "ln1": Gemma2RMSNormalizationBridge(name="input_layernorm", config=self.cfg),
+                    "ln1_post": Gemma2RMSNormalizationBridge(
                         name="post_attention_layernorm", config=self.cfg
                     ),
-                    "ln2": RMSNormalizationBridge(
+                    "ln2": Gemma2RMSNormalizationBridge(
                         name="pre_feedforward_layernorm", config=self.cfg
                     ),
-                    "ln2_post": NormalizationBridge(
+                    "ln2_post": Gemma2RMSNormalizationBridge(
                         name="post_feedforward_layernorm", config=self.cfg
                     ),
                     "attn": AttentionBridge(
                         name="self_attn",
                         config=self.cfg,
+                        requires_position_embeddings=True,  # Gemma-3 requires position_embeddings for dual RoPE
                         submodules={
                             "q": LinearBridge(name="q_proj"),
                             "k": LinearBridge(name="k_proj"),
                             "v": LinearBridge(name="v_proj"),
                             "o": LinearBridge(name="o_proj"),
-                            "q_norm": RMSNormalizationBridge(name="q_norm", config=self.cfg),
-                            "k_norm": RMSNormalizationBridge(name="k_norm", config=self.cfg),
+                            "q_norm": Gemma2RMSNormalizationBridge(name="q_norm", config=self.cfg),
+                            "k_norm": Gemma2RMSNormalizationBridge(name="k_norm", config=self.cfg),
                         },
                     ),
                     "mlp": MLPBridge(
@@ -121,6 +123,6 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
                     ),
                 },
             ),
-            "ln_final": RMSNormalizationBridge(name="model.norm", config=self.cfg),
+            "ln_final": Gemma2RMSNormalizationBridge(name="model.norm", config=self.cfg),
             "unembed": UnembeddingBridge(name="lm_head"),
         }
