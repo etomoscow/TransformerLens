@@ -389,7 +389,15 @@ class JointQKVAttentionBridge(AttentionBridge):
         else:
             raise ValueError("No input tensor found in args or kwargs")
 
-        # Apply input hook
+        cached_pre_ln: Optional[torch.Tensor] = None
+        if hasattr(self, "_ln1") and self._ln1 is not None:
+            get_cached = getattr(self._ln1, "get_last_input_before_norm", None)
+            if callable(get_cached):
+                cached_pre_ln = get_cached()
+
+        if cached_pre_ln is not None:
+            input_tensor = cached_pre_ln
+
         input_tensor = self.hook_in(input_tensor)
 
         original_component = self.original_component
