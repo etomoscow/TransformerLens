@@ -156,18 +156,18 @@ class MLPBridge(GeneralizedComponent):
             b_in: The processed MLP input bias tensor (optional)
             b_out: The processed MLP output bias tensor (optional)
         """
-        
+
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
 
         # Get the 'in' and 'out' submodules (LinearBridge instances)
-        in_module = getattr(self, 'in', None)
-        out_module = getattr(self, 'out', None)
+        in_module = getattr(self, "in", None)
+        out_module = getattr(self, "out", None)
 
         # Use LinearBridge's set_processed_weights for the 'in' component
-        if in_module and hasattr(in_module, 'set_processed_weights'):
+        if in_module and hasattr(in_module, "set_processed_weights"):
             in_module.set_processed_weights(weight=W_in, bias=b_in)
 
         # Use LinearBridge's set_processed_weights for the 'out' component
-        if out_module and hasattr(out_module, 'set_processed_weights'):
+        if out_module and hasattr(out_module, "set_processed_weights"):
             out_module.set_processed_weights(weight=W_out, bias=b_out)

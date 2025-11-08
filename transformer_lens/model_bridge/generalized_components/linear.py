@@ -86,18 +86,28 @@ class LinearBridge(GeneralizedComponent):
         This loads the processed weights directly into the original_component's parameters,
         so when forward() delegates to original_component, it uses the processed weights.
 
+        Handles both Conv1D (GPT-2 style, shape [in, out]) and Linear (shape [out, in]).
+
         Args:
-            weight: The processed weight tensor
+            weight: The processed weight tensor [in, out] format
             bias: The processed bias tensor (optional)
         """
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
 
         for name, param in self.original_component.named_parameters():
-            if 'weight' in name.lower():
-                param.data = weight
-            elif 'bias' in name.lower() and bias is not None:
-                param.data = bias
+            if "weight" in name.lower():
+                # Check if we need to transpose based on parameter shape
+                # Conv1D expects [in, out], Linear expects [out, in]
+                # weight is provided in [in, out] format
+                if param.shape[0] == weight.shape[0]:
+                    # Conv1D format - use as-is
+                    param.data = weight.contiguous()
+                else:
+                    # Linear format - transpose
+                    param.data = weight.T.contiguous()
+            elif "bias" in name.lower() and bias is not None:
+                param.data = bias.contiguous()
 
     # def process_weights(
     #     self,
