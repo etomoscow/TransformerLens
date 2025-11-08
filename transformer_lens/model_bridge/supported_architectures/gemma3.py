@@ -22,7 +22,7 @@ from transformer_lens.model_bridge.generalized_components.gemma2_rms_normalizati
     Gemma2RMSNormalizationBridge,
 )
 from transformer_lens.model_bridge.generalized_components.gemma3_attention import (
-    Gemma3AttentionBridge,
+    PositionEmbeddingsAttentionBridge,
 )
 
 
@@ -111,7 +111,7 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
                     "ln2_post": RMSNormalizationBridge(
                         name="post_feedforward_layernorm", config=self.cfg
                     ),
-                    "attn": Gemma3AttentionBridge(
+                    "attn": PositionEmbeddingsAttentionBridge(
                         name="self_attn",
                         config=self.cfg,
                         submodules={
