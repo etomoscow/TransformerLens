@@ -1139,6 +1139,82 @@ class TransformerBridge(nn.Module):
                     block.original_component.mlp = new_mlp
                 print(f"  Replaced blocks.{i}.mlp with HT-compatible version")
 
+    def get_state_dict_transformerlens_format(self) -> Dict[str, torch.Tensor]:
+        """Extract state dict from original_model in TransformerLens format.
+
+        This method traverses the component_mapping hierarchy to extract weights
+        from the HuggingFace model and map them to TransformerLens keys.
+
+        Returns:
+            Dict[str, torch.Tensor]: State dict with TransformerLens keys
+        """
+        if not self.adapter or not hasattr(self.adapter, 'component_mapping'):
+            raise ValueError("Adapter with component_mapping required for extraction")
+
+        # Step 1: Get raw state dict and clean ._original_component suffixes
+        raw_state_dict = self.original_model.state_dict()
+        cleaned_state_dict = {}
+        for key, value in raw_state_dict.items():
+            clean_key = key.replace("._original_component", "")
+            cleaned_state_dict[clean_key] = value
+
+        # Step 2: Traverse component_mapping to build HF->TL key mapping
+        tl_state_dict = {}
+
+        def extract_component_weights(component, tl_prefix: str, hf_prefix: str):
+            """Recursively extract weights from a component."""
+            # Get the component's HF name
+            component_name = getattr(component, 'name', None)
+            if component_name:
+                full_hf_prefix = f"{hf_prefix}.{component_name}" if hf_prefix else component_name
+
+                # Check if component has non-empty submodules
+                has_submodules = hasattr(component, 'submodules') and component.submodules
+
+                # Handle BlockBridge (layers)
+                if has_submodules and component.__class__.__name__ == 'BlockBridge':
+                    # Iterate through all layers
+                    for layer_idx in range(self.cfg.n_layers):
+                        layer_hf_prefix = f"{full_hf_prefix}.{layer_idx}"
+                        layer_tl_prefix = f"{tl_prefix}.{layer_idx}"
+
+                        # Recursively extract submodules
+                        for submodule_name, submodule in component.submodules.items():
+                            extract_component_weights(
+                                submodule,
+                                f"{layer_tl_prefix}.{submodule_name}",
+                                layer_hf_prefix
+                            )
+
+                # Handle other components with submodules (like AttentionBridge, MLPBridge)
+                elif has_submodules:
+                    for submodule_name, submodule in component.submodules.items():
+                        extract_component_weights(
+                            submodule,
+                            f"{tl_prefix}.{submodule_name}",
+                            full_hf_prefix
+                        )
+
+                # Handle leaf components (weights)
+                else:
+                    # Try to find matching weights in cleaned_state_dict
+                    for param_name in ['weight', 'bias']:
+                        hf_key = f"{full_hf_prefix}.{param_name}"
+                        if hf_key in cleaned_state_dict:
+                            # Map to TL key
+                            if param_name == 'weight':
+                                tl_key = f"{tl_prefix}.w" if tl_prefix else "w"
+                            else:
+                                tl_key = f"{tl_prefix}.b" if tl_prefix else "b"
+
+                            tl_state_dict[tl_key] = cleaned_state_dict[hf_key]
+
+        # Extract weights for each top-level component
+        for tl_name, component in self.adapter.component_mapping.items():
+            extract_component_weights(component, tl_name, "")
+
+        return tl_state_dict
+
     def process_compatibility_weights(
         self,
         verbose: bool = False,
@@ -1167,19 +1243,17 @@ class TransformerBridge(nn.Module):
         if verbose:
             print(f"Processing weights for {self.cfg.model_name}...")
 
-        # Load a fresh HF model to avoid dealing with wrapped keys
         import torch
-        from transformers import AutoModelForCausalLM
 
         if verbose:
-            print("  Loading fresh HF model for processing...")
+            print("  Extracting state dict from existing model...")
 
-        # Load fresh model with clean state dict
-        fresh_model = AutoModelForCausalLM.from_pretrained(
-            self.cfg.model_name,
-            torch_dtype=self.cfg.dtype if hasattr(self.cfg, "dtype") else torch.float32,
-        )
-        state_dict = fresh_model.state_dict()
+        # Extract state dict from existing model and clean ._original_component suffixes
+        raw_state_dict = self.original_model.state_dict()
+        state_dict = {}
+        for key, value in raw_state_dict.items():
+            clean_key = key.replace("._original_component", "")
+            state_dict[clean_key] = value
 
         # Get architecture adapter for path translation
         adapter = self.adapter
@@ -1266,21 +1340,27 @@ class TransformerBridge(nn.Module):
         self._configure_components_for_processing(verbose=verbose)
         self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
 
-        # Load processed weights into the fresh model
+        # Load processed weights back into original_model
+        # Need to restore ._original_component suffixes for loading
         if verbose:
-            print("  Loading processed weights into fresh model...")
+            print("  Loading processed weights back into original model...")
 
-        load_result = fresh_model.load_state_dict(state_dict, strict=False)
+        # Map cleaned keys back to original keys with ._original_component suffixes
+        original_state_dict = self.original_model.state_dict()
+        restored_state_dict = {}
+
+        for original_key in original_state_dict.keys():
+            clean_key = original_key.replace("._original_component", "")
+            if clean_key in state_dict:
+                restored_state_dict[original_key] = state_dict[clean_key]
+
+        load_result = self.original_model.load_state_dict(restored_state_dict, strict=False)
 
         if verbose and (load_result.missing_keys or load_result.unexpected_keys):
             if load_result.missing_keys:
                 print(f"    Warning: Missing keys: {len(load_result.missing_keys)}")
             if load_result.unexpected_keys:
                 print(f"    Warning: Unexpected keys: {len(load_result.unexpected_keys)}")
-
-        # Replace original_model with the processed fresh model
-        # This ensures forward pass uses processed weights
-        self.__dict__["original_model"] = fresh_model
 
         # Enable processed weights mode on all components
         # This makes components use _forward_with_processed_weights instead of calling HF modules
