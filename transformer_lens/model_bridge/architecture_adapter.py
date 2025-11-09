@@ -1096,6 +1096,10 @@ class ArchitectureAdapter:
                 elif "mlp.input" in hf_key:
                     return f"transformer.h.{layer}._original_component.mlp.input._original_component.{parts[-1]}"
 
+                # Pattern: transformer.h.X.mlp.in.weight -> transformer.h.X._original_component.mlp.in._original_component.weight
+                elif "mlp.in" in hf_key:
+                    return f"transformer.h.{layer}._original_component.mlp.in._original_component.{parts[-1]}"
+
                 # Pattern: transformer.h.X.mlp.out.weight -> transformer.h.X._original_component.mlp.out._original_component.weight
                 elif "mlp.out" in hf_key:
                     return f"transformer.h.{layer}._original_component.mlp.out._original_component.{parts[-1]}"
