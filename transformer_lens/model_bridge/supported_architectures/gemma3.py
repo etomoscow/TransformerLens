@@ -9,7 +9,6 @@ from transformer_lens.conversion_utils.conversion_steps import (
 )
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
-    AttentionBridge,
     BlockBridge,
     EmbeddingBridge,
     LinearBridge,
@@ -17,9 +16,6 @@ from transformer_lens.model_bridge.generalized_components import (
     RMSNormalizationBridge,
     RotaryEmbeddingBridge,
     UnembeddingBridge,
-)
-from transformer_lens.model_bridge.generalized_components.gemma2_rms_normalization import (
-    Gemma2RMSNormalizationBridge,
 )
 from transformer_lens.model_bridge.generalized_components.gemma3_attention import (
     PositionEmbeddingsAttentionBridge,
@@ -95,7 +91,9 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
         # Set up component mapping with actual bridge instances
         self.component_mapping = {
             "embed": EmbeddingBridge(name="model.embed_tokens"),
-            "rotary_emb_local": RotaryEmbeddingBridge(name="model.rotary_emb_local", config=self.cfg),
+            "rotary_emb_local": RotaryEmbeddingBridge(
+                name="model.rotary_emb_local", config=self.cfg
+            ),
             "rotary_emb": RotaryEmbeddingBridge(name="model.rotary_emb", config=self.cfg),
             "blocks": BlockBridge(
                 name="model.layers",
@@ -157,18 +155,18 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
         rotary_emb_local = hf_model.model.rotary_emb_local  # Used by 22/26 layers
 
         # Set rotary_emb on actual bridge instances in bridge_model if available
-        if bridge_model is not None and hasattr(bridge_model, 'blocks'):
+        if bridge_model is not None and hasattr(bridge_model, "blocks"):
             # Set on each layer's actual attention bridge instance
             for block in bridge_model.blocks:
-                if hasattr(block, 'attn'):
+                if hasattr(block, "attn"):
                     block.attn.set_rotary_emb(rotary_emb_local)
 
                     # Enable native autograd for q_norm/k_norm to match HF exactly
-                    if hasattr(block.attn, 'original_component'):
+                    if hasattr(block.attn, "original_component"):
                         hf_attn = block.attn.original_component
-                        if hasattr(hf_attn, 'q_norm'):
+                        if hasattr(hf_attn, "q_norm"):
                             hf_attn.q_norm.use_native_layernorm_autograd = True
-                        if hasattr(hf_attn, 'k_norm'):
+                        if hasattr(hf_attn, "k_norm"):
                             hf_attn.k_norm.use_native_layernorm_autograd = True
 
         # Also set on the template for get_generalized_component() calls

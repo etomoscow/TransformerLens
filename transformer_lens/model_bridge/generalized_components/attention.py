@@ -171,7 +171,7 @@ class AttentionBridge(GeneralizedComponent):
 
         # Start with base hidden_states
         d_model = self.config.d_model if self.config and hasattr(self.config, "d_model") else 768
-        inputs = {
+        inputs: Dict[str, Any] = {
             "hidden_states": torch.randn(batch_size, seq_len, d_model, device=device, dtype=dtype)
         }
 
