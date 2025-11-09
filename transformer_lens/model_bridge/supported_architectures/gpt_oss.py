@@ -77,6 +77,8 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
                     "attn": AttentionBridge(
                         name="self_attn",
                         config=self.cfg,
+                        requires_position_embeddings=True,  # GPT-OSS requires position_embeddings (rotary)
+                        requires_attention_mask=True,  # GPT-OSS requires attention_mask
                         submodules={
                             "q": LinearBridge(name="q_proj"),
                             "k": LinearBridge(name="k_proj"),

@@ -7,7 +7,7 @@ model against their HuggingFace equivalents, ensuring output parity.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 from torch import nn
@@ -324,12 +324,32 @@ class ComponentBenchmarker:
                 batch, seq_len, _ = test_input.shape
                 shared_token_indices = torch.randint(0, self.cfg.d_vocab, (batch, seq_len))
 
-            # Run through both components
+            # Generate shared inputs for attention/MLP/rotary components that have get_random_inputs()
+            # This is needed for model-specific inputs like position_embeddings or attention_mask
+            shared_inputs = None
+            if (
+                ("attn" in component_path or "mlp" in component_path or "rotary" in component_path)
+                and hasattr(bridge_component, "get_random_inputs")
+                and callable(getattr(bridge_component, "get_random_inputs"))
+            ):
+                batch_size, seq_len = test_input.shape[:2]
+                # Cast to callable to satisfy mypy - we've already verified it exists and is callable
+                get_random_inputs_fn = cast(
+                    Callable[..., Dict[str, Any]], bridge_component.get_random_inputs
+                )
+                shared_inputs = get_random_inputs_fn(
+                    batch_size=batch_size,
+                    seq_len=seq_len,
+                    device=test_input.device,
+                    dtype=test_input.dtype,
+                )
+
+            # Run through both components with shared inputs (for attention) or standard inputs (for others)
             bridge_output = self._run_component(
-                bridge_component, test_input, component_path, shared_token_indices
+                bridge_component, test_input, component_path, shared_token_indices, shared_inputs
             )
             hf_output = self._run_component(
-                hf_component, test_input, component_path, shared_token_indices
+                hf_component, test_input, component_path, shared_token_indices, shared_inputs
             )
 
             # Extract tensors if outputs are tuples
@@ -382,6 +402,7 @@ class ComponentBenchmarker:
         test_input: torch.Tensor,
         component_path: str,
         shared_token_indices: Optional[torch.Tensor] = None,
+        shared_inputs: Optional[dict] = None,
     ) -> Any:
         """Run a component with appropriate arguments.
 
@@ -390,13 +411,24 @@ class ComponentBenchmarker:
             test_input: The test input tensor
             component_path: Path to the component for debugging
             shared_token_indices: Pre-generated token indices for embedding components
+            shared_inputs: Pre-generated inputs from get_random_inputs() to use for both bridge and HF components
 
         Returns:
             The component output
         """
-        # Try different calling conventions based on component type
+        # Use shared inputs if provided (generated from bridge component's get_random_inputs())
+        if shared_inputs is not None:
+            # Check if shared_inputs contains positional args
+            if "args" in shared_inputs:
+                # Call with positional args (e.g., for rotary embeddings)
+                return component(*shared_inputs["args"])
+            else:
+                # Call with keyword args (e.g., for attention)
+                return component(**shared_inputs)
+
+        # Fallback: Use legacy calling conventions for components without get_random_inputs()
         if "attn" in component_path and "attn" == component_path.split(".")[-1]:
-            # Attention components
+            # Attention components (legacy fallback)
             try:
                 # Try TransformerLens-style attention
                 return component(
@@ -411,7 +443,7 @@ class ComponentBenchmarker:
                     # Try HuggingFace-style attention
                     return component(hidden_states=test_input)
                 except TypeError:
-                    # Simple call
+                    # Try simple call
                     return component(test_input)
         elif component_path == "embed":
             # Main embedding component expects integer indices
@@ -548,10 +580,28 @@ def benchmark_model(
     # Load models
     print(f"Loading models: {model_name}")
     bridge_model = TransformerBridge.boot_transformers(model_name, device=device)  # type: ignore[attr-defined]
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, device_map=device)
+
+    # Load HF model with same attn_implementation as bridge model (if specified)
+    # This ensures numerical consistency between bridge and HF models
+    hf_kwargs = {"device_map": device}
+    if (
+        hasattr(bridge_model.adapter.cfg, "attn_implementation")
+        and bridge_model.adapter.cfg.attn_implementation is not None
+    ):
+        hf_kwargs["attn_implementation"] = bridge_model.adapter.cfg.attn_implementation
+
+    hf_model = AutoModelForCausalLM.from_pretrained(model_name, **hf_kwargs)
+
+    # Set models to eval mode (disable dropout, etc.)
+    bridge_model.eval()
+    hf_model.eval()
 
     # Get adapter
     adapter = bridge_model.adapter
+
+    # Set up component testing (e.g., sync rotary_emb references for Gemma-3)
+    # Pass bridge_model so adapter can set up actual bridge instances, not just templates
+    adapter.setup_component_testing(hf_model, bridge_model=bridge_model)
 
     # Create benchmarker
     benchmarker = ComponentBenchmarker(

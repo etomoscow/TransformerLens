@@ -303,12 +303,20 @@ def boot(
     # Determine the correct HuggingFace model class based on architecture
     model_class = get_hf_model_class_for_architecture(architecture)
 
+    # Prepare model loading kwargs
+    model_kwargs = {
+        "config": hf_config,
+        "torch_dtype": dtype,
+    }
+
+    # Add attn_implementation if specified in config
+    # This allows architectures to specify their preferred attention implementation
+    # (e.g., 'sdpa' for Scaled Dot Product Attention, 'eager' for basic implementation)
+    if hasattr(adapter.cfg, "attn_implementation") and adapter.cfg.attn_implementation is not None:
+        model_kwargs["attn_implementation"] = adapter.cfg.attn_implementation
+
     # Load the model from HuggingFace using the appropriate model class
-    hf_model = model_class.from_pretrained(
-        model_name,
-        config=hf_config,
-        torch_dtype=dtype,
-    )
+    hf_model = model_class.from_pretrained(model_name, **model_kwargs)
 
     # Move model to device
     if device is not None:

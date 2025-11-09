@@ -1142,6 +1142,22 @@ class ArchitectureAdapter:
         # If no pattern matches, return the original key
         return hf_key
 
+    def setup_component_testing(self, hf_model: RemoteModel, bridge_model: Any = None) -> None:
+        """Set up model-specific references needed for component testing.
+
+        This hook is called after the adapter is created and has access to the HF model.
+        Subclasses can override this to configure bridges with model-specific components
+        (e.g., rotary embeddings, normalization parameters) needed for get_random_inputs().
+
+        Args:
+            hf_model: The HuggingFace model instance
+            bridge_model: Optional TransformerBridge model instance (for configuring actual bridges)
+
+        Note:
+            This is a no-op in the base class. Override in subclasses as needed.
+        """
+        pass
+
     def enable_ht_computation_for_bridge(self, bridge_model):
         """Enable HT-style computation for bridge components.
 

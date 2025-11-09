@@ -40,6 +40,8 @@ class JointQKVAttentionBridge(AttentionBridge):
         qkv_conversion_rule: Optional[BaseHookConversion] = None,
         attn_conversion_rule: Optional[BaseHookConversion] = None,
         pattern_conversion_rule: Optional[BaseHookConversion] = None,
+        requires_position_embeddings: bool = False,
+        requires_attention_mask: bool = False,
     ):
         """Initialize the Joint QKV attention bridge.
 
@@ -52,6 +54,8 @@ class JointQKVAttentionBridge(AttentionBridge):
             attn_conversion_rule: Optional conversion rule. Passed to parent AttentionBridge. If None, AttentionAutoConversion will be used
             pattern_conversion_rule: Optional conversion rule for attention patterns. If None,
                                    uses AttentionPatternConversion to ensure [n_heads, pos, pos] shape
+            requires_position_embeddings: Whether this attention requires position_embeddings as input
+            requires_attention_mask: Whether this attention requires attention_mask as input
         """
         super().__init__(
             name,
@@ -59,6 +63,8 @@ class JointQKVAttentionBridge(AttentionBridge):
             submodules=submodules,
             conversion_rule=attn_conversion_rule,
             pattern_conversion_rule=pattern_conversion_rule,
+            requires_position_embeddings=requires_position_embeddings,
+            requires_attention_mask=requires_attention_mask,
         )
 
         self.split_qkv_matrix = split_qkv_matrix

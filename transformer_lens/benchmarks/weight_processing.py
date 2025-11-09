@@ -272,7 +272,20 @@ def benchmark_weight_modification(
         # Modify W_V weights
         with torch.no_grad():
             original_w_v = bridge.blocks[0].attn.W_V.clone()
-            bridge.blocks[0].attn.W_V[0, :, :] = 0  # Zero out first head
+            # Check dimensionality - GQA models may have 2D tensors instead of 3D
+            if original_w_v.ndim == 3:
+                # Standard 3D tensor: [n_heads, d_model, d_head]
+                bridge.blocks[0].attn.W_V[0, :, :] = 0
+            elif original_w_v.ndim == 2:
+                # 2D tensor (e.g., GQA models): [n_heads * d_head, d_model] or similar
+                bridge.blocks[0].attn.W_V[0, :] = 0
+            else:
+                return BenchmarkResult(
+                    name="weight_modification",
+                    severity=BenchmarkSeverity.WARNING,
+                    message=f"Unexpected W_V shape: {original_w_v.shape} (ndim={original_w_v.ndim})",
+                    passed=False,
+                )
 
         # Get modified loss
         modified_loss = bridge(test_text, return_type="loss")

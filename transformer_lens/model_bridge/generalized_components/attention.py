@@ -53,6 +53,8 @@ class AttentionBridge(GeneralizedComponent):
         conversion_rule: Optional[BaseHookConversion] = None,
         pattern_conversion_rule: Optional[BaseHookConversion] = None,
         maintain_native_attention: bool = False,
+        requires_position_embeddings: bool = False,
+        requires_attention_mask: bool = False,
     ):
         """Initialize the attention bridge.
 
@@ -66,6 +68,10 @@ class AttentionBridge(GeneralizedComponent):
             maintain_native_attention: If True, preserve the original HF attention implementation
                                       without wrapping. Use for models with custom attention
                                       (e.g., attention sinks, specialized RoPE). Defaults to False.
+            requires_position_embeddings: If True, this attention requires position_embeddings argument
+                                        (e.g., Gemma-3 with dual RoPE). Defaults to False.
+            requires_attention_mask: If True, this attention requires attention_mask argument
+                                    (e.g., GPTNeoX/Pythia). Defaults to False.
         """
         # Set up conversion rule - use AttentionAutoConversion if None
         if conversion_rule is None:
@@ -105,6 +111,10 @@ class AttentionBridge(GeneralizedComponent):
         # Store whether to maintain native attention implementation
         self.maintain_native_attention = maintain_native_attention
 
+        # Store input requirements for testing
+        self.requires_position_embeddings = requires_position_embeddings
+        self.requires_attention_mask = requires_attention_mask
+
     def setup_no_processing_hooks(self) -> None:
         """Setup hooks for no_processing mode.
 
@@ -132,6 +142,74 @@ class AttentionBridge(GeneralizedComponent):
             self._wrap_hf_attention_forward()
 
         self._hf_forward_wrapped = True
+
+    def get_random_inputs(
+        self,
+        batch_size: int = 2,
+        seq_len: int = 8,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> Dict[str, Any]:
+        """Get random inputs for testing this attention component.
+
+        Generates appropriate inputs based on the attention's requirements
+        (position_embeddings, attention_mask, etc.).
+
+        Args:
+            batch_size: Batch size for the test inputs
+            seq_len: Sequence length for the test inputs
+            device: Device to create tensors on (defaults to CPU)
+            dtype: Dtype for generated tensors (defaults to float32)
+
+        Returns:
+            Dictionary of keyword arguments to pass to forward()
+        """
+        if device is None:
+            device = torch.device("cpu")
+        if dtype is None:
+            dtype = torch.float32
+
+        # Start with base hidden_states
+        d_model = self.config.d_model if self.config and hasattr(self.config, "d_model") else 768
+        inputs: Dict[str, Any] = {
+            "hidden_states": torch.randn(batch_size, seq_len, d_model, device=device, dtype=dtype)
+        }
+
+        # Add position_embeddings if required (e.g., Gemma-3)
+        if self.requires_position_embeddings:
+            # Generate dummy cos/sin tensors for testing
+            # Note: We use a fallback approach instead of calling rotary_emb directly
+            # because different models have different rotary_emb interfaces and shapes
+
+            # Try to get head dimension from config (different models use different attribute names)
+            if self.config:
+                if hasattr(self.config, "d_head"):
+                    d_head = self.config.d_head
+                elif hasattr(self.config, "head_dim"):
+                    d_head = self.config.head_dim
+                else:
+                    d_head = 64  # fallback
+            else:
+                d_head = 64
+
+            # Calculate rotary dimension (some models use partial rotary)
+            rotary_pct = getattr(self.config, "rotary_pct", 1.0) if self.config else 1.0
+            rotary_ndims = int(rotary_pct * d_head)
+            # Create dummy rotary embeddings: shape [1, seq_len, rotary_ndims]
+            # Note: First dimension is 1 (not batch_size) because RoPE embeddings
+            # are typically broadcast across the batch dimension
+            cos = torch.ones(1, seq_len, rotary_ndims, device=device, dtype=dtype)
+            sin = torch.zeros(1, seq_len, rotary_ndims, device=device, dtype=dtype)
+            inputs["position_embeddings"] = (cos, sin)
+
+        # Add attention_mask if required (e.g., GPTNeoX/Pythia)
+        if self.requires_attention_mask:
+            # Generate a causal attention mask (lower triangular matrix)
+            # Shape: [batch_size, seq_len] with 1s for allowed positions
+            # For causal masking, we want to attend to all previous positions
+            inputs["attention_mask"] = torch.ones(batch_size, seq_len, device=device)
+
+        return inputs
 
     def _setup_hook_z_reshape(self) -> None:
         """Setup hook_z (o.hook_in) to reshape from [batch, seq, d_model] to [batch, seq, n_heads, d_head]."""
