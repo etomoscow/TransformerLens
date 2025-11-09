@@ -1311,21 +1311,31 @@ class ArchitectureAdapter:
         return W_Q, W_K, W_V, b_Q, b_K, b_V
 
     def _extract_qkv_neox_style(self, query_key_value, n_heads, d_model, d_head):
-        """Extract Q, K, V weights from GPT-NeoX style combined query_key_value."""
+        """Extract Q, K, V weights from GPT-NeoX style combined query_key_value.
+
+        GPT-NeoX uses a unique layout where the QKV weight is arranged as:
+        [n_heads * 3 * d_head, d_model] with the pattern (head_index, qkv, d_head) flattened.
+        This is different from GPT-2 which uses (qkv, n_heads * d_head) flattened.
+        """
+        import einops
+
         qkv_weight = query_key_value.weight.data
         qkv_bias = query_key_value.bias.data if hasattr(query_key_value, "bias") else None
 
-        qkv_weight = qkv_weight.view(3, d_model, d_model)
-
-        W_Q = qkv_weight[0].T.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
-        W_K = qkv_weight[1].T.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
-        W_V = qkv_weight[2].T.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
+        # Rearrange from NeoX layout: (head_index, qkv, d_head) flattened
+        # to HookedTransformer layout: [n_heads, d_model, d_head] for each of Q, K, V
+        # Weight shape: [n_heads * 3 * d_head, d_model] = [3*d_model, d_model]
+        qkv_rearranged = einops.rearrange(qkv_weight, "(i qkv h) m -> qkv i m h", i=n_heads, qkv=3, h=d_head)
+        W_Q = qkv_rearranged[0]  # [n_heads, d_model, d_head]
+        W_K = qkv_rearranged[1]  # [n_heads, d_model, d_head]
+        W_V = qkv_rearranged[2]  # [n_heads, d_model, d_head]
 
         if qkv_bias is not None:
-            qkv_bias = qkv_bias.view(3, d_model)
-            b_Q = qkv_bias[0].view(n_heads, d_head).contiguous()
-            b_K = qkv_bias[1].view(n_heads, d_head).contiguous()
-            b_V = qkv_bias[2].view(n_heads, d_head).contiguous()
+            # Bias shape: [n_heads * 3 * d_head] with same layout pattern
+            qkv_bias_rearranged = einops.rearrange(qkv_bias, "(i qkv h) -> qkv i h", i=n_heads, qkv=3, h=d_head)
+            b_Q = qkv_bias_rearranged[0]  # [n_heads, d_head]
+            b_K = qkv_bias_rearranged[1]  # [n_heads, d_head]
+            b_V = qkv_bias_rearranged[2]  # [n_heads, d_head]
         else:
             b_Q = b_K = b_V = None
 

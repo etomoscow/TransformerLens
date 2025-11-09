@@ -29,6 +29,14 @@ class Embed(nn.Module):
     ) -> Float[torch.Tensor, "batch pos d_model"]:
         # If A has shape [a, b] and B has shape [c, d], then A[:, B] has shape [a, c, d]
         # B acts as a tensor of indices into the second dimension (so >=0 and <b)
+        embed_out = self.W_E[tokens, :]
+
+        # Apply post-embedding scaling if configured (e.g., Gemma models scale by sqrt(d_model))
+        if self.cfg.post_embedding_scale is not None:
+            embed_out = embed_out * self.cfg.post_embedding_scale
+
+        # Apply post-embedding layer norm if configured (e.g., Bloom)
         if self.cfg.post_embedding_ln:
-            return self.ln(self.W_E[tokens, :])
-        return self.W_E[tokens, :]
+            embed_out = self.ln(embed_out)
+
+        return embed_out

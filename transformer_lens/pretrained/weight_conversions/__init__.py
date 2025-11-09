@@ -7,6 +7,7 @@ from .llama import convert_llama_weights
 from .bert import convert_bert_weights
 from .mistral import convert_mistral_weights
 from .mixtral import convert_mixtral_weights
+from .gpt_oss import convert_gpt_oss_weights
 from .bloom import convert_bloom_weights
 from .coder import convert_coder_weights
 from .qwen import convert_qwen_weights

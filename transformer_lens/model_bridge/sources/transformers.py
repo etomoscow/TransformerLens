@@ -103,10 +103,12 @@ def map_default_transformer_lens_config(hf_config):
     elif hasattr(tl_config, "d_model"):  # Default to 4x for GPT2-style
         tl_config.d_mlp = getattr(hf_config, "n_inner", 4 * tl_config.d_model)
 
-    # Map head dimension (prefer explicit head_dim from config over calculation)
+    # Map head dimension
+    # Prefer explicit head_dim from config when available, as it matches Q projection dimensions
+    # even for non-standard architectures where n_heads * d_head != d_model
     if hasattr(hf_config, "head_dim") and hf_config.head_dim is not None:
         tl_config.d_head = hf_config.head_dim
-    elif hasattr(tl_config, "d_model") and hasattr(tl_config, "n_heads"):
+    elif hasattr(tl_config, "d_model") and hasattr(tl_config, "n_heads") and tl_config.n_heads > 0:
         # Calculate d_head if we have both d_model and n_heads
         tl_config.d_head = tl_config.d_model // tl_config.n_heads
 
@@ -125,6 +127,13 @@ def map_default_transformer_lens_config(hf_config):
     # Set sliding window size for models with local attention
     if hasattr(hf_config, "sliding_window") and hf_config.sliding_window is not None:
         tl_config.sliding_window = hf_config.sliding_window
+
+    # Map softcapping parameters (Gemma-2, Gemma-3)
+    if hasattr(hf_config, "final_logit_softcapping") and hf_config.final_logit_softcapping is not None:
+        tl_config.output_logits_soft_cap = float(hf_config.final_logit_softcapping)
+
+    if hasattr(hf_config, "attn_logit_softcapping") and hf_config.attn_logit_softcapping is not None:
+        tl_config.attn_scores_soft_cap = float(hf_config.attn_logit_softcapping)
 
     # Set common defaults for transformer models
     tl_config.default_prepend_bos = True

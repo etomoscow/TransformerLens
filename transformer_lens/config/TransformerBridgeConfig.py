@@ -23,6 +23,7 @@ class TransformerBridgeConfig(TransformerLensConfig):
         n_layers: int,
         n_ctx: int,
         d_vocab: int = -1,
+        n_heads: int = -1,
         architecture: Optional[str] = None,
         tokenizer_prepends_bos: bool = True,
         default_padding_side: Optional[str] = None,
@@ -86,7 +87,7 @@ class TransformerBridgeConfig(TransformerLensConfig):
         **kwargs,
     ):
         """Initialize TransformerBridgeConfig."""
-        super().__init__(d_model=d_model, d_head=d_head, n_layers=n_layers, n_ctx=n_ctx, d_vocab=d_vocab, **kwargs)
+        super().__init__(d_model=d_model, d_head=d_head, n_layers=n_layers, n_ctx=n_ctx, d_vocab=d_vocab, n_heads=n_heads, **kwargs)
 
         # Architecture information for adapter selection
         self.architecture = architecture

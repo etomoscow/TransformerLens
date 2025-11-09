@@ -120,14 +120,61 @@ class PythiaArchitectureAdapter(ArchitectureAdapter):
                         ]
                     ),
                 ),
+                # HookedTransformer naming convention (for processed weights)
+                "blocks.{i}.attn.W_Q": (
+                    "gpt_neox.layers.{i}.attention.query_key_value.weight",
+                    ChainHookConversion(
+                        [
+                            SplitHookConversion(0, 3),
+                            RearrangeHookConversion(
+                                "(head d_head) d_model -> head d_model d_head",
+                                head=self.cfg.n_heads,
+                                d_head=self.cfg.d_model // self.cfg.n_heads,
+                            ),
+                        ]
+                    ),
+                ),
+                "blocks.{i}.attn.W_K": (
+                    "gpt_neox.layers.{i}.attention.query_key_value.weight",
+                    ChainHookConversion(
+                        [
+                            SplitHookConversion(1, 3),
+                            RearrangeHookConversion(
+                                "(head d_head) d_model -> head d_model d_head",
+                                head=self.cfg.n_heads,
+                                d_head=self.cfg.d_model // self.cfg.n_heads,
+                            ),
+                        ]
+                    ),
+                ),
+                "blocks.{i}.attn.W_V": (
+                    "gpt_neox.layers.{i}.attention.query_key_value.weight",
+                    ChainHookConversion(
+                        [
+                            SplitHookConversion(2, 3),
+                            RearrangeHookConversion(
+                                "(head d_head) d_model -> head d_model d_head",
+                                head=self.cfg.n_heads,
+                                d_head=self.cfg.d_model // self.cfg.n_heads,
+                            ),
+                        ]
+                    ),
+                ),
                 "blocks.{i}.attn.o": (
                     "gpt_neox.layers.{i}.attention.dense.weight",
                     RearrangeHookConversion("d_model (head d_head) -> head d_head d_model"),
                 ),
                 "blocks.{i}.attn.b_O": "gpt_neox.layers.{i}.attention.dense.bias",
-                "blocks.{i}.mlp.in": "gpt_neox.layers.{i}.mlp.dense_h_to_4h.weight",
+                # MLP weights - transpose from nn.Linear [out, in] to Conv1D [in, out] format
+                "blocks.{i}.mlp.in": (
+                    "gpt_neox.layers.{i}.mlp.dense_h_to_4h.weight",
+                    RearrangeHookConversion("d_mlp d_model -> d_model d_mlp"),
+                ),
                 "blocks.{i}.mlp.b_in": "gpt_neox.layers.{i}.mlp.dense_h_to_4h.bias",
-                "blocks.{i}.mlp.out": "gpt_neox.layers.{i}.mlp.dense_4h_to_h.weight",
+                "blocks.{i}.mlp.out": (
+                    "gpt_neox.layers.{i}.mlp.dense_4h_to_h.weight",
+                    RearrangeHookConversion("d_model d_mlp -> d_mlp d_model"),
+                ),
                 "blocks.{i}.mlp.b_out": "gpt_neox.layers.{i}.mlp.dense_4h_to_h.bias",
                 "ln_final.w": "gpt_neox.final_layer_norm.weight",
                 "ln_final.b": "gpt_neox.final_layer_norm.bias",
@@ -196,9 +243,14 @@ class PythiaArchitectureAdapter(ArchitectureAdapter):
         assert isinstance(qkv_bias, torch.Tensor)
 
         # Original qkv_bias shape: [n_heads * 3 * d_head]
-        # Reshape to [3, n_heads * d_head] to split by Q, K, V
-        qkv_bias = qkv_bias.reshape(3, self.cfg.n_heads * self.cfg.d_head)
-        b_Q, b_K, b_V = qkv_bias[0, :], qkv_bias[1, :], qkv_bias[2, :]
+        # GPTNeoX arranges as (head_index, qkv, d_head) flattened
+        # Reshape to [n_heads, 3, d_head], then transpose to [3, n_heads, d_head]
+        qkv_bias = qkv_bias.view(self.cfg.n_heads, 3, self.cfg.d_head)
+        qkv_bias = qkv_bias.transpose(0, 1)  # Now [3, n_heads, d_head]
+        # Flatten each to [n_heads * d_head]
+        b_Q = qkv_bias[0].reshape(-1)
+        b_K = qkv_bias[1].reshape(-1)
+        b_V = qkv_bias[2].reshape(-1)
 
         # Create nn.Linear modules
         # After tensor_split, W_Q, W_K, W_V shapes are [d_model, d_model] ([in_features, out_features])

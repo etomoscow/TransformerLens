@@ -1167,22 +1167,51 @@ class TransformerBridge(nn.Module):
         if verbose:
             print(f"Processing weights for {self.cfg.model_name}...")
 
-        # Load a fresh HF model to avoid dealing with wrapped keys
+        # Extract weights from the existing model instead of loading a fresh one
         import torch
-        from transformers import AutoModelForCausalLM
 
         if verbose:
-            print("  Loading fresh HF model for processing...")
+            print("  Extracting weights from existing model...")
 
-        # Load fresh model with clean state dict
-        fresh_model = AutoModelForCausalLM.from_pretrained(
-            self.cfg.model_name,
-            torch_dtype=self.cfg.dtype if hasattr(self.cfg, "dtype") else torch.float32,
-        )
-        state_dict = fresh_model.state_dict()
+        # Get state dict from the original model we already have
+        raw_state_dict = self.original_model.state_dict()
+
+        # Map wrapped keys back to clean HuggingFace keys
+        # The TransformerBridge wraps HF model components, adding ._original_component suffix
+        # to preserve the original HF module structure. We need to remove these suffixes
+        # to get back the clean HF keys that ProcessWeights expects.
+        # The architecture adapter will then translate these HF keys to TL format internally.
+        state_dict = {}
+        for key, value in raw_state_dict.items():
+            # Remove all occurrences of ._original_component from the key
+            # Example: "model.layers.0.self_attn._original_component.q_proj.weight"
+            #       -> "model.layers.0.self_attn.q_proj.weight"
+            clean_key = key.replace("._original_component", "")
+            state_dict[clean_key] = value
+
+        if verbose:
+            print(f"    Mapped {len(raw_state_dict)} wrapped keys back to HuggingFace format")
 
         # Get architecture adapter for path translation
         adapter = self.adapter
+
+        # Transpose MLP weights for architectures that use nn.Linear instead of Conv1D
+        # GPT-NeoX/Pythia use standard nn.Linear with shape [out, in] = [d_mlp, d_model]
+        # Weight processing expects Conv1D layout [in, out] = [d_model, d_mlp]
+        if adapter and hasattr(adapter, '__class__') and 'Neox' in adapter.__class__.__name__:
+            if verbose:
+                print("  Transposing MLP weights from nn.Linear to Conv1D layout...")
+            n_layers = self.cfg.n_layers
+            for layer_idx in range(n_layers):
+                # Transpose MLP input weights: [d_mlp, d_model] -> [d_model, d_mlp]
+                mlp_in_key = f"gpt_neox.layers.{layer_idx}.mlp.dense_h_to_4h.weight"
+                if mlp_in_key in state_dict:
+                    state_dict[mlp_in_key] = state_dict[mlp_in_key].T.contiguous()
+
+                # Transpose MLP output weights: [d_model, d_mlp] -> [d_mlp, d_model]
+                mlp_out_key = f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h.weight"
+                if mlp_out_key in state_dict:
+                    state_dict[mlp_out_key] = state_dict[mlp_out_key].T.contiguous()
 
         # NOTE: Weight processing code (ProcessWeights) handles splitting joint QKV internally
         # via convert_tensor_to_tl_format(), so we don't need to pre-split here
@@ -1266,11 +1295,29 @@ class TransformerBridge(nn.Module):
         self._configure_components_for_processing(verbose=verbose)
         self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
 
-        # Load processed weights into the fresh model
+        # Load processed weights back into the original model
         if verbose:
-            print("  Loading processed weights into fresh model...")
+            print("  Loading processed weights back into original model...")
 
-        load_result = fresh_model.load_state_dict(state_dict, strict=False)
+        # Transpose MLP weights back to nn.Linear format for NeoX models before loading
+        # We transposed them earlier for processing, now transpose back for HF model
+        if adapter and hasattr(adapter, '__class__') and 'Neox' in adapter.__class__.__name__:
+            if verbose:
+                print("  Transposing MLP weights back to nn.Linear format...")
+            n_layers = self.cfg.n_layers
+            for layer_idx in range(n_layers):
+                # Transpose MLP input weights back: [d_model, d_mlp] -> [d_mlp, d_model]
+                mlp_in_key = f"gpt_neox.layers.{layer_idx}.mlp.dense_h_to_4h.weight"
+                if mlp_in_key in state_dict:
+                    state_dict[mlp_in_key] = state_dict[mlp_in_key].T.contiguous()
+
+                # Transpose MLP output weights back: [d_mlp, d_model] -> [d_model, d_mlp]
+                mlp_out_key = f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h.weight"
+                if mlp_out_key in state_dict:
+                    state_dict[mlp_out_key] = state_dict[mlp_out_key].T.contiguous()
+
+        # Load the processed weights back into the original model
+        load_result = self.original_model.load_state_dict(state_dict, strict=False)
 
         if verbose and (load_result.missing_keys or load_result.unexpected_keys):
             if load_result.missing_keys:
@@ -1278,9 +1325,7 @@ class TransformerBridge(nn.Module):
             if load_result.unexpected_keys:
                 print(f"    Warning: Unexpected keys: {len(load_result.unexpected_keys)}")
 
-        # Replace original_model with the processed fresh model
-        # This ensures forward pass uses processed weights
-        self.__dict__["original_model"] = fresh_model
+        # No need to replace original_model since we modified it in-place
 
         # Enable processed weights mode on all components
         # This makes components use _forward_with_processed_weights instead of calling HF modules

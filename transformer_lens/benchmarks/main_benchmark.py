@@ -163,6 +163,13 @@ def run_benchmark_suite(
         if verbose:
             print("Running Phase 1 benchmarks...\n")
 
+        # Set up component testing for the architecture (if available)
+        # This ensures architecture-specific setup (e.g., enabling native HF autograd for Gemma-2's RMSNorm)
+        # is applied before running ALL Phase 1 tests
+        adapter = bridge_unprocessed.adapter
+        if hasattr(adapter, 'setup_component_testing'):
+            adapter.setup_component_testing(hf_model, bridge_model=bridge_unprocessed)
+
         # Component-level benchmarks
         if verbose:
             print("1. Component-Level Benchmarks")
@@ -204,23 +211,40 @@ def run_benchmark_suite(
 
     # Load HookedTransformer (unprocessed) for Phase 2
     if use_ht_reference:
+        # Pre-check: verify architecture is supported before downloading weights
+        architecture_supported = False
         try:
+            from transformer_lens.loading_from_pretrained import convert_hf_model_config
+
+            # Try to get the config - this will raise NotImplementedError if not supported
+            convert_hf_model_config(model_name, trust_remote_code=True)
+            architecture_supported = True
+        except NotImplementedError as e:
             if verbose:
-                print("Loading HookedTransformer (unprocessed)...")
-            ht_model_unprocessed = HookedTransformer.from_pretrained(
-                model_name,
-                device=device,
-                fold_ln=False,
-                center_writing_weights=False,
-                center_unembed=False,
-                fold_value_biases=False,
-                refactor_factored_attn_matrices=False,
-            )
-            if verbose:
-                print("✓ HookedTransformer loaded (unprocessed)\n")
-        except Exception as e:
-            if verbose:
-                print(f"✗ Could not load unprocessed HookedTransformer: {str(e)}\n")
+                print(f"⚠ HookedTransformer does not support this architecture: {str(e)}")
+                print("  Skipping HookedTransformer loading (only TransformerBridge will be tested)\n")
+        except Exception:
+            # Other errors (network issues, etc.) - still try to load
+            architecture_supported = True
+
+        if architecture_supported:
+            try:
+                if verbose:
+                    print("Loading HookedTransformer (unprocessed)...")
+                ht_model_unprocessed = HookedTransformer.from_pretrained(
+                    model_name,
+                    device=device,
+                    fold_ln=False,
+                    center_writing_weights=False,
+                    center_unembed=False,
+                    fold_value_biases=False,
+                    refactor_factored_attn_matrices=False,
+                )
+                if verbose:
+                    print("✓ HookedTransformer loaded (unprocessed)\n")
+            except Exception as e:
+                if verbose:
+                    print(f"✗ Could not load unprocessed HookedTransformer: {str(e)}\n")
 
     # Run Phase 2 benchmarks
     if bridge_unprocessed:
@@ -352,23 +376,40 @@ def run_benchmark_suite(
         return results
 
     if use_ht_reference:
+        # Pre-check: verify architecture is supported before downloading weights
+        architecture_supported = False
         try:
+            from transformer_lens.loading_from_pretrained import convert_hf_model_config
+
+            # Try to get the config - this will raise NotImplementedError if not supported
+            convert_hf_model_config(model_name, trust_remote_code=True)
+            architecture_supported = True
+        except NotImplementedError as e:
             if verbose:
-                print("Loading HookedTransformer (processed)...")
-            ht_model_processed = HookedTransformer.from_pretrained(
-                model_name,
-                device=device,
-                fold_ln=True,
-                center_writing_weights=True,
-                center_unembed=True,
-                fold_value_biases=True,
-                refactor_factored_attn_matrices=False,
-            )
-            if verbose:
-                print("✓ HookedTransformer loaded (processed)\n")
-        except Exception as e:
-            if verbose:
-                print(f"✗ Could not load processed HookedTransformer: {str(e)}\n")
+                print(f"⚠ HookedTransformer does not support this architecture: {str(e)}")
+                print("  Skipping processed HookedTransformer loading\n")
+        except Exception:
+            # Other errors (network issues, etc.) - still try to load
+            architecture_supported = True
+
+        if architecture_supported:
+            try:
+                if verbose:
+                    print("Loading HookedTransformer (processed)...")
+                ht_model_processed = HookedTransformer.from_pretrained(
+                    model_name,
+                    device=device,
+                    fold_ln=True,
+                    center_writing_weights=True,
+                    center_unembed=True,
+                    fold_value_biases=True,
+                    refactor_factored_attn_matrices=False,
+                )
+                if verbose:
+                    print("✓ HookedTransformer loaded (processed)\n")
+            except Exception as e:
+                if verbose:
+                    print(f"✗ Could not load processed HookedTransformer: {str(e)}\n")
 
     # Run Phase 3 benchmarks
     if bridge_processed:

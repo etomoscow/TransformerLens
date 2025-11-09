@@ -62,6 +62,7 @@ NEED_REMOTE_CODE_MODELS = (
     "microsoft/phi-2",
     "microsoft/Phi-3-mini-4k-instruct",
     "microsoft/phi-4",
+    "openai/gpt-oss",
 )
 
 
@@ -778,6 +779,7 @@ def convert_hf_model_config(model_name: str, **kwargs: Any) -> dict[str, Any]:
             "n_key_value_heads": 1,
             "gated_mlp": True,
             "final_rms": True,
+            "post_embedding_scale": 2048**0.5,  # Gemma scales embeddings by sqrt(d_model)
         }
     elif official_model_name.startswith("google/gemma-7b"):
         # Architecture for Gemma 7b and Gemma 7b Instruct models
@@ -800,6 +802,7 @@ def convert_hf_model_config(model_name: str, **kwargs: Any) -> dict[str, Any]:
             "n_key_value_heads": 16,
             "gated_mlp": True,
             "final_rms": True,
+            "post_embedding_scale": 3072**0.5,  # Gemma scales embeddings by sqrt(d_model)
         }
     elif official_model_name.startswith("google/gemma-2-2b"):
         # Architecture for Gemma-2 2b and Gemma-2 2b Instruct models
@@ -827,6 +830,7 @@ def convert_hf_model_config(model_name: str, **kwargs: Any) -> dict[str, Any]:
             "gated_mlp": True,
             "final_rms": True,
             "use_normalization_before_and_after": True,
+            "post_embedding_scale": 2304**0.5,  # Gemma-2 scales embeddings by sqrt(d_model)
         }
     elif official_model_name.startswith("google/gemma-2-9b"):
         # Architecture for Gemma-2 9b and Gemma-2 9b Instruct models
@@ -854,6 +858,7 @@ def convert_hf_model_config(model_name: str, **kwargs: Any) -> dict[str, Any]:
             "gated_mlp": True,
             "final_rms": True,
             "use_normalization_before_and_after": True,
+            "post_embedding_scale": 3584**0.5,  # Gemma-2 scales embeddings by sqrt(d_model)
         }
     elif official_model_name.startswith("google/gemma-2-27b"):
         # Architecture for Gemma-2 27b and Gemma-2 27b Instruct models
@@ -882,6 +887,7 @@ def convert_hf_model_config(model_name: str, **kwargs: Any) -> dict[str, Any]:
             "gated_mlp": True,
             "final_rms": True,
             "use_normalization_before_and_after": True,
+            "post_embedding_scale": 4608**0.5,  # Gemma-2 scales embeddings by sqrt(d_model)
         }
     elif architecture == "T5ForConditionalGeneration":
         cfg_dict = {

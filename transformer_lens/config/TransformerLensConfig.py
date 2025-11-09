@@ -111,10 +111,14 @@ class TransformerLensConfig:
         """Post-initialization processing and validation."""
         # Set n_heads if not specified
         if self.n_heads == -1:
-            self.n_heads = self.d_model // self.d_head
-            if not self.d_model % self.d_head == 0:
+            # Only validate divisibility if we need to calculate n_heads
+            # Some models (e.g., GPT-OSS, Gemma-3) use non-standard attention dimensions
+            # where n_heads * d_head != d_model
+            if self.d_model % self.d_head == 0:
+                self.n_heads = self.d_model // self.d_head
+            else:
                 raise ValueError(
-                    f"d_model ({self.d_model}) must be divisible by d_head ({self.d_head})"
+                    f"d_model ({self.d_model}) must be divisible by d_head ({self.d_head}) when n_heads is not specified"
                 )
 
         # Set device if not specified

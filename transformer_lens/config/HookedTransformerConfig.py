@@ -232,6 +232,7 @@ class HookedTransformerConfig(TransformerLensConfig):
     dtype: torch.dtype = torch.float32
     tokenizer_prepends_bos: Optional[bool] = None
     post_embedding_ln: bool = False
+    post_embedding_scale: Optional[float] = None
     rotary_base: int = 10000
     trust_remote_code: bool = False
     rotary_adjacent_pairs: bool = False

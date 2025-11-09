@@ -204,10 +204,10 @@ class AttentionBridge(GeneralizedComponent):
 
         # Add attention_mask if required (e.g., GPTNeoX/Pythia)
         if self.requires_attention_mask:
-            # Generate a causal attention mask (lower triangular matrix)
-            # Shape: [batch_size, seq_len] with 1s for allowed positions
-            # For causal masking, we want to attend to all previous positions
-            inputs["attention_mask"] = torch.ones(batch_size, seq_len, device=device)
+            # Generate a causal attention mask
+            # GPTNeoX expects shape: [batch_size, 1, 1, seq_len] for broadcasting
+            # The 1s allow attention to all positions (causal mask is handled internally)
+            inputs["attention_mask"] = torch.ones(batch_size, 1, 1, seq_len, device=device)
 
         return inputs
 
@@ -310,19 +310,20 @@ class AttentionBridge(GeneralizedComponent):
         # Create closure that captures 'self' (the AttentionBridge)
         attention_bridge = self
 
-        # Detect if this attention uses joint QKV (c_attn) or split QKV (q_proj, k_proj, v_proj)
-        has_c_attn = hasattr(hf_attn, "c_attn")
+        # Detect if this attention uses joint QKV (c_attn or query_key_value) or split QKV (q_proj, k_proj, v_proj)
+        has_c_attn = hasattr(hf_attn, "c_attn") or hasattr(hf_attn, "query_key_value")
         has_split_qkv = (
             hasattr(hf_attn, "q_proj") and hasattr(hf_attn, "k_proj") and hasattr(hf_attn, "v_proj")
         )
 
         if has_c_attn:
-            # Joint QKV wrapper (GPT-2 style)
+            # Joint QKV wrapper (GPT-2 style or GPTNeoX style)
             def wrapped_forward(
                 hidden_states,
                 past_key_values=None,
                 cache_position=None,
                 attention_mask=None,
+                position_ids=None,
                 head_mask=None,
                 encoder_hidden_states=None,
                 encoder_attention_mask=None,
@@ -330,34 +331,78 @@ class AttentionBridge(GeneralizedComponent):
                 **kwargs,
             ):
                 """Wrapped forward that manually computes attention scores."""
-                # Compute Q, K, V
-                query, key, value = hf_attn.c_attn(hidden_states).split(hf_attn.split_size, dim=2)  # type: ignore[union-attr,operator]
+                # Get attention head parameters first - needed for GPTNeoX reshaping
+                if hasattr(hf_attn, "num_heads"):
+                    num_heads = hf_attn.num_heads  # type: ignore[union-attr]
+                    head_dim = hf_attn.head_dim  # type: ignore[union-attr]
+                else:
+                    # GPTNeoX uses config attributes
+                    num_heads = hf_attn.config.num_attention_heads  # type: ignore[union-attr]
+                    head_dim = hf_attn.head_size  # type: ignore[union-attr]
 
-                # Split into heads
-                query = split_heads(query, hf_attn.num_heads, hf_attn.head_dim)  # type: ignore[union-attr]
-                key = split_heads(key, hf_attn.num_heads, hf_attn.head_dim)  # type: ignore[union-attr]
-                value = split_heads(value, hf_attn.num_heads, hf_attn.head_dim)  # type: ignore[union-attr]
+                # Compute Q, K, V - handle both c_attn (GPT-2) and query_key_value (GPTNeoX)
+                if hasattr(hf_attn, "c_attn"):
+                    # GPT-2 style: c_attn outputs [batch, seq, 3 * embed_dim]
+                    qkv_out = hf_attn.c_attn(hidden_states)  # type: ignore[union-attr,operator]
+                    query, key, value = qkv_out.split(hf_attn.split_size, dim=2)  # type: ignore[union-attr,operator]
+                    # Split into heads
+                    query = split_heads(query, num_heads, head_dim)
+                    key = split_heads(key, num_heads, head_dim)
+                    value = split_heads(value, num_heads, head_dim)
+                else:
+                    # GPTNeoX style: query_key_value outputs [batch, seq, 3 * num_heads * head_size]
+                    # Then reshape to [batch, seq, num_heads, 3 * head_size]
+                    # Then transpose to [batch, num_heads, seq, 3 * head_size]
+                    # Then chunk into Q, K, V
+                    batch_size, seq_len = hidden_states.size(0), hidden_states.size(1)
+                    qkv_out = hf_attn.query_key_value(hidden_states)  # type: ignore[union-attr,operator]
+                    # Reshape: [batch, seq, 3 * num_heads * head_size] -> [batch, seq, num_heads, 3 * head_size]
+                    hidden_shape = (batch_size, seq_len, num_heads, 3 * head_dim)
+                    qkv = qkv_out.view(hidden_shape).transpose(1, 2)  # [batch, num_heads, seq, 3 * head_size]
+                    # Split into Q, K, V
+                    query, key, value = qkv.chunk(3, dim=-1)  # Each: [batch, num_heads, seq, head_size]
+
+                # Apply rotary embeddings if present (GPTNeoX uses this)
+                if hasattr(hf_attn, "rotary_emb") and hf_attn.rotary_emb is not None and position_ids is not None:  # type: ignore[union-attr]
+                    # Get rotary embeddings
+                    cos, sin = hf_attn.rotary_emb(value, position_ids)  # type: ignore[union-attr,operator]
+                    query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
                 # Compute attention scores
                 attn_scores = torch.matmul(query, key.transpose(-1, -2))
 
-                # Scale
-                if hf_attn.scale_attn_weights:
+                # Scale - handle both GPT-2 and GPTNeoX styles
+                if hasattr(hf_attn, "scale_attn_weights") and hf_attn.scale_attn_weights:  # type: ignore[union-attr]
                     attn_scores = attn_scores / torch.full(
                         [],
                         value.size(-1) ** 0.5,
                         dtype=attn_scores.dtype,
                         device=attn_scores.device,
                     )
+                elif hasattr(hf_attn, "scaling"):  # GPTNeoX style
+                    attn_scores = attn_scores * hf_attn.scaling  # type: ignore[union-attr,operator]
+                else:
+                    # Default scaling
+                    attn_scores = attn_scores / (head_dim ** 0.5)
 
-                # Apply causal mask
-                query_length, key_length = query.size(-2), key.size(-2)
-                causal_mask = hf_attn.bias[:, :, key_length - query_length : key_length, :key_length]  # type: ignore[union-attr,index]
-                # Use -inf for masked positions to match HookedTransformer exactly
-                mask_value = float("-inf")
-                attn_scores = torch.where(
-                    causal_mask, attn_scores.to(attn_scores.dtype), mask_value
-                )
+                # Apply causal mask - handle both GPT-2 (has bias) and GPTNeoX (uses attention_mask)
+                if hasattr(hf_attn, "bias") and hf_attn.bias is not None:  # type: ignore[union-attr]
+                    # GPT-2 style: use precomputed causal mask
+                    query_length, key_length = query.size(-2), key.size(-2)
+                    causal_mask = hf_attn.bias[:, :, key_length - query_length : key_length, :key_length]  # type: ignore[union-attr,index]
+                    # Use -inf for masked positions to match HookedTransformer exactly
+                    mask_value = float("-inf")
+                    attn_scores = torch.where(
+                        causal_mask, attn_scores.to(attn_scores.dtype), mask_value
+                    )
+                elif hasattr(hf_attn, "is_causal") and hf_attn.is_causal and attention_mask is None:  # type: ignore[union-attr]
+                    # GPTNeoX style: create causal mask on the fly
+                    query_length, key_length = query.size(-2), key.size(-2)
+                    causal_mask = torch.triu(
+                        torch.ones((query_length, key_length), dtype=torch.bool, device=query.device),
+                        diagonal=key_length - query_length + 1
+                    )
+                    attn_scores = attn_scores.masked_fill(causal_mask, float("-inf"))
 
                 # Apply attention mask if provided
                 if attention_mask is not None:
@@ -370,8 +415,11 @@ class AttentionBridge(GeneralizedComponent):
                 attn_weights = F.softmax(attn_scores, dim=-1)
                 attn_weights = attn_weights.to(value.dtype)
 
-                # Dropout
-                attn_weights = hf_attn.attn_dropout(attn_weights)  # type: ignore[union-attr,operator]
+                # Dropout - handle both attribute names
+                if hasattr(hf_attn, "attn_dropout") and hf_attn.attn_dropout is not None:  # type: ignore[union-attr]
+                    attn_weights = hf_attn.attn_dropout(attn_weights)  # type: ignore[union-attr,operator]
+                elif hasattr(hf_attn, "attention_dropout") and hf_attn.attention_dropout is not None:  # type: ignore[union-attr]
+                    attn_weights = hf_attn.attention_dropout(attn_weights)  # type: ignore[union-attr,operator]
 
                 # Apply head mask if provided
                 if head_mask is not None:
@@ -385,12 +433,22 @@ class AttentionBridge(GeneralizedComponent):
 
                 # Merge heads
                 attn_output = attn_output.transpose(1, 2).contiguous()
-                new_shape = attn_output.size()[:-2] + (hf_attn.embed_dim,)  # type: ignore[union-attr,operator]
+                if hasattr(hf_attn, "embed_dim"):
+                    new_shape = attn_output.size()[:-2] + (hf_attn.embed_dim,)  # type: ignore[union-attr,operator]
+                else:
+                    # GPTNeoX uses num_heads * head_size
+                    new_shape = attn_output.size()[:-2] + (num_heads * head_dim,)  # type: ignore[operator]
                 attn_output = attn_output.view(new_shape)
 
-                # Output projection
-                attn_output = hf_attn.c_proj(attn_output)  # type: ignore[union-attr,operator]
-                attn_output = hf_attn.resid_dropout(attn_output)  # type: ignore[union-attr,operator]
+                # Output projection - handle both c_proj (GPT-2) and dense (GPTNeoX)
+                if hasattr(hf_attn, "c_proj"):
+                    attn_output = hf_attn.c_proj(attn_output)  # type: ignore[union-attr,operator]
+                elif hasattr(hf_attn, "dense"):
+                    attn_output = hf_attn.dense(attn_output)  # type: ignore[union-attr,operator]
+
+                # Residual dropout (GPT-2 has this, GPTNeoX doesn't)
+                if hasattr(hf_attn, "resid_dropout") and hf_attn.resid_dropout is not None:  # type: ignore[union-attr]
+                    attn_output = hf_attn.resid_dropout(attn_output)  # type: ignore[union-attr,operator]
 
                 # Return in HF format
                 if output_attentions:

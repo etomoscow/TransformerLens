@@ -109,17 +109,23 @@ class ProcessWeights:
     def fold_layer_norm_weight_single(
         w_tensor: torch.Tensor,
         ln_weight: torch.Tensor,
+        uses_gemma2_norm: bool = False,
     ) -> torch.Tensor:
         """Fold LayerNorm weight into a single attention weight.
 
         Args:
             w_tensor: Weight tensor [n_heads, d_model, d_head]
             ln_weight: LayerNorm weight [d_model]
+            uses_gemma2_norm: If True, use (1 + weight) for Gemma-2 normalization
 
         Returns:
             New weight tensor with folded LayerNorm weight
         """
-        return w_tensor * ln_weight[None, :, None]
+        if uses_gemma2_norm:
+            # Gemma-2 uses (1 + weight) in normalization
+            return w_tensor * (1.0 + ln_weight[None, :, None])
+        else:
+            return w_tensor * ln_weight[None, :, None]
 
     @staticmethod
     def center_weight_single(
@@ -182,19 +188,21 @@ class ProcessWeights:
         wk_tensor: torch.Tensor,
         wv_tensor: torch.Tensor,
         ln_weight: torch.Tensor,
+        uses_gemma2_norm: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fold LayerNorm weight into attention weights.
 
         Args:
             wq_tensor, wk_tensor, wv_tensor: Weight tensors [n_heads, d_model, d_head]
             ln_weight: LayerNorm weight [d_model]
+            uses_gemma2_norm: If True, use (1 + weight) for Gemma-2 normalization
 
         Returns:
             Tuple of (new_wq, new_wk, new_wv) with folded weights
         """
-        new_wq = ProcessWeights.fold_layer_norm_weight_single(wq_tensor, ln_weight)
-        new_wk = ProcessWeights.fold_layer_norm_weight_single(wk_tensor, ln_weight)
-        new_wv = ProcessWeights.fold_layer_norm_weight_single(wv_tensor, ln_weight)
+        new_wq = ProcessWeights.fold_layer_norm_weight_single(wq_tensor, ln_weight, uses_gemma2_norm)
+        new_wk = ProcessWeights.fold_layer_norm_weight_single(wk_tensor, ln_weight, uses_gemma2_norm)
+        new_wv = ProcessWeights.fold_layer_norm_weight_single(wv_tensor, ln_weight, uses_gemma2_norm)
 
         return new_wq, new_wk, new_wv
 
@@ -423,8 +431,14 @@ class ProcessWeights:
 
             # Only fold weights if all tensors exist
             if wk_tensor is not None and wv_tensor is not None:
+                # Check if this is a Gemma-2 model (uses (1 + weight) normalization)
+                uses_gemma2_norm = False
+                if adapter is not None and hasattr(adapter, '__class__'):
+                    adapter_class_name = adapter.__class__.__name__
+                    uses_gemma2_norm = 'Gemma2' in adapter_class_name
+
                 wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
-                    wq_tensor, wk_tensor, wv_tensor, ln1_w
+                    wq_tensor, wk_tensor, wv_tensor, ln1_w, uses_gemma2_norm
                 )
             if keys["ln1_w"] in state_dict:
                 del state_dict[keys["ln1_w"]]
@@ -518,13 +532,29 @@ class ProcessWeights:
                 ).sum(-2)
                 del state_dict[ln2_b_key]
 
+            # Check if this is a Gemma-2 model (uses (1 + weight) normalization)
+            uses_gemma2_norm = False
+            if adapter is not None and hasattr(adapter, '__class__'):
+                adapter_class_name = adapter.__class__.__name__
+                uses_gemma2_norm = 'Gemma2' in adapter_class_name
+
             # TODO this is causing slight divergence
-            state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
+            if uses_gemma2_norm:
+                # Gemma-2 uses (1 + weight) in normalization
+                state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * (1.0 + state_dict[ln2_w_key][:, None])
+            else:
+                state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
 
             if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
-                state_dict[mlp_W_gate_key] = (
-                    state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
-                )
+                if uses_gemma2_norm:
+                    # Gemma-2 uses (1 + weight) in normalization
+                    state_dict[mlp_W_gate_key] = (
+                        state_dict[mlp_W_gate_key] * (1.0 + state_dict[ln2_w_key][:, None])
+                    )
+                else:
+                    state_dict[mlp_W_gate_key] = (
+                        state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
+                    )
 
             del state_dict[ln2_w_key]
 
@@ -629,24 +659,40 @@ class ProcessWeights:
                 d_head = cfg.d_head
                 d_model = cfg.d_model
 
-                # Convert back to HuggingFace format
-                # Reverse the rearrangement: [n_heads, d_model, d_head] -> [d_model, d_model]
-                # Original conversion was: "m (i h) -> i m h" with i=n_heads
-                # So reverse is: "i m h -> m (i h)"
-                W_Q_hf = einops.rearrange(wq_tensor, "i m h -> m (i h)")
-                W_K_hf = einops.rearrange(wk_tensor, "i m h -> m (i h)")
-                W_V_hf = einops.rearrange(wv_tensor, "i m h -> m (i h)")
+                # Check if this is GPTNeoX architecture (different QKV layout than GPT-2)
+                is_neox = adapter and 'Neox' in adapter.__class__.__name__
 
-                # Convert biases: [n_heads, d_head] -> [d_model]
-                # Original conversion used QKVBiasConversion which rearranges the combined bias
-                # Reverse is just flattening in the correct order
-                b_Q_hf = einops.rearrange(bq_tensor, "i h -> (i h)")
-                b_K_hf = einops.rearrange(bk_tensor, "i h -> (i h)")
-                b_V_hf = einops.rearrange(bv_tensor, "i h -> (i h)")
+                if is_neox:
+                    # GPTNeoX uses (head_index, qkv, d_head) flattened: [3*d_model, d_model]
+                    # Stack Q, K, V: [3, n_heads, d_model, d_head]
+                    qkv_stacked = torch.stack([wq_tensor, wk_tensor, wv_tensor], dim=0)
+                    # Rearrange to NeoX format: [3, n_heads, d_model, d_head] -> [3*d_model, d_model]
+                    # Pattern: (head_index, qkv, d_head) flattened
+                    new_qkv_weight = einops.rearrange(qkv_stacked, "qkv i m h -> (i qkv h) m", i=n_heads, qkv=3, h=d_head)
 
-                # Combine back into HuggingFace format
-                new_qkv_weight = torch.cat([W_Q_hf, W_K_hf, W_V_hf], dim=1)  # [d_model, 3*d_model]
-                new_qkv_bias = torch.cat([b_Q_hf, b_K_hf, b_V_hf])  # [3*d_model]
+                    # Bias: [3, n_heads, d_head] -> [3*d_model]
+                    qkv_bias_stacked = torch.stack([bq_tensor, bk_tensor, bv_tensor], dim=0)
+                    new_qkv_bias = einops.rearrange(qkv_bias_stacked, "qkv i h -> (i qkv h)", i=n_heads, qkv=3, h=d_head)
+                else:
+                    # GPT-2 uses (qkv, head_index, d_head) flattened: [d_model, 3*d_model]
+                    # Convert back to HuggingFace format
+                    # Reverse the rearrangement: [n_heads, d_model, d_head] -> [d_model, d_model]
+                    # Original conversion was: "m (i h) -> i m h" with i=n_heads
+                    # So reverse is: "i m h -> m (i h)"
+                    W_Q_hf = einops.rearrange(wq_tensor, "i m h -> m (i h)")
+                    W_K_hf = einops.rearrange(wk_tensor, "i m h -> m (i h)")
+                    W_V_hf = einops.rearrange(wv_tensor, "i m h -> m (i h)")
+
+                    # Convert biases: [n_heads, d_head] -> [d_model]
+                    # Original conversion used QKVBiasConversion which rearranges the combined bias
+                    # Reverse is just flattening in the correct order
+                    b_Q_hf = einops.rearrange(bq_tensor, "i h -> (i h)")
+                    b_K_hf = einops.rearrange(bk_tensor, "i h -> (i h)")
+                    b_V_hf = einops.rearrange(bv_tensor, "i h -> (i h)")
+
+                    # Combine back into HuggingFace format
+                    new_qkv_weight = torch.cat([W_Q_hf, W_K_hf, W_V_hf], dim=1)  # [d_model, 3*d_model]
+                    new_qkv_bias = torch.cat([b_Q_hf, b_K_hf, b_V_hf])  # [3*d_model]
 
                 # Update state dict with combined format
                 state_dict[hf_w_q_key] = new_qkv_weight
@@ -785,6 +831,12 @@ class ProcessWeights:
 
         # Note: final_rms bias folding is handled separately - not included in this function
 
+        # Check if this is a Gemma-2 model (uses (1 + weight) normalization)
+        uses_gemma2_norm = False
+        if adapter is not None and hasattr(adapter, '__class__'):
+            adapter_class_name = adapter.__class__.__name__
+            uses_gemma2_norm = 'Gemma2' in adapter_class_name
+
         # Generalized layer norm folding for unembedding
         unembed_weight = state_dict[unembed_W_U_key]
         ln_weight = state_dict[ln_final_w_key]
@@ -794,10 +846,18 @@ class ProcessWeights:
             # Check if we need to transpose for proper broadcasting
             if unembed_weight.shape[1] == ln_weight.shape[0]:
                 # HuggingFace format: [vocab_size, d_model] * [d_model] -> [vocab_size, d_model]
-                state_dict[unembed_W_U_key] = unembed_weight * ln_weight[None, :]
+                if uses_gemma2_norm:
+                    # Gemma-2 uses (1 + weight) in normalization
+                    state_dict[unembed_W_U_key] = unembed_weight * (1.0 + ln_weight[None, :])
+                else:
+                    state_dict[unembed_W_U_key] = unembed_weight * ln_weight[None, :]
             elif unembed_weight.shape[0] == ln_weight.shape[0]:
                 # TransformerLens format: [d_model, vocab_size] * [d_model] -> [d_model, vocab_size]
-                state_dict[unembed_W_U_key] = unembed_weight * ln_weight[:, None]
+                if uses_gemma2_norm:
+                    # Gemma-2 uses (1 + weight) in normalization
+                    state_dict[unembed_W_U_key] = unembed_weight * (1.0 + ln_weight[:, None])
+                else:
+                    state_dict[unembed_W_U_key] = unembed_weight * ln_weight[:, None]
             else:
                 raise ValueError(
                     f"Cannot broadcast unembedding weight {unembed_weight.shape} with layer norm weight {ln_weight.shape}"
@@ -1546,9 +1606,18 @@ class ProcessWeights:
                     processed_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter
                 )
             elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
-                processed_dict = ProcessWeights.fold_layer_norm(
-                    processed_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
-                )
+                # Check if this is Gemma-2 which needs special RMS folding with (1 + weight)
+                is_gemma2 = adapter and 'Gemma2' in adapter.__class__.__name__
+                if is_gemma2:
+                    # Gemma-2 uses RMSNorm with (1 + weight), so we need to fold weights
+                    processed_dict = ProcessWeights.fold_layer_norm(
+                        processed_dict, cfg, fold_biases=False, center_weights=True, adapter=adapter
+                    )
+                else:
+                    # Standard RMS folding (no weight folding needed)
+                    processed_dict = ProcessWeights.fold_layer_norm(
+                        processed_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
+                    )
 
         if center_writing_weights:
             if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and not getattr(

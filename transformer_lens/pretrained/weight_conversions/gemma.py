@@ -10,11 +10,9 @@ def convert_gemma_weights(gemma, cfg: HookedTransformerConfig):
     assert cfg.n_key_value_heads is not None  # keep mypy happy
     assert cfg.d_mlp is not None  # keep mypy happy
 
-    # Gemma Models scale embeddings by multiplying by sqrt(d_model), use hidden state type to match
-    # HF implementation
-    state_dict["embed.W_E"] = gemma.model.embed_tokens.weight * torch.tensor(
-        cfg.d_model**0.5, dtype=cfg.dtype
-    )
+    # Gemma Models scale embeddings at runtime in forward pass (not in weights)
+    # Store unscaled weights - scaling will be applied in Embed.forward()
+    state_dict["embed.W_E"] = gemma.model.embed_tokens.weight
 
     # Gemma has no biases anywhere
     for l in range(cfg.n_layers):
@@ -29,7 +27,7 @@ def convert_gemma_weights(gemma, cfg: HookedTransformerConfig):
             state_dict[f"blocks.{l}.ln1_post.w"] = gemma.model.layers[
                 l
             ].post_attention_layernorm.weight.float() + torch.ones_like(
-                gemma.model.layers[l].input_layernorm.weight, dtype=torch.float32
+                gemma.model.layers[l].post_attention_layernorm.weight, dtype=torch.float32
             )
 
         W_Q = gemma.model.layers[l].self_attn.q_proj.weight
