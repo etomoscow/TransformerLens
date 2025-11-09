@@ -11,7 +11,9 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from transformer_lens.model_bridge.generalized_components.attention import AttentionBridge
+from transformer_lens.model_bridge.generalized_components.attention import (
+    AttentionBridge,
+)
 
 
 class PositionEmbeddingsAttentionBridge(AttentionBridge):
@@ -41,8 +43,8 @@ class PositionEmbeddingsAttentionBridge(AttentionBridge):
             **kwargs: Additional arguments passed to AttentionBridge
         """
         # Gemma-3 always requires position_embeddings and attention_mask
-        kwargs['requires_position_embeddings'] = True
-        kwargs['requires_attention_mask'] = True
+        kwargs["requires_position_embeddings"] = True
+        kwargs["requires_attention_mask"] = True
 
         super().__init__(name, config, submodules, **kwargs)
 
@@ -85,14 +87,18 @@ class PositionEmbeddingsAttentionBridge(AttentionBridge):
 
         # Generate base hidden_states
         d_model = self.config.d_model if self.config and hasattr(self.config, "d_model") else 1152
-        inputs = {
+        inputs: Dict[str, Any] = {
             "hidden_states": torch.randn(batch_size, seq_len, d_model, device=device, dtype=dtype)
         }
 
         # Generate Gemma-3-specific position_embeddings
         # Gemma-3 attention expects position_embeddings as a tuple of (cos, sin) with shape [1, seq_len, head_dim]
         # Note: batch dimension is ALWAYS 1, regardless of actual batch_size
-        num_heads = self.config.num_attention_heads if self.config and hasattr(self.config, "num_attention_heads") else 4
+        num_heads = (
+            self.config.num_attention_heads
+            if self.config and hasattr(self.config, "num_attention_heads")
+            else 4
+        )
         head_dim = self.config.head_dim if self.config and hasattr(self.config, "head_dim") else 256
 
         # Create dummy Q/K tensor and position_ids with batch=1

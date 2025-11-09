@@ -312,7 +312,7 @@ def boot(
     # Add attn_implementation if specified in config
     # This allows architectures to specify their preferred attention implementation
     # (e.g., 'sdpa' for Scaled Dot Product Attention, 'eager' for basic implementation)
-    if hasattr(adapter.cfg, 'attn_implementation') and adapter.cfg.attn_implementation is not None:
+    if hasattr(adapter.cfg, "attn_implementation") and adapter.cfg.attn_implementation is not None:
         model_kwargs["attn_implementation"] = adapter.cfg.attn_implementation
 
     # Load the model from HuggingFace using the appropriate model class

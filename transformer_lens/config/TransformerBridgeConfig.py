@@ -86,7 +86,14 @@ class TransformerBridgeConfig(TransformerLensConfig):
         **kwargs,
     ):
         """Initialize TransformerBridgeConfig."""
-        super().__init__(d_model=d_model, d_head=d_head, n_layers=n_layers, n_ctx=n_ctx, d_vocab=d_vocab, **kwargs)
+        super().__init__(
+            d_model=d_model,
+            d_head=d_head,
+            n_layers=n_layers,
+            n_ctx=n_ctx,
+            d_vocab=d_vocab,
+            **kwargs,
+        )
 
         # Architecture information for adapter selection
         self.architecture = architecture

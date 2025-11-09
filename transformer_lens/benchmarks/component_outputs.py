@@ -7,7 +7,7 @@ model against their HuggingFace equivalents, ensuring output parity.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 from torch import nn
@@ -333,7 +333,11 @@ class ComponentBenchmarker:
                 and callable(getattr(bridge_component, "get_random_inputs"))
             ):
                 batch_size, seq_len = test_input.shape[:2]
-                shared_inputs = bridge_component.get_random_inputs(
+                # Cast to callable to satisfy mypy - we've already verified it exists and is callable
+                get_random_inputs_fn = cast(
+                    Callable[..., Dict[str, Any]], bridge_component.get_random_inputs
+                )
+                shared_inputs = get_random_inputs_fn(
                     batch_size=batch_size,
                     seq_len=seq_len,
                     device=test_input.device,
@@ -580,7 +584,10 @@ def benchmark_model(
     # Load HF model with same attn_implementation as bridge model (if specified)
     # This ensures numerical consistency between bridge and HF models
     hf_kwargs = {"device_map": device}
-    if hasattr(bridge_model.adapter.cfg, 'attn_implementation') and bridge_model.adapter.cfg.attn_implementation is not None:
+    if (
+        hasattr(bridge_model.adapter.cfg, "attn_implementation")
+        and bridge_model.adapter.cfg.attn_implementation is not None
+    ):
         hf_kwargs["attn_implementation"] = bridge_model.adapter.cfg.attn_implementation
 
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, **hf_kwargs)
