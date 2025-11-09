@@ -109,7 +109,11 @@ class MoEBridge(GeneralizedComponent):
         if len(args) > 0:
             hooked = self.hook_in(args[0])
             # Cast to target dtype if needed and input is a float tensor
-            if target_dtype is not None and isinstance(hooked, torch.Tensor) and hooked.is_floating_point():
+            if (
+                target_dtype is not None
+                and isinstance(hooked, torch.Tensor)
+                and hooked.is_floating_point()
+            ):
                 hooked = hooked.to(dtype=target_dtype)
             args = (hooked,) + args[1:]
 

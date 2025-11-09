@@ -273,7 +273,11 @@ class GeneralizedComponent(nn.Module):
             if name in kwargs:
                 hooked = self.hook_in(kwargs[name])
                 # Cast to target dtype if needed and input is a float tensor
-                if target_dtype is not None and isinstance(hooked, torch.Tensor) and hooked.is_floating_point():
+                if (
+                    target_dtype is not None
+                    and isinstance(hooked, torch.Tensor)
+                    and hooked.is_floating_point()
+                ):
                     hooked = hooked.to(dtype=target_dtype)
                 kwargs[name] = hooked
                 input_found = True

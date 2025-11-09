@@ -165,14 +165,22 @@ class PositionEmbeddingsAttentionBridge(AttentionBridge):
         if "hidden_states" in kwargs:
             hooked = self.hook_in(kwargs["hidden_states"])
             # Cast to target dtype if needed
-            if target_dtype is not None and isinstance(hooked, torch.Tensor) and hooked.is_floating_point():
+            if (
+                target_dtype is not None
+                and isinstance(hooked, torch.Tensor)
+                and hooked.is_floating_point()
+            ):
                 hooked = hooked.to(dtype=target_dtype)
             kwargs["hidden_states"] = hooked
         elif len(args) > 0:
             # hidden_states passed as first positional argument (compatibility mode)
             hooked = self.hook_in(args[0])
             # Cast to target dtype if needed
-            if target_dtype is not None and isinstance(hooked, torch.Tensor) and hooked.is_floating_point():
+            if (
+                target_dtype is not None
+                and isinstance(hooked, torch.Tensor)
+                and hooked.is_floating_point()
+            ):
                 hooked = hooked.to(dtype=target_dtype)
             args = (hooked,) + args[1:]
             # Move it to kwargs for HF compatibility

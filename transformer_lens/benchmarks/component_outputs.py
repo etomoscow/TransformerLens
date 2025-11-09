@@ -224,7 +224,7 @@ class ComponentBenchmarker:
         self.cfg = cfg
 
         # Adjust tolerances based on dtype for reduced precision formats
-        model_dtype = getattr(cfg, 'dtype', torch.float32)
+        model_dtype = getattr(cfg, "dtype", torch.float32)
         if model_dtype == torch.bfloat16:
             # bfloat16 has ~7 bits of precision (3 decimal digits)
             # Use more lenient tolerance
@@ -369,9 +369,15 @@ class ComponentBenchmarker:
                     and hasattr(self.hf_model.model, "rotary_emb")
                 ):
                     try:
-                        position_ids = torch.arange(seq_len, device=test_input.device).unsqueeze(0).expand(batch_size, -1)
+                        position_ids = (
+                            torch.arange(seq_len, device=test_input.device)
+                            .unsqueeze(0)
+                            .expand(batch_size, -1)
+                        )
                         # Call rotary_emb with hidden_states and position_ids
-                        position_embeddings = self.hf_model.model.rotary_emb(test_input, position_ids)
+                        position_embeddings = self.hf_model.model.rotary_emb(
+                            test_input, position_ids
+                        )
                         shared_inputs["position_embeddings"] = position_embeddings
                     except Exception:
                         # If rotary_emb fails, keep the fallback position_embeddings from get_random_inputs()
@@ -546,7 +552,7 @@ class ComponentBenchmarker:
         d_model = self.cfg.d_model
 
         # Use dtype from config (matches HF model's dtype)
-        dtype = getattr(self.cfg, 'dtype', torch.float32)
+        dtype = getattr(self.cfg, "dtype", torch.float32)
         device = next(self.hf_model.parameters()).device
 
         return {

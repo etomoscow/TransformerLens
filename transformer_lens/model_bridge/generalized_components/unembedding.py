@@ -114,7 +114,11 @@ class UnembeddingBridge(GeneralizedComponent):
         hidden_states = self.hook_in(hidden_states)
 
         # Cast to target dtype if needed
-        if target_dtype is not None and isinstance(hidden_states, torch.Tensor) and hidden_states.is_floating_point():
+        if (
+            target_dtype is not None
+            and isinstance(hidden_states, torch.Tensor)
+            and hidden_states.is_floating_point()
+        ):
             hidden_states = hidden_states.to(dtype=target_dtype)
 
         output = self.original_component(hidden_states, **kwargs)
