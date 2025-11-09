@@ -70,6 +70,7 @@ class NormalizationBridge(GeneralizedComponent):
         assert self.config is not None
 
         hidden_states = self.hook_in(hidden_states)
+        self._last_input_before_norm = hidden_states
 
         # Check if we should use HuggingFace's autograd directly (for exact gradient matching)
         if self.use_native_layernorm_autograd:
@@ -112,6 +113,10 @@ class NormalizationBridge(GeneralizedComponent):
 
         output = self.hook_out(result)
         return output
+
+    def get_last_input_before_norm(self) -> Optional[torch.Tensor]:
+        """Return the most recent pre-normalization input if available."""
+        return getattr(self, "_last_input_before_norm", None)
 
     def _hf_autograd_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass matching HookedTransformer's LayerNorm computation exactly.

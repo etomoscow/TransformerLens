@@ -310,7 +310,7 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                     "mlp": MLPBridge(
                         name="mlp",
                         submodules={
-                            "input": LinearBridge(name="c_fc"),
+                            "in": LinearBridge(name="c_fc"),
                             "out": LinearBridge(name="c_proj"),
                         },
                     ),

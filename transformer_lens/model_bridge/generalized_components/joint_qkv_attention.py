@@ -133,6 +133,46 @@ class JointQKVAttentionBridge(AttentionBridge):
         self.k.set_original_component(k_transformation)
         self.v.set_original_component(v_transformation)
 
+    def set_processed_weights(
+        self,
+        W_Q: torch.Tensor,
+        W_K: torch.Tensor,
+        W_V: torch.Tensor,
+        W_O: torch.Tensor,
+        b_Q: Optional[torch.Tensor] = None,
+        b_K: Optional[torch.Tensor] = None,
+        b_V: Optional[torch.Tensor] = None,
+        b_O: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Set the processed weights for JointQKV attention.
+
+        JointQKVAttentionBridge uses 3D weights [n_heads, d_model, d_head] internally,
+        not 2D LinearBridge weights. We store them in _processed_W_* attributes
+        which are used by _extract_hooked_transformer_weights().
+
+        Args:
+            W_Q: Query weight tensor in TL format [n_heads, d_model, d_head]
+            W_K: Key weight tensor in TL format [n_heads, d_model, d_head]
+            W_V: Value weight tensor in TL format [n_heads, d_model, d_head]
+            W_O: Output projection weight tensor [d_model, d_model]
+            b_Q: Query bias tensor [n_heads, d_head] (optional)
+            b_K: Key bias tensor [n_heads, d_head] (optional)
+            b_V: Value bias tensor [n_heads, d_head] (optional)
+            b_O: Output bias tensor [d_model] (optional)
+        """
+        # Store the 3D weights for use in _extract_hooked_transformer_weights()
+        self._processed_W_Q = W_Q
+        self._processed_W_K = W_K
+        self._processed_W_V = W_V
+        self._processed_W_O = W_O
+        self._processed_b_Q = b_Q
+        self._processed_b_K = b_K
+        self._processed_b_V = b_V
+        self._processed_b_O = b_O
+
+        # Mark that we should use processed weights in forward pass
+        self._use_processed_weights = True
+
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass through the qkv linear transformation with hooks.
 
@@ -349,7 +389,15 @@ class JointQKVAttentionBridge(AttentionBridge):
         else:
             raise ValueError("No input tensor found in args or kwargs")
 
-        # Apply input hook
+        cached_pre_ln: Optional[torch.Tensor] = None
+        if hasattr(self, "_ln1") and self._ln1 is not None:
+            get_cached = getattr(self._ln1, "get_last_input_before_norm", None)
+            if callable(get_cached):
+                cached_pre_ln = get_cached()
+
+        if cached_pre_ln is not None:
+            input_tensor = cached_pre_ln
+
         input_tensor = self.hook_in(input_tensor)
 
         original_component = self.original_component

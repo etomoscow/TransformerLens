@@ -771,7 +771,8 @@ class AttentionBridge(GeneralizedComponent):
         """Forward pass through the attention layer.
 
         This method forwards all arguments to the original component and applies hooks
-        to the output, or uses processed weights if available.
+        to the output. If processed weights have been set via set_processed_weights(),
+        the original_component will use those weights directly.
 
         Args:
             *args: Input arguments to pass to the original component
@@ -780,10 +781,6 @@ class AttentionBridge(GeneralizedComponent):
         Returns:
             The output from the original component, with hooks applied
         """
-        # Check if we're using processed weights from a reference model (layer norm folding case)
-        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
-            return self._forward_with_processed_weights(*args, **kwargs)
-
         if self.original_component is None:
             raise RuntimeError(
                 f"Original component not set for {self.name}. Call set_original_component() first."
@@ -797,7 +794,7 @@ class AttentionBridge(GeneralizedComponent):
         elif len(args) > 0 and isinstance(args[0], torch.Tensor):
             args = (self.hook_in(args[0]),) + args[1:]
 
-        # Forward through original component
+        # Forward through original component (uses processed weights if set_processed_weights was called)
         output = self.original_component(*args, **kwargs)
 
         # Process output
@@ -816,27 +813,45 @@ class AttentionBridge(GeneralizedComponent):
         b_V: Optional[torch.Tensor] = None,
         b_O: Optional[torch.Tensor] = None,
     ) -> None:
-        """Set the processed weights to use when layer norm is folded.
+        """Set the processed weights by delegating to LinearBridge submodules.
+
+        This uses LinearBridge's set_processed_weights method for Q/K/V/O submodules,
+        so when forward() delegates to original_component, it uses the processed weights.
+
+        The weights should already be in the correct 2D format from weight processing.
 
         Args:
-            W_Q: Query weight tensor [n_heads, d_model, d_head]
-            W_K: Key weight tensor [n_heads, d_model, d_head]
-            W_V: Value weight tensor [n_heads, d_model, d_head]
-            W_O: Output projection weight tensor [n_heads, d_head, d_model]
-            b_Q: Query bias tensor [n_heads, d_head] (optional)
-            b_K: Key bias tensor [n_heads, d_head] (optional)
-            b_V: Value bias tensor [n_heads, d_head] (optional)
-            b_O: Output bias tensor [d_model] (optional)
+            W_Q: Query weight tensor (already in 2D format)
+            W_K: Key weight tensor (already in 2D format)
+            W_V: Value weight tensor (already in 2D format)
+            W_O: Output projection weight tensor (already in 2D format)
+            b_Q: Query bias tensor (optional)
+            b_K: Key bias tensor (optional)
+            b_V: Value bias tensor (optional)
+            b_O: Output bias tensor (optional)
         """
-        self._processed_W_Q = W_Q
-        self._processed_W_K = W_K
-        self._processed_W_V = W_V
-        self._processed_W_O = W_O
-        self._processed_b_Q = b_Q
-        self._processed_b_K = b_K
-        self._processed_b_V = b_V
-        self._processed_b_O = b_O
-        self._use_processed_weights = True
+        if self.original_component is None:
+            raise RuntimeError(f"Original component not set for {self.name}")
+
+        # Get Q/K/V/O submodules (LinearBridge instances)
+        q_module = getattr(self, "q", None)
+        k_module = getattr(self, "k", None)
+        v_module = getattr(self, "v", None)
+        o_module = getattr(self, "o", None)
+
+        # Use LinearBridge's set_processed_weights for each submodule
+        # Weights should already be in 2D format [in, out] from weight processing
+        if q_module and hasattr(q_module, "set_processed_weights"):
+            q_module.set_processed_weights(weight=W_Q, bias=b_Q)
+
+        if k_module and hasattr(k_module, "set_processed_weights"):
+            k_module.set_processed_weights(weight=W_K, bias=b_K)
+
+        if v_module and hasattr(v_module, "set_processed_weights"):
+            v_module.set_processed_weights(weight=W_V, bias=b_V)
+
+        if o_module and hasattr(o_module, "set_processed_weights"):
+            o_module.set_processed_weights(weight=W_O, bias=b_O)
 
     def _forward_with_processed_weights(self, *args: Any, **kwargs: Any) -> tuple[Any, Any]:
         """Direct implementation of reference model's attention computation with hooks."""
