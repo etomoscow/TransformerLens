@@ -366,22 +366,20 @@ class ComponentBenchmarker:
                     "attn" in component_path
                     and "position_embeddings" in shared_inputs
                     and hasattr(self.hf_model, "model")
-                    and hasattr(self.hf_model.model, "rotary_emb")
                 ):
-                    try:
-                        position_ids = (
-                            torch.arange(seq_len, device=test_input.device)
-                            .unsqueeze(0)
-                            .expand(batch_size, -1)
-                        )
-                        # Call rotary_emb with hidden_states and position_ids
-                        position_embeddings = self.hf_model.model.rotary_emb(
-                            test_input, position_ids
-                        )
-                        shared_inputs["position_embeddings"] = position_embeddings
-                    except Exception:
-                        # If rotary_emb fails, keep the fallback position_embeddings from get_random_inputs()
-                        pass
+                    rotary_attr = getattr(self.hf_model.model, "rotary_emb", None)
+                    if callable(rotary_attr):
+                        try:
+                            position_ids = (
+                                torch.arange(seq_len, device=test_input.device)
+                                .unsqueeze(0)
+                                .expand(batch_size, -1)
+                            )
+                            position_embeddings = rotary_attr(test_input, position_ids)
+                            shared_inputs["position_embeddings"] = position_embeddings
+                        except Exception:
+                            # If rotary_emb fails, keep the fallback position_embeddings from get_random_inputs()
+                            pass
 
             # Run through both components with shared inputs (for attention) or standard inputs (for others)
             bridge_output = self._run_component(
