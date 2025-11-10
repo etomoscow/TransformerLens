@@ -592,6 +592,7 @@ class JointQKVAttentionBridge(AttentionBridge):
 
             # Apply F.linear
             import torch.nn.functional as F
+
             attn_output = F.linear(z_flat, w, self._b_O if hasattr(self, "_b_O") else None)
 
             # Apply hook_out from LinearBridge

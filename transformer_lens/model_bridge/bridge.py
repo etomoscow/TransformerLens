@@ -236,8 +236,8 @@ class TransformerBridge(nn.Module):
         This allows property aliases (W_Q, W_K, W_V) to return 3D format for
         HookedTransformer compatibility while keeping 2D format for calculations.
         """
-        import torch
         import einops
+        import torch
 
         # Get config for dimensions
         n_heads = self.cfg.n_heads
@@ -1801,7 +1801,9 @@ class TransformerBridge(nn.Module):
             print("  Extracting HookedTransformer-compatible weights...")
         if hasattr(self, "blocks"):
             for block in self.blocks:
-                if hasattr(block, "attn") and hasattr(block.attn, "_extract_hooked_transformer_weights"):
+                if hasattr(block, "attn") and hasattr(
+                    block.attn, "_extract_hooked_transformer_weights"
+                ):
                     # Reset flag so extraction happens again
                     block.attn._hooked_weights_extracted = False
                     block.attn._extract_hooked_transformer_weights()
