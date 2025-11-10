@@ -494,7 +494,6 @@ class JointQKVAttentionBridge(AttentionBridge):
         # Don't fire hook_in here - hook_q_input/hook_k_input/hook_v_input aliases
         # map to attn.q.hook_out/attn.k.hook_out/attn.v.hook_out which fire on 4D outputs
         # This matches HookedTransformer where these hooks fire after repeat_along_head_dimension
-
         # Temporarily disable conversion rules since simple_attn_linear produces correct 4D format
         original_q_conversion = self.q.hook_out.hook_conversion
         original_k_conversion = self.k.hook_out.hook_conversion

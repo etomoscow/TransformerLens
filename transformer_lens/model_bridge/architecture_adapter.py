@@ -1169,7 +1169,7 @@ class ArchitectureAdapter:
             # Check if the key starts with this component's HF path
             if hf_key.startswith(hf_path + "."):
                 # Extract the parameter name (e.g., "weight", "bias")
-                param = hf_key[len(hf_path) + 1:]
+                param = hf_key[len(hf_path) + 1 :]
                 return f"{tl_name}.{param}"
 
         # Handle blocks (transformer layers)
@@ -1182,7 +1182,7 @@ class ArchitectureAdapter:
             if hf_key.startswith(hf_blocks_prefix + "."):
                 # Extract layer number and rest of path
                 # e.g., "transformer.h.0.ln_1.weight" -> "0.ln_1.weight"
-                rest = hf_key[len(hf_blocks_prefix) + 1:]
+                rest = hf_key[len(hf_blocks_prefix) + 1 :]
                 parts = rest.split(".", 1)
 
                 if len(parts) >= 2 and parts[0].isdigit():
@@ -1190,7 +1190,7 @@ class ArchitectureAdapter:
                     subkey = parts[1]
 
                     # Now check submodules within blocks
-                    if hasattr(blocks_component, 'submodules'):
+                    if hasattr(blocks_component, "submodules"):
                         for tl_subname, subcomponent in blocks_component.submodules.items():
                             # The subcomponent.name is the HF path relative to the block
                             # e.g., "ln_1" for LayerNorm
@@ -1198,16 +1198,16 @@ class ArchitectureAdapter:
 
                             if subkey.startswith(hf_subpath + "."):
                                 # Extract parameter name
-                                param = subkey[len(hf_subpath) + 1:]
+                                param = subkey[len(hf_subpath) + 1 :]
                                 return f"blocks.{layer_idx}.{tl_subname}.{param}"
 
                             # Also check for nested submodules (e.g., attn.q, mlp.in)
-                            if hasattr(subcomponent, 'submodules'):
+                            if hasattr(subcomponent, "submodules"):
                                 for tl_nested_name, nested_comp in subcomponent.submodules.items():
                                     hf_nested_path = f"{hf_subpath}.{nested_comp.name}"
 
                                     if subkey.startswith(hf_nested_path + "."):
-                                        param = subkey[len(hf_nested_path) + 1:]
+                                        param = subkey[len(hf_nested_path) + 1 :]
                                         return f"blocks.{layer_idx}.{tl_subname}.{tl_nested_name}.{param}"
 
         # If no mapping found, return original key
