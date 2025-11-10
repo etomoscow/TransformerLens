@@ -77,10 +77,15 @@ class JointQKVAttentionBridge(AttentionBridge):
 
         # Create LinearBridge components for q, k, v activations
         # PyTorch automatically registers them as submodules when assigned as attributes
-        # Note: o (output projection) is provided as a submodule by the architecture adapter
         self.q = LinearBridge(name="q")
         self.k = LinearBridge(name="k")
         self.v = LinearBridge(name="v")
+
+        # Register submodules passed from architecture adapter (e.g., o, qkv)
+        # This ensures they're properly registered as nn.Module children for compatibility_mode
+        for submodule_name, submodule in (submodules or {}).items():
+            if not hasattr(self, submodule_name):
+                setattr(self, submodule_name, submodule)
 
         # Apply hook conversion to both hook_in and hook_out
         # hook_in: Convert 3D input to expected format if needed
@@ -180,8 +185,10 @@ class JointQKVAttentionBridge(AttentionBridge):
         self.k.set_original_component(k_transformation)
         self.v.set_original_component(v_transformation)
 
-        # Note: o (output projection) LinearBridge is provided as a submodule by the architecture adapter
-        # and will be initialized separately by the bridge's weight loading process
+        # Initialize o (output projection) LinearBridge if it exists as a submodule
+        # It's provided by the architecture adapter in the submodules dict
+        if hasattr(self, "o") and hasattr(original_component, "c_proj"):
+            self.o.set_original_component(original_component.c_proj)
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass through the qkv linear transformation with hooks.
@@ -561,41 +568,10 @@ class JointQKVAttentionBridge(AttentionBridge):
         # Reshape to flat: [batch, seq, heads * d_head]
         attn_output = attn_output.view(attn_output.shape[0], attn_output.shape[1], -1)
 
-        # Apply output projection using the W_O weight
-        if self._W_O is not None:
-            # Reshape and apply output projection
-            batch_size, seq_len = attn_output.shape[:2]
-            n_heads = self._W_O.shape[0]
-            d_head = self._W_O.shape[1]
-            attn_reshaped = attn_output.view(batch_size, seq_len, n_heads, d_head)
-
-            # Apply hook_z (aliased as "blocks.L.attn.hook_z" in compatibility mode)
-            if hasattr(self, "o") and hasattr(self.o, "hook_in"):
-                attn_reshaped = self.o.hook_in(attn_reshaped)
-
-            # Ensure attn_reshaped has the correct shape [batch, seq, n_heads, d_head]
-            if attn_reshaped.ndim == 3:
-                # Reshape from [batch, seq, d_model] to [batch, seq, n_heads, d_head]
-                batch_size, seq_len = attn_reshaped.shape[:2]
-                attn_reshaped = attn_reshaped.view(batch_size, seq_len, n_heads, d_head)
-
-            # Apply W_O and sum across heads
-            attn_output = torch.stack(
-                [attn_reshaped[:, :, h, :] @ self._W_O[h] for h in range(self._W_O.shape[0])], dim=2
-            ).sum(dim=2)
-
-            # Add output bias - check for processed bias first, then fall back to regular bias
-            b_O_to_use = None
-            if hasattr(self, "_processed_b_O") and self._processed_b_O is not None:
-                b_O_to_use = self._processed_b_O
-            elif hasattr(self, "_b_O") and self._b_O is not None:
-                b_O_to_use = self._b_O
-
-            if b_O_to_use is not None:
-                attn_output = attn_output + b_O_to_use
-        elif hasattr(original_component, "c_proj"):
-            # Apply output projection through LinearBridge (captures hook_z via o.hook_in)
-            attn_output = self.o(attn_output)
+        # Apply output projection through LinearBridge (captures hook_z via o.hook_in)
+        # This works for both processed and unprocessed weights because the LinearBridge
+        # wraps the original component which has the correct weights loaded
+        attn_output = self.o(attn_output)
 
         attn_output = self.hook_out(attn_output)
 
