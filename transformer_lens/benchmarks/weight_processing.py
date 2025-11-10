@@ -737,6 +737,12 @@ def benchmark_weight_magnitudes(
             if ".v.bias" in key:
                 continue
 
+            # Skip layer norm biases - they are expected to be zero after folding
+            if ("ln1.bias" in key or "ln2.bias" in key or "ln_1.bias" in key or "ln_2.bias" in key or
+                "ln_final.bias" in key or "input_layernorm.bias" in key or
+                "post_attention_layernorm.bias" in key):
+                continue
+
             mean_abs = torch.mean(torch.abs(value)).item()
             max_abs = torch.max(torch.abs(value)).item()
 
