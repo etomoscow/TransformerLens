@@ -1463,6 +1463,11 @@ class ProcessWeights:
                     # Store the folded output bias
                     state_dict[b_O_key] = folded_b_O
 
+                    # Also update TL format b_O key if it exists
+                    tl_b_O_key = f"blocks.{layer}.attn.b_O"
+                    if tl_b_O_key in state_dict:
+                        state_dict[tl_b_O_key] = folded_b_O
+
                     # Zero out the V bias (the entire bias since it's already split)
                     state_dict[b_V_key] = torch.zeros_like(b_V)
 

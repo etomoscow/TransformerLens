@@ -1412,13 +1412,20 @@ class TransformerBridge(nn.Module):
 
                         if o_weight_key in state_dict:
                             o_weight_tl = state_dict[o_weight_key]  # [n_heads, d_head, d_model] or [d_model, d_model]
-                            # Try TL format first, then fall back to HF format for bias
-                            o_bias_key_tl = f"blocks.{layer_idx}.attn.b_O"
-                            if o_bias_key_tl in state_dict:
-                                o_bias_key = o_bias_key_tl
+
+                            # Get b_O from the actual HF component, NOT from state dict
+                            # The HF model already has the processed/folded bias loaded from ProcessWeights.apply_to_model()
+                            # Using state dict would give us the pre-folding value
+                            if hasattr(attn_component._original_component, 'c_proj') and hasattr(attn_component._original_component.c_proj, 'bias'):
+                                o_bias = attn_component._original_component.c_proj.bias.data.clone()
                             else:
-                                o_bias_key = self.adapter.translate_transformer_lens_path(f"blocks.{layer_idx}.attn.b_O")
-                            o_bias = state_dict.get(o_bias_key, None)
+                                # Fallback to state dict if component doesn't have c_proj.bias
+                                o_bias_key_tl = f"blocks.{layer_idx}.attn.b_O"
+                                if o_bias_key_tl in state_dict:
+                                    o_bias_key = o_bias_key_tl
+                                else:
+                                    o_bias_key = self.adapter.translate_transformer_lens_path(f"blocks.{layer_idx}.attn.b_O")
+                                o_bias = state_dict.get(o_bias_key, None)
 
                             # Convert W_O from TL format [n_heads, d_head, d_model] to HF format [d_model, d_model]
                             # set_processed_weights expects W_O in HF format

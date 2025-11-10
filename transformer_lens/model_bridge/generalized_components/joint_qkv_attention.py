@@ -81,17 +81,16 @@ class JointQKVAttentionBridge(AttentionBridge):
         self.k = LinearBridge(name="k")
         self.v = LinearBridge(name="v")
 
+        # Apply hook conversion to both hook_in and hook_out
+        # hook_in: Convert 3D input to expected format if needed
+        # hook_out: Convert 3D linear output [batch, seq, n_heads*d_head] to 4D [batch, seq, n_heads, d_head]
         self.q.hook_in.hook_conversion = self.qkv_conversion_rule
         self.k.hook_in.hook_conversion = self.qkv_conversion_rule
         self.v.hook_in.hook_conversion = self.qkv_conversion_rule
-        # NOTE: We do NOT apply conversion rules to hook_out in compatibility mode
-        # because we need Q/K/V to stay in 4D format [batch, seq, n_heads, d_head]
-        # for the subsequent transpose operation in _compatibility_mode_forward_with_hooks.
-        # The ConditionalRearrangeConversion.revert() would incorrectly convert them back to 3D,
-        # breaking the transpose and matmul operations.
-        # self.q.hook_out.hook_conversion = self.qkv_conversion_rule
-        # self.k.hook_out.hook_conversion = self.qkv_conversion_rule
-        # self.v.hook_out.hook_conversion = self.qkv_conversion_rule
+
+        self.q.hook_out.hook_conversion = self.qkv_conversion_rule
+        self.k.hook_out.hook_conversion = self.qkv_conversion_rule
+        self.v.hook_out.hook_conversion = self.qkv_conversion_rule
 
         # Store processed weights after weight processing
         self._processed_weights: Optional[Dict[str, torch.Tensor]] = None
@@ -193,21 +192,21 @@ class JointQKVAttentionBridge(AttentionBridge):
     ) -> None:
         """Set the processed weights for JointQKV attention.
 
-        JointQKVAttentionBridge uses 3D weights [n_heads, d_model, d_head] internally,
-        not 2D LinearBridge weights. We store them in _processed_W_* attributes
-        which are used by _extract_hooked_transformer_weights().
+        The processed weights from weight processing are stored as 2D tensors after folding.
+        We pass them directly to the LinearBridge components and also store them in
+        _processed_W_* attributes for use by _extract_hooked_transformer_weights().
 
         Args:
-            W_Q: Query weight tensor in TL format [n_heads, d_model, d_head]
-            W_K: Key weight tensor in TL format [n_heads, d_model, d_head]
-            W_V: Value weight tensor in TL format [n_heads, d_model, d_head]
+            W_Q: Query weight tensor [d_model, (n_heads*d_head)]
+            W_K: Key weight tensor [d_model, (n_heads*d_head)]
+            W_V: Value weight tensor [d_model, (n_heads*d_head)]
             W_O: Output projection weight tensor [d_model, d_model]
-            b_Q: Query bias tensor [n_heads, d_head] (optional)
-            b_K: Key bias tensor [n_heads, d_head] (optional)
-            b_V: Value bias tensor [n_heads, d_head] (optional)
+            b_Q: Query bias tensor [(n_heads*d_head)] (optional)
+            b_K: Key bias tensor [(n_heads*d_head)] (optional)
+            b_V: Value bias tensor [(n_heads*d_head)] (optional)
             b_O: Output bias tensor [d_model] (optional)
         """
-        # Store the 3D weights for use in _extract_hooked_transformer_weights()
+        # Store the 2D weights for use in _extract_hooked_transformer_weights()
         self._processed_W_Q = W_Q
         self._processed_W_K = W_K
         self._processed_W_V = W_V
@@ -223,6 +222,21 @@ class JointQKVAttentionBridge(AttentionBridge):
             self._use_processed_weights = True
         else:
             self._use_processed_weights = False
+
+        # Inject the processed weights into the Q/K/V LinearBridge components
+        # The processed weights from weight processing are already in 2D format [d_model, (n_heads*d_head)]
+        # after folding, so pass them directly to LinearBridge without rearrangement
+        if W_Q is not None:
+            self.q.set_processed_weights(W_Q, b_Q)
+
+        if W_K is not None:
+            self.k.set_processed_weights(W_K, b_K)
+
+        if W_V is not None:
+            self.v.set_processed_weights(W_V, b_V)
+
+        if W_O is not None:
+            self.o.set_processed_weights(W_O, b_O)
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass through the qkv linear transformation with hooks.
@@ -514,33 +528,28 @@ class JointQKVAttentionBridge(AttentionBridge):
         # Check if we have ln1 reference (set during compatibility mode setup)
         if hasattr(self, "_ln1") and self._ln1 is not None:
             # Input tensor is pre-ln1 residual, call ln1 three times
-            q_input = self.q.hook_in(self._ln1(input_tensor))
-            k_input = self.k.hook_in(self._ln1(input_tensor))
-            v_input = self.v.hook_in(self._ln1(input_tensor))
+            q_input = self._ln1(input_tensor)
+            k_input = self._ln1(input_tensor)
+            v_input = self._ln1(input_tensor)
         else:
             # Fallback: input tensor is already post-ln1, use it directly
             # This won't fire ln1 hooks 3 times, but keeps functionality working
-            q_input = self.q.hook_in(input_tensor)
-            k_input = self.k.hook_in(input_tensor)
-            v_input = self.v.hook_in(input_tensor)
+            q_input = input_tensor
+            k_input = input_tensor
+            v_input = input_tensor
 
-        # Compute Q, K, V using the separate input tensors
-        # If using processed weights, use _processed_W_* attributes, otherwise use _W_* attributes
-        W_Q = self._processed_W_Q if hasattr(self, "_processed_W_Q") and self._processed_W_Q is not None else self._W_Q
-        W_K = self._processed_W_K if hasattr(self, "_processed_W_K") and self._processed_W_K is not None else self._W_K
-        W_V = self._processed_W_V if hasattr(self, "_processed_W_V") and self._processed_W_V is not None else self._W_V
-        b_Q = self._processed_b_Q if hasattr(self, "_processed_b_Q") and self._processed_b_Q is not None else self._b_Q
-        b_K = self._processed_b_K if hasattr(self, "_processed_b_K") and self._processed_b_K is not None else self._b_K
-        b_V = self._processed_b_V if hasattr(self, "_processed_b_V") and self._processed_b_V is not None else self._b_V
-
-        q = simple_attn_linear(q_input, W_Q, b_Q)
-        k = simple_attn_linear(k_input, W_K, b_K)
-        v = simple_attn_linear(v_input, W_V, b_V)
-
-        # Apply output hooks
-        q = self.q.hook_out(q)
-        k = self.k.hook_out(k)
-        v = self.v.hook_out(v)
+        # Compute Q, K, V using LinearBridge components' forward pass
+        # The split_qkv_matrix adapter returns plain nn.Linear modules that output 3D tensors [batch, seq, n_heads*d_head]
+        # LinearBridge.forward() calls:
+        #   1. hook_in (applies conversion rule)
+        #   2. original_component (nn.Linear, outputs 3D)
+        #   3. hook_out (applies conversion rule: 3D → 4D [batch, seq, n_heads, d_head])
+        # The hook_out conversion transforms 3D to 4D using ConditionalRearrangeConversion,
+        # matching what simple_attn_linear does in HookedTransformer
+        q = self.q(q_input)
+        k = self.k(k_input)
+        v = self.v(v_input)
+        # q, k, v are now 4D tensors [batch, seq, n_heads, d_head] after hook_out conversion
 
         # Handle KV caching
         # Don't use "or" because DynamicCache might evaluate to False in boolean context
@@ -629,11 +638,15 @@ class JointQKVAttentionBridge(AttentionBridge):
                 [attn_reshaped[:, :, h, :] @ self._W_O[h] for h in range(self._W_O.shape[0])], dim=2
             ).sum(dim=2)
 
-            try:
-                if hasattr(self, "_b_O") and self._b_O is not None:
-                    attn_output = attn_output + self._b_O
-            except AttributeError:
-                pass
+            # Add output bias - check for processed bias first, then fall back to regular bias
+            b_O_to_use = None
+            if hasattr(self, "_processed_b_O") and self._processed_b_O is not None:
+                b_O_to_use = self._processed_b_O
+            elif hasattr(self, "_b_O") and self._b_O is not None:
+                b_O_to_use = self._b_O
+
+            if b_O_to_use is not None:
+                attn_output = attn_output + b_O_to_use
         elif hasattr(original_component, "c_proj"):
             attn_output = original_component.c_proj(attn_output)  # type: ignore[operator]
 
@@ -1129,9 +1142,18 @@ class JointQKVAttentionBridge(AttentionBridge):
             self._b_K = self._processed_b_K
             self._b_V = self._processed_b_V
 
-            if hasattr(self, "_processed_W_O"):
-                self._W_O = self._processed_W_O
-            if hasattr(self, "_processed_b_O"):
+            if hasattr(self, "_processed_W_O") and self._processed_W_O is not None:
+                # Convert W_O from HF format [d_model, d_model] to TL format [n_heads, d_head, d_model]
+                import einops
+                if self._processed_W_O.ndim == 2:
+                    # HF format -> TL format
+                    n_heads = self.config.n_heads
+                    d_head = self.config.d_head
+                    self._W_O = einops.rearrange(self._processed_W_O, "(n h) m -> n h m", n=n_heads, h=d_head)
+                else:
+                    # Already in TL format
+                    self._W_O = self._processed_W_O
+            if hasattr(self, "_processed_b_O") and self._processed_b_O is not None:
                 self._b_O = self._processed_b_O
 
             self._hooked_weights_extracted = True
