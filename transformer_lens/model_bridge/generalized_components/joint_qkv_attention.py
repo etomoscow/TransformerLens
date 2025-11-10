@@ -491,10 +491,9 @@ class JointQKVAttentionBridge(AttentionBridge):
         # This ensures all hooks fire properly while using 3D weights
         from transformer_lens.utilities.attention import simple_attn_linear
 
-        # Fire hook_in hooks manually for Q, K, V inputs
-        q_input = self.q.hook_in(q_input)
-        k_input = self.k.hook_in(k_input)
-        v_input = self.v.hook_in(v_input)
+        # Don't fire hook_in here - hook_q_input/hook_k_input/hook_v_input aliases
+        # map to attn.q.hook_out/attn.k.hook_out/attn.v.hook_out which fire on 4D outputs
+        # This matches HookedTransformer where these hooks fire after repeat_along_head_dimension
 
         # Temporarily disable conversion rules since simple_attn_linear produces correct 4D format
         original_q_conversion = self.q.hook_out.hook_conversion
