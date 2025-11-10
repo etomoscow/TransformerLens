@@ -450,7 +450,7 @@ def benchmark_weight_processing(
         print(f"\nLoading {model_name}...")
 
     # Load model with weight processing
-    bridge = TransformerBridge.boot_transformers(model_name, device=device, dtype=torch.float32)
+    bridge = TransformerBridge.boot_transformers(model_name, device=device, dtype=torch.float32)  # type: ignore[attr-defined]
 
     if verbose:
         print(f"Processing weights...")

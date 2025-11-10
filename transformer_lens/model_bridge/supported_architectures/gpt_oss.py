@@ -32,7 +32,7 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
         # GPT-OSS uses 'variance_epsilon' instead of 'eps' for RMSNorm
         self.cfg.eps_attr = "variance_epsilon"
         # GPT-OSS attention returns (output, attn_weights), not a 3-tuple
-        self.cfg.attention_output_format = "tuple_2"
+        # Note: attention_output_format is not a standard config attribute, handled in architecture code
 
         # Conversion rules for weight processing/folding
         # GPT-OSS uses MoE with batched experts, so we need special handling

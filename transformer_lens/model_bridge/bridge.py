@@ -1206,8 +1206,9 @@ class TransformerBridge(nn.Module):
                             tl_state_dict[tl_key] = cleaned_state_dict[hf_key]
 
         # Extract weights for each top-level component
-        for tl_name, component in self.adapter.component_mapping.items():
-            extract_component_weights(component, tl_name, "")
+        if self.adapter.component_mapping is not None:
+            for tl_name, component in self.adapter.component_mapping.items():
+                extract_component_weights(component, tl_name, "")
 
         return tl_state_dict
 
@@ -1541,11 +1542,14 @@ class TransformerBridge(nn.Module):
                 parts = tb_key.split(".")
 
                 # Navigate through Bridge components
-                component = self
+                component: Any = self
                 for i, part in enumerate(parts[:-1]):  # Exclude final 'weight' or 'bias'
                     if part.isdigit():
                         # Numeric index (e.g., layer number)
-                        component = component[int(part)]
+                        if hasattr(component, "__getitem__"):
+                            component = component[int(part)]
+                        else:
+                            raise TypeError(f"Component {component} is not indexable")
                     else:
                         # Named component
                         if hasattr(component, part):

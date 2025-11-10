@@ -330,15 +330,20 @@ class ProcessWeights:
                     bv_tensor = einops.rearrange(bv_hf, "(n h) -> n h", n=cfg.n_heads)
             else:
                 # Weights are in combined format (e.g., c_attn) - extract using adapter
-                wq_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                wq_converted = ProcessWeights.convert_tensor_to_tl_format(
                     f"blocks.{layer}.attn.W_Q", adapter, state_dict, cfg, layer
                 )
-                wk_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                wk_converted = ProcessWeights.convert_tensor_to_tl_format(
                     f"blocks.{layer}.attn.W_K", adapter, state_dict, cfg, layer
                 )
-                wv_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                wv_converted = ProcessWeights.convert_tensor_to_tl_format(
                     f"blocks.{layer}.attn.W_V", adapter, state_dict, cfg, layer
                 )
+                if wq_converted is None or wk_converted is None or wv_converted is None:
+                    raise ValueError(f"Failed to convert Q/K/V weights for layer {layer}")
+                wq_tensor = wq_converted
+                wk_tensor = wk_converted
+                wv_tensor = wv_converted
                 bq_tensor = ProcessWeights.convert_tensor_to_tl_format(
                     f"blocks.{layer}.attn.b_Q", adapter, state_dict, cfg, layer
                 )
@@ -440,7 +445,7 @@ class ProcessWeights:
         if layer in [9, 10, 11]:
             print(f"[DEBUG] Layer {layer} - After extraction:")
             print(f"  wq_tensor is None: {wq_tensor is None}")
-            if wq_tensor is not None:
+            if wq_tensor is not None and isinstance(wq_tensor, torch.Tensor):
                 print(f"  wq_tensor shape: {wq_tensor.shape}")
             print(f"  wk_tensor is None: {wk_tensor is None}")
             print(f"  wv_tensor is None: {wv_tensor is None}")

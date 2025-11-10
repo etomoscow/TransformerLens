@@ -55,6 +55,16 @@ class BlockBridge(GeneralizedComponent):
 
         self._original_block_forward: Optional[Callable[..., Any]] = None
 
+    def set_original_component(self, component: Any) -> None:
+        """Set the original component and patch its forward method.
+
+        Args:
+            component: The original HF block component
+        """
+        super().set_original_component(component)
+        # Patch the block's forward method to insert intermediate hooks
+        # self._patch_block_forward()
+
     def _patch_block_forward(self):
         """Monkey-patch the HuggingFace block's forward method.
 
@@ -98,7 +108,12 @@ class BlockBridge(GeneralizedComponent):
                 raise RuntimeError(f"Could not find attention module in block {block_self}")
 
             # Normal path: apply ln1 once here in the block
-            ln1 = getattr(block_self, "ln1", None)
+            # GPT-2 uses "ln_1", other models may use "ln1" or "input_layernorm"
+            ln1 = (
+                getattr(block_self, "ln_1", None)
+                or getattr(block_self, "ln1", None)
+                or getattr(block_self, "input_layernorm", None)
+            )
             if ln1 is not None:
                 hidden_states = ln1(hidden_states)
             attn_input = hidden_states
@@ -150,9 +165,8 @@ class BlockBridge(GeneralizedComponent):
             # Residual connection
             hidden_states = attn_output + residual
 
-            # Apply hook_resid_mid (after attention, before ln2)
-            # This matches HookedTransformer where hook_resid_mid is separate from ln2
-            hidden_states = self.hook_resid_mid(hidden_states)
+            # Note: hook_resid_mid is aliased to ln2.hook_in, which will fire
+            # when ln2 is called below (not manually called here)
 
             # Cross attention (if applicable)
             if encoder_hidden_states is not None:

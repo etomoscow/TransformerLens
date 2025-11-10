@@ -1073,6 +1073,8 @@ class JointQKVAttentionBridge(AttentionBridge):
 
                 if self._processed_W_O.ndim == 2:
                     # HF format -> TL format
+                    if self.config is None:
+                        raise ValueError("Config is required for weight conversion")
                     n_heads = self.config.n_heads
                     d_head = self.config.d_head
                     self._W_O = einops.rearrange(
