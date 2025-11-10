@@ -1167,7 +1167,7 @@ class ArchitectureAdapter:
             hf_path = component.name
 
             # Check if the key starts with this component's HF path
-            if hf_key.startswith(hf_path + "."):
+            if hf_path is not None and hf_key.startswith(hf_path + "."):
                 # Extract the parameter name (e.g., "weight", "bias")
                 param = hf_key[len(hf_path) + 1 :]
                 return f"{tl_name}.{param}"
@@ -1179,7 +1179,7 @@ class ArchitectureAdapter:
             hf_blocks_prefix = blocks_component.name
 
             # Check if this is a block component
-            if hf_key.startswith(hf_blocks_prefix + "."):
+            if hf_blocks_prefix is not None and hf_key.startswith(hf_blocks_prefix + "."):
                 # Extract layer number and rest of path
                 # e.g., "transformer.h.0.ln_1.weight" -> "0.ln_1.weight"
                 rest = hf_key[len(hf_blocks_prefix) + 1 :]
@@ -1196,7 +1196,7 @@ class ArchitectureAdapter:
                             # e.g., "ln_1" for LayerNorm
                             hf_subpath = subcomponent.name
 
-                            if subkey.startswith(hf_subpath + "."):
+                            if hf_subpath is not None and subkey.startswith(hf_subpath + "."):
                                 # Extract parameter name
                                 param = subkey[len(hf_subpath) + 1 :]
                                 return f"blocks.{layer_idx}.{tl_subname}.{param}"
