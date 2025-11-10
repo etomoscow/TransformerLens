@@ -31,9 +31,9 @@ class BlockBridge(GeneralizedComponent):
         "hook_resid_post": "hook_out",
         "hook_attn_in": "attn.hook_in",
         "hook_attn_out": "attn.hook_out",
-        "hook_q_input": "attn.q.hook_out",  # Fire after Q transformation (4D output)
-        "hook_k_input": "attn.k.hook_out",  # Fire after K transformation (4D output)
-        "hook_v_input": "attn.v.hook_out",  # Fire after V transformation (4D output)
+        "hook_q_input": "attn.q.hook_in",
+        "hook_k_input": "attn.k.hook_in",
+        "hook_v_input": "attn.v.hook_in",
         "hook_mlp_in": "mlp.hook_in",
         "hook_mlp_out": "mlp.hook_out",  # Alias hook_mlp_out to mlp.hook_out
     }

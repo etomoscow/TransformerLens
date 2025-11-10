@@ -169,6 +169,11 @@ class TransformerBridge(nn.Module):
         # Register aliases after all components are set up
         self._register_aliases()
 
+        # Register all component-level aliases recursively
+        # This ensures hook aliases like hook_q_input, hook_mlp_in, etc. are available
+        # even when not using compatibility mode
+        self._register_all_aliases_recursive()
+
         # Intiialize dictionary containing hooks that will be cached
         self._initialize_hooks_to_cache()
 
@@ -562,8 +567,9 @@ class TransformerBridge(nn.Module):
         """Get all HookPoint objects in the model for compatibility with TransformerLens."""
         hooks = self._hook_registry.copy()
 
-        if self.compatibility_mode:
-            self._add_aliases_to_hooks(hooks)
+        # Always add aliases to hooks, regardless of compatibility mode
+        # Aliases like hook_q_input, hook_k_input, hook_v_input are core TransformerLens API
+        self._add_aliases_to_hooks(hooks)
 
         return hooks
 
