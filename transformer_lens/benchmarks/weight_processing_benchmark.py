@@ -6,10 +6,9 @@ value bias folding, etc.) has been correctly applied to the model weights.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
-from torch import nn
 
 
 @dataclass
@@ -115,9 +114,7 @@ class WeightProcessingBenchmark:
                 # After folding, they might still exist but should be identity-like
                 # For RMS norm, "identity" means all ones
                 expected_val = 1.0
-                is_identity = torch.allclose(
-                    ln1_weight, torch.ones_like(ln1_weight), atol=1e-4
-                )
+                is_identity = torch.allclose(ln1_weight, torch.ones_like(ln1_weight), atol=1e-4)
 
                 self.results.append(
                     WeightProcessingCheck(
@@ -137,9 +134,7 @@ class WeightProcessingBenchmark:
                 # LayerNorm weights should be folded
                 # After folding, they should be identity (all ones)
                 expected_val = 1.0
-                is_identity = torch.allclose(
-                    ln1_weight, torch.ones_like(ln1_weight), atol=1e-4
-                )
+                is_identity = torch.allclose(ln1_weight, torch.ones_like(ln1_weight), atol=1e-4)
 
                 self.results.append(
                     WeightProcessingCheck(
@@ -434,7 +429,9 @@ class WeightProcessingBenchmark:
         )
 
 
-def benchmark_weight_processing(model_name: str, device: str = "cpu", verbose: bool = True) -> Tuple[int, int]:
+def benchmark_weight_processing(
+    model_name: str, device: str = "cpu", verbose: bool = True
+) -> Tuple[int, int]:
     """Run weight processing benchmark on a model.
 
     Args:
@@ -445,16 +442,15 @@ def benchmark_weight_processing(model_name: str, device: str = "cpu", verbose: b
     Returns:
         Tuple of (passed_count, total_count)
     """
-    from transformer_lens.model_bridge import TransformerBridge
     import torch
+
+    from transformer_lens.model_bridge import TransformerBridge
 
     if verbose:
         print(f"\nLoading {model_name}...")
 
     # Load model with weight processing
-    bridge = TransformerBridge.boot_transformers(
-        model_name, device=device, dtype=torch.float32
-    )
+    bridge = TransformerBridge.boot_transformers(model_name, device=device, dtype=torch.float32)
 
     if verbose:
         print(f"Processing weights...")

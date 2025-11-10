@@ -13,9 +13,6 @@ import torch.nn.functional as F
 from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion import (
     BaseHookConversion,
 )
-from transformer_lens.conversion_utils.conversion_steps.rearrange_hook_conversion import (
-    RearrangeHookConversion,
-)
 from transformer_lens.model_bridge.generalized_components.attention import (
     AttentionBridge,
 )
@@ -131,7 +128,9 @@ class JointQKVAttentionBridge(AttentionBridge):
             def __init__(self, n_heads: int):
                 super().__init__()
                 self.n_heads = n_heads
-                self.pattern = "batch seq (num_attention_heads d_head) -> batch seq num_attention_heads d_head"
+                self.pattern = (
+                    "batch seq (num_attention_heads d_head) -> batch seq num_attention_heads d_head"
+                )
 
             def handle_conversion(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
                 if input_value.ndim == 4:
@@ -190,6 +189,11 @@ class JointQKVAttentionBridge(AttentionBridge):
         if hasattr(self, "o") and hasattr(original_component, "c_proj"):
             self.o.set_original_component(original_component.c_proj)
 
+        # Setup hook_z reshaping to ensure hook_z (o.hook_in) has the reshape conversion
+        # This allows hook_z to receive [batch, seq, n_heads, d_head] format
+        if hasattr(self, "o") and self.o is not None and hasattr(self.config, "n_heads"):
+            self._setup_hook_z_reshape()
+
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass through the qkv linear transformation with hooks.
 
@@ -200,14 +204,17 @@ class JointQKVAttentionBridge(AttentionBridge):
         Returns:
             Output tensor after qkv linear transformation
         """
-        # Check if we're using processed weights from a reference model (layer norm folding case)
-        # JointQKVAttentionBridge needs to use compatibility mode forward which handles
-        # the processed weights correctly and calls the Q/K/V hooks with the right shapes
-        # if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
-        #     # Use compatibility mode forward with hooks, which properly handles processed weights
-        #     return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
+        hooked_input = self._apply_attention_input_hook(*args, **kwargs)
 
-        return self._forward_standard(*args, **kwargs)
+        q_output = self.q(hooked_input)
+        k_output = self.k(hooked_input)
+        v_output = self.v(hooked_input)
+
+        # Reconstruct attention computation using hooked Q, K, V
+        output = self._reconstruct_attention(q_output, k_output, v_output, **kwargs)
+        output = self._process_output(output)
+
+        return output
 
     def _forward_folded(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass using folded weights (split QKV with standard c_attn).
@@ -358,12 +365,12 @@ class JointQKVAttentionBridge(AttentionBridge):
     def _forward_standard(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass using standard HF attention component and hook processing."""
         # has_hooks = (
-            # self.q.hook_in.has_hooks()
-            # or self.k.hook_in.has_hooks()
-            # or self.v.hook_in.has_hooks()
-            # or self.q.hook_out.has_hooks()
-            # or self.k.hook_out.has_hooks()
-            # or self.v.hook_out.has_hooks()
+        # self.q.hook_in.has_hooks()
+        # or self.k.hook_in.has_hooks()
+        # or self.v.hook_in.has_hooks()
+        # or self.q.hook_out.has_hooks()
+        # or self.k.hook_out.has_hooks()
+        # or self.v.hook_out.has_hooks()
         # )
 
         # In compatibility mode, ALWAYS use the split Q/K/V path to ensure
@@ -375,18 +382,7 @@ class JointQKVAttentionBridge(AttentionBridge):
         #     return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
 
         # if has_hooks:
-            # Apply input hook the same way as the super class
-        hooked_input = self._apply_attention_input_hook(*args, **kwargs)
-
-        q_output = self.q(hooked_input)
-        k_output = self.k(hooked_input)
-        v_output = self.v(hooked_input)
-
-        # Reconstruct attention computation using hooked Q, K, V
-        output = self._reconstruct_attention(q_output, k_output, v_output, **kwargs)
-        output = self._process_output(output)
-
-        return output
+        # Apply input hook the same way as the super class
 
         # return super().forward(*args, **kwargs)
 
@@ -447,8 +443,6 @@ class JointQKVAttentionBridge(AttentionBridge):
             or self._W_V is None
         ):
             return super().forward(*args, **kwargs)
-
-        from transformer_lens.utilities.attention import simple_attn_linear
 
         # Create zero bias tensors if needed (cached to avoid recreation on every forward)
         if self._b_Q is None:
@@ -615,66 +609,66 @@ class JointQKVAttentionBridge(AttentionBridge):
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs
     ) -> tuple:
         """Reconstruct attention computation using separate Q, K, V tensors."""
-        original_component = self.original_component
-        assert original_component is not None
+        # original_component = self.original_component
+        # assert original_component is not None
 
-        # Try to use the original _attn method if available
-        if hasattr(original_component, "_attn"):
-            if len(q.shape) == 4:
-                q_attn = q.transpose(1, 2)
-                k_attn = k.transpose(1, 2)
-                v_attn = v.transpose(1, 2)
-            elif len(q.shape) == 3:
-                batch_size, seq_len, hidden_size = q.shape
-                num_heads = int(original_component.num_heads)  # type: ignore[arg-type]
-                head_dim: int = hidden_size // num_heads
+        # # Try to use the original _attn method if available
+        # if hasattr(original_component, "_attn"):
+        #     if len(q.shape) == 4:
+        #         q_attn = q.transpose(1, 2)
+        #         k_attn = k.transpose(1, 2)
+        #         v_attn = v.transpose(1, 2)
+        #     elif len(q.shape) == 3:
+        #         batch_size, seq_len, hidden_size = q.shape
+        #         num_heads = int(original_component.num_heads)  # type: ignore[arg-type]
+        #         head_dim: int = hidden_size // num_heads
 
-                q_attn = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-                k_attn = k.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-                v_attn = v.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-            else:
-                raise ValueError(f"Unexpected Q tensor shape: {q.shape}")
+        #         q_attn = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+        #         k_attn = k.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+        #         v_attn = v.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+        #     else:
+        #         raise ValueError(f"Unexpected Q tensor shape: {q.shape}")
 
-            attn_result = original_component._attn(  # type: ignore[operator]
-                q_attn,
-                k_attn,
-                v_attn,
-                attention_mask=kwargs.get("attention_mask"),
-                head_mask=kwargs.get("head_mask"),
-            )
-            # Handle different return formats from _attn method
-            if len(attn_result) == 2:
-                attn_output, attn_weights = attn_result
-            elif len(attn_result) == 3:
-                attn_output, attn_weights, _ = attn_result  # Ignore past_key_value
-            else:
-                raise ValueError(
-                    f"Unexpected number of return values from _attn: {len(attn_result)}"
-                )
+        #     attn_result = original_component._attn(  # type: ignore[operator]
+        #         q_attn,
+        #         k_attn,
+        #         v_attn,
+        #         attention_mask=kwargs.get("attention_mask"),
+        #         head_mask=kwargs.get("head_mask"),
+        #     )
+        #     # Handle different return formats from _attn method
+        #     if len(attn_result) == 2:
+        #         attn_output, attn_weights = attn_result
+        #     elif len(attn_result) == 3:
+        #         attn_output, attn_weights, _ = attn_result  # Ignore past_key_value
+        #     else:
+        #         raise ValueError(
+        #             f"Unexpected number of return values from _attn: {len(attn_result)}"
+        #         )
 
-            if hasattr(original_component, "_merge_heads"):
-                attn_output_merged = original_component._merge_heads(  # type: ignore[operator]
-                    attn_output, original_component.num_heads, original_component.head_dim
-                )
-            else:
-                batch_size, num_heads, seq_len, head_dim = attn_output.shape
-                hidden_size = num_heads * head_dim
-                attn_output_merged = (
-                    attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
-                )
+        #     if hasattr(original_component, "_merge_heads"):
+        #         attn_output_merged = original_component._merge_heads(  # type: ignore[operator]
+        #             attn_output, original_component.num_heads, original_component.head_dim
+        #         )
+        #     else:
+        #         batch_size, num_heads, seq_len, head_dim = attn_output.shape
+        #         hidden_size = num_heads * head_dim
+        #         attn_output_merged = (
+        #             attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
+        #         )
 
-            if hasattr(self, "o") and self.o is not None:
-                attn_output_merged = self.o(attn_output_merged)
+        #     if hasattr(self, "o") and self.o is not None:
+        #         attn_output_merged = self.o(attn_output_merged)
 
-            # Return format should match what GPT2Block expects (exactly 2 values)
-            # The GPT2Block handles past_key_value separately
-            return (attn_output_merged, attn_weights)
-        else:
-            return self._manual_attention_computation(q, k, v, **kwargs)
+        #     # Return format should match what GPT2Block expects (exactly 2 values)
+        #     # The GPT2Block handles past_key_value separately
+        #     return (attn_output_merged, attn_weights)
+        # else:
+        #         return self._manual_attention_computation(q, k, v, **kwargs)
 
-    def _manual_attention_computation(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs
-    ) -> tuple:
+        # def _manual_attention_computation(
+        #     self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs
+        # ) -> tuple:
         """Manual attention computation as fallback using TransformerLens computation logic."""
         original_component = self.original_component
         assert original_component is not None
@@ -725,19 +719,27 @@ class JointQKVAttentionBridge(AttentionBridge):
             attn_weights = original_component.attn_dropout(attn_weights)  # type: ignore[operator]  # type: ignore[operator]
 
         # Apply attention to values
-        attn_output = torch.matmul(attn_weights, v)
+        attn_output = torch.matmul(attn_weights, v)  # [batch, n_heads, seq, d_head]
 
-        # Reshape back to original format
+        # Transpose back to [batch, seq, n_heads, d_head]
+        attn_output = attn_output.transpose(1, 2).contiguous()  # [batch, seq, n_heads, d_head]
+
+        # Flatten to [batch, seq, d_model] for output projection
         final_hidden_size: int = num_heads * head_dim
-        attn_output = (
-            attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, final_hidden_size)
-        )
+        attn_output = attn_output.view(batch_size, seq_len, final_hidden_size)
 
-        # Apply output projection - use functional linear if available
-        if hasattr(original_component, "c_proj"):
-            attn_output = self._apply_output_projection_with_functional_linear(attn_output)
-        elif hasattr(self, "o") and self.o is not None:
+        # Apply output projection through LinearBridge
+        # Following the exact pattern from AttentionBridge and _compatibility_mode_forward_with_hooks:
+        # 1. Pass flat tensor [batch, seq, d_model] to self.o()
+        # 2. self.o.hook_in fires (this is hook_z)
+        # 3. The hook_conversion on o.hook_in reshapes to [batch, seq, n_heads, d_head] for hooks
+        # 4. Then reshapes back to flat for the actual linear layer (c_proj)
+        # 5. self.o.hook_out fires with the output
+        if hasattr(self, "o") and self.o is not None:
             attn_output = self.o(attn_output)
+        elif hasattr(original_component, "c_proj"):
+            # Fallback: if self.o doesn't exist for some reason, use functional linear
+            attn_output = self._apply_output_projection_with_functional_linear(attn_output)
 
         # Return format should match what GPT2Block expects (exactly 2 values)
         # The GPT2Block handles past_key_value separately
@@ -1068,11 +1070,14 @@ class JointQKVAttentionBridge(AttentionBridge):
             if hasattr(self, "_processed_W_O") and self._processed_W_O is not None:
                 # Convert W_O from HF format [d_model, d_model] to TL format [n_heads, d_head, d_model]
                 import einops
+
                 if self._processed_W_O.ndim == 2:
                     # HF format -> TL format
                     n_heads = self.config.n_heads
                     d_head = self.config.d_head
-                    self._W_O = einops.rearrange(self._processed_W_O, "(n h) m -> n h m", n=n_heads, h=d_head)
+                    self._W_O = einops.rearrange(
+                        self._processed_W_O, "(n h) m -> n h m", n=n_heads, h=d_head
+                    )
                 else:
                     # Already in TL format
                     self._W_O = self._processed_W_O

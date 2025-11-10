@@ -292,7 +292,11 @@ class ProcessWeights:
                 print(f"  {split_k_key} exists: {split_k_key in state_dict}")
                 print(f"  {split_v_key} exists: {split_v_key in state_dict}")
 
-            if split_q_key in state_dict and split_k_key in state_dict and split_v_key in state_dict:
+            if (
+                split_q_key in state_dict
+                and split_k_key in state_dict
+                and split_v_key in state_dict
+            ):
                 # Weights are already split - load them directly and convert to TL format
                 # These are in HF format [d_model, d_model]
                 import einops
@@ -488,7 +492,11 @@ class ProcessWeights:
                 if keys["ln1_b"] in state_dict:
                     state_dict[keys["ln1_b"]] = torch.zeros_like(ln1_b)
                 # ALSO set alternate naming if it exists (ln1 vs ln_1)
-                alternate_b_key = keys["ln1_b"].replace("ln_1", "ln1") if "ln_1" in keys["ln1_b"] else keys["ln1_b"].replace("ln1", "ln_1")
+                alternate_b_key = (
+                    keys["ln1_b"].replace("ln_1", "ln1")
+                    if "ln_1" in keys["ln1_b"]
+                    else keys["ln1_b"].replace("ln1", "ln_1")
+                )
                 if alternate_b_key != keys["ln1_b"] and alternate_b_key in state_dict:
                     state_dict[alternate_b_key] = torch.zeros_like(ln1_b)
 
@@ -501,7 +509,11 @@ class ProcessWeights:
             if keys["ln1_w"] in state_dict:
                 state_dict[keys["ln1_w"]] = torch.ones_like(ln1_w)
             # ALSO set alternate naming if it exists (ln1 vs ln_1)
-            alternate_w_key = keys["ln1_w"].replace("ln_1", "ln1") if "ln_1" in keys["ln1_w"] else keys["ln1_w"].replace("ln1", "ln_1")
+            alternate_w_key = (
+                keys["ln1_w"].replace("ln_1", "ln1")
+                if "ln_1" in keys["ln1_w"]
+                else keys["ln1_w"].replace("ln1", "ln_1")
+            )
             if alternate_w_key != keys["ln1_w"] and alternate_w_key in state_dict:
                 state_dict[alternate_w_key] = torch.ones_like(ln1_w)
 
@@ -599,7 +611,11 @@ class ProcessWeights:
                 # Replace ln2 bias with zeros (identity for bias) instead of deleting
                 state_dict[ln2_b_key] = torch.zeros_like(state_dict[ln2_b_key])
                 # ALSO set alternate naming if it exists (ln2 vs ln_2)
-                alternate_ln2_b_key = ln2_b_key.replace("ln_2", "ln2") if "ln_2" in ln2_b_key else ln2_b_key.replace("ln2", "ln_2")
+                alternate_ln2_b_key = (
+                    ln2_b_key.replace("ln_2", "ln2")
+                    if "ln_2" in ln2_b_key
+                    else ln2_b_key.replace("ln2", "ln_2")
+                )
                 if alternate_ln2_b_key != ln2_b_key and alternate_ln2_b_key in state_dict:
                     state_dict[alternate_ln2_b_key] = torch.zeros_like(state_dict[ln2_b_key])
 
@@ -614,7 +630,11 @@ class ProcessWeights:
             # Replace ln2 weight with ones (identity for weight) instead of deleting
             state_dict[ln2_w_key] = torch.ones_like(state_dict[ln2_w_key])
             # ALSO set alternate naming if it exists (ln2 vs ln_2)
-            alternate_ln2_w_key = ln2_w_key.replace("ln_2", "ln2") if "ln_2" in ln2_w_key else ln2_w_key.replace("ln2", "ln_2")
+            alternate_ln2_w_key = (
+                ln2_w_key.replace("ln_2", "ln2")
+                if "ln_2" in ln2_w_key
+                else ln2_w_key.replace("ln2", "ln_2")
+            )
             if alternate_ln2_w_key != ln2_w_key and alternate_ln2_w_key in state_dict:
                 state_dict[alternate_ln2_w_key] = torch.ones_like(state_dict[ln2_w_key])
 
@@ -773,16 +793,22 @@ class ProcessWeights:
                 # because W_O is processed by other functions like center_writing_weights
 
                 # Get the HF layer prefix (e.g., "transformer.h.0" for GPT-2)
-                hf_layer_prefix = adapter.translate_transformer_lens_path(f"blocks.{layer}").rstrip(".")
+                hf_layer_prefix = adapter.translate_transformer_lens_path(f"blocks.{layer}").rstrip(
+                    "."
+                )
 
                 # Delete only Q/K/V keys, not output projection (W_O)
                 # Match keys containing q/k/v/qkv/c_attn but not o/c_proj
                 # IMPORTANT: Add "." after hf_layer_prefix to avoid matching multi-digit layers
                 # (e.g., "transformer.h.1" should not match "transformer.h.10" or "transformer.h.11")
                 keys_to_delete = [
-                    k for k in list(state_dict.keys())
-                    if k.startswith(hf_layer_prefix + ".") and '.attn.' in k
-                    and any(qkv_marker in k for qkv_marker in ['.q.', '.k.', '.v.', '.qkv.', '.c_attn.'])
+                    k
+                    for k in list(state_dict.keys())
+                    if k.startswith(hf_layer_prefix + ".")
+                    and ".attn." in k
+                    and any(
+                        qkv_marker in k for qkv_marker in [".q.", ".k.", ".v.", ".qkv.", ".c_attn."]
+                    )
                 ]
 
                 # DEBUG for layers 0, 1, 9, 10, 11
@@ -955,7 +981,11 @@ class ProcessWeights:
         if ln_final_w_key in state_dict:
             state_dict[ln_final_w_key] = torch.ones_like(ln_weight)
         # ALSO set alternate naming if it exists (ln_final vs final_layernorm, etc.)
-        alternate_final_w_key = ln_final_w_key.replace("ln_f", "ln_final") if "ln_f" in ln_final_w_key else ln_final_w_key.replace("ln_final", "ln_f")
+        alternate_final_w_key = (
+            ln_final_w_key.replace("ln_f", "ln_final")
+            if "ln_f" in ln_final_w_key
+            else ln_final_w_key.replace("ln_final", "ln_f")
+        )
         if alternate_final_w_key != ln_final_w_key and alternate_final_w_key in state_dict:
             state_dict[alternate_final_w_key] = torch.ones_like(ln_weight)
 
@@ -1050,7 +1080,11 @@ class ProcessWeights:
             if ln_final_b_key in state_dict:
                 state_dict[ln_final_b_key] = torch.zeros_like(ln_bias)
             # ALSO set alternate naming if it exists
-            alternate_final_b_key = ln_final_b_key.replace("ln_f", "ln_final") if "ln_f" in ln_final_b_key else ln_final_b_key.replace("ln_final", "ln_f")
+            alternate_final_b_key = (
+                ln_final_b_key.replace("ln_f", "ln_final")
+                if "ln_f" in ln_final_b_key
+                else ln_final_b_key.replace("ln_final", "ln_f")
+            )
             if alternate_final_b_key != ln_final_b_key and alternate_final_b_key in state_dict:
                 state_dict[alternate_final_b_key] = torch.zeros_like(ln_bias)
 

@@ -1148,7 +1148,7 @@ class TransformerBridge(nn.Module):
         Returns:
             Dict[str, torch.Tensor]: State dict with TransformerLens keys
         """
-        if not self.adapter or not hasattr(self.adapter, 'component_mapping'):
+        if not self.adapter or not hasattr(self.adapter, "component_mapping"):
             raise ValueError("Adapter with component_mapping required for extraction")
 
         # Step 1: Get raw state dict and clean ._original_component suffixes
@@ -1164,15 +1164,15 @@ class TransformerBridge(nn.Module):
         def extract_component_weights(component, tl_prefix: str, hf_prefix: str):
             """Recursively extract weights from a component."""
             # Get the component's HF name
-            component_name = getattr(component, 'name', None)
+            component_name = getattr(component, "name", None)
             if component_name:
                 full_hf_prefix = f"{hf_prefix}.{component_name}" if hf_prefix else component_name
 
                 # Check if component has non-empty submodules
-                has_submodules = hasattr(component, 'submodules') and component.submodules
+                has_submodules = hasattr(component, "submodules") and component.submodules
 
                 # Handle BlockBridge (layers)
-                if has_submodules and component.__class__.__name__ == 'BlockBridge':
+                if has_submodules and component.__class__.__name__ == "BlockBridge":
                     # Iterate through all layers
                     for layer_idx in range(self.cfg.n_layers):
                         layer_hf_prefix = f"{full_hf_prefix}.{layer_idx}"
@@ -1181,28 +1181,24 @@ class TransformerBridge(nn.Module):
                         # Recursively extract submodules
                         for submodule_name, submodule in component.submodules.items():
                             extract_component_weights(
-                                submodule,
-                                f"{layer_tl_prefix}.{submodule_name}",
-                                layer_hf_prefix
+                                submodule, f"{layer_tl_prefix}.{submodule_name}", layer_hf_prefix
                             )
 
                 # Handle other components with submodules (like AttentionBridge, MLPBridge)
                 elif has_submodules:
                     for submodule_name, submodule in component.submodules.items():
                         extract_component_weights(
-                            submodule,
-                            f"{tl_prefix}.{submodule_name}",
-                            full_hf_prefix
+                            submodule, f"{tl_prefix}.{submodule_name}", full_hf_prefix
                         )
 
                 # Handle leaf components (weights)
                 else:
                     # Try to find matching weights in cleaned_state_dict
-                    for param_name in ['weight', 'bias']:
+                    for param_name in ["weight", "bias"]:
                         hf_key = f"{full_hf_prefix}.{param_name}"
                         if hf_key in cleaned_state_dict:
                             # Map to TL key
-                            if param_name == 'weight':
+                            if param_name == "weight":
                                 tl_key = f"{tl_prefix}.w" if tl_prefix else "w"
                             else:
                                 tl_key = f"{tl_prefix}.b" if tl_prefix else "b"
@@ -1356,6 +1352,7 @@ class TransformerBridge(nn.Module):
         # First pass: Load processed QKV weights for JointQKVAttention layers
         # We need to handle these specially by reconstructing the joint QKV weight
         import einops
+
         from transformer_lens.model_bridge.generalized_components.joint_qkv_attention import (
             JointQKVAttentionBridge,
         )
@@ -1373,25 +1370,39 @@ class TransformerBridge(nn.Module):
                     k_bias_key = f"blocks.{layer_idx}.attn.k.bias"
                     v_bias_key = f"blocks.{layer_idx}.attn.v.bias"
 
-                    if q_weight_key in state_dict and k_weight_key in state_dict and v_weight_key in state_dict:
+                    if (
+                        q_weight_key in state_dict
+                        and k_weight_key in state_dict
+                        and v_weight_key in state_dict
+                    ):
                         # Get processed weights in HF format [d_model, d_model]
                         q_weight_hf = state_dict[q_weight_key]
                         k_weight_hf = state_dict[k_weight_key]
                         v_weight_hf = state_dict[v_weight_key]
 
                         # Convert from HF format [d_model, d_model] to TL format [n_heads, d_model, d_head]
-                        q_weight_tl = einops.rearrange(q_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads)
-                        k_weight_tl = einops.rearrange(k_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads)
-                        v_weight_tl = einops.rearrange(v_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads)
+                        q_weight_tl = einops.rearrange(
+                            q_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
+                        )
+                        k_weight_tl = einops.rearrange(
+                            k_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
+                        )
+                        v_weight_tl = einops.rearrange(
+                            v_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
+                        )
 
                         # Concatenate Q, K, V into joint QKV weight [d_model, 3*d_model]
                         qkv_weight = torch.cat([q_weight_hf, k_weight_hf, v_weight_hf], dim=1)
 
                         # Load into the qkv component (c_attn)
-                        if hasattr(attn_component, 'qkv') and hasattr(attn_component.qkv, '_original_component'):
+                        if hasattr(attn_component, "qkv") and hasattr(
+                            attn_component.qkv, "_original_component"
+                        ):
                             qkv_component = attn_component.qkv._original_component
-                            if hasattr(qkv_component, 'weight'):
-                                qkv_component.weight.data = qkv_weight.T  # Conv1D uses transposed weights
+                            if hasattr(qkv_component, "weight"):
+                                qkv_component.weight.data = (
+                                    qkv_weight.T
+                                )  # Conv1D uses transposed weights
                                 loaded_count += 1
 
                         # Set the _W_* attributes for HookedTransformer compatibility (already in TL format)
@@ -1408,15 +1419,21 @@ class TransformerBridge(nn.Module):
                             o_weight_key = o_weight_key_tl
                         else:
                             # Fall back to HF format using adapter
-                            o_weight_key = self.adapter.translate_transformer_lens_path(f"blocks.{layer_idx}.attn.W_O")
+                            o_weight_key = self.adapter.translate_transformer_lens_path(
+                                f"blocks.{layer_idx}.attn.W_O"
+                            )
 
                         if o_weight_key in state_dict:
-                            o_weight_tl = state_dict[o_weight_key]  # [n_heads, d_head, d_model] or [d_model, d_model]
+                            o_weight_tl = state_dict[
+                                o_weight_key
+                            ]  # [n_heads, d_head, d_model] or [d_model, d_model]
 
                             # Get b_O from the actual HF component, NOT from state dict
                             # The HF model already has the processed/folded bias loaded from ProcessWeights.apply_to_model()
                             # Using state dict would give us the pre-folding value
-                            if hasattr(attn_component._original_component, 'c_proj') and hasattr(attn_component._original_component.c_proj, 'bias'):
+                            if hasattr(attn_component._original_component, "c_proj") and hasattr(
+                                attn_component._original_component.c_proj, "bias"
+                            ):
                                 o_bias = attn_component._original_component.c_proj.bias.data.clone()
                             else:
                                 # Fallback to state dict if component doesn't have c_proj.bias
@@ -1424,7 +1441,9 @@ class TransformerBridge(nn.Module):
                                 if o_bias_key_tl in state_dict:
                                     o_bias_key = o_bias_key_tl
                                 else:
-                                    o_bias_key = self.adapter.translate_transformer_lens_path(f"blocks.{layer_idx}.attn.b_O")
+                                    o_bias_key = self.adapter.translate_transformer_lens_path(
+                                        f"blocks.{layer_idx}.attn.b_O"
+                                    )
                                 o_bias = state_dict.get(o_bias_key, None)
 
                             # Convert W_O from TL format [n_heads, d_head, d_model] to HF format [d_model, d_model]
@@ -1441,9 +1460,15 @@ class TransformerBridge(nn.Module):
                             b_K_tl = None
                             b_V_tl = None
                             if q_bias_key in state_dict:
-                                b_Q_tl = einops.rearrange(state_dict[q_bias_key], "(n h) -> n h", n=self.cfg.n_heads)
-                                b_K_tl = einops.rearrange(state_dict[k_bias_key], "(n h) -> n h", n=self.cfg.n_heads)
-                                b_V_tl = einops.rearrange(state_dict[v_bias_key], "(n h) -> n h", n=self.cfg.n_heads)
+                                b_Q_tl = einops.rearrange(
+                                    state_dict[q_bias_key], "(n h) -> n h", n=self.cfg.n_heads
+                                )
+                                b_K_tl = einops.rearrange(
+                                    state_dict[k_bias_key], "(n h) -> n h", n=self.cfg.n_heads
+                                )
+                                b_V_tl = einops.rearrange(
+                                    state_dict[v_bias_key], "(n h) -> n h", n=self.cfg.n_heads
+                                )
 
                             # Call set_processed_weights with TL format Q/K/V and HF format W_O
                             attn_component.set_processed_weights(
@@ -1454,7 +1479,7 @@ class TransformerBridge(nn.Module):
                                 b_Q=b_Q_tl,
                                 b_K=b_K_tl,
                                 b_V=b_V_tl,
-                                b_O=o_bias
+                                b_O=o_bias,
                             )
 
                         # Handle biases if they exist
@@ -1464,17 +1489,25 @@ class TransformerBridge(nn.Module):
                             v_bias_hf = state_dict[v_bias_key]  # [d_model]
 
                             # Convert from HF format [d_model] to TL format [n_heads, d_head]
-                            q_bias_tl = einops.rearrange(q_bias_hf, "(n h) -> n h", n=self.cfg.n_heads)
-                            k_bias_tl = einops.rearrange(k_bias_hf, "(n h) -> n h", n=self.cfg.n_heads)
-                            v_bias_tl = einops.rearrange(v_bias_hf, "(n h) -> n h", n=self.cfg.n_heads)
+                            q_bias_tl = einops.rearrange(
+                                q_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
+                            )
+                            k_bias_tl = einops.rearrange(
+                                k_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
+                            )
+                            v_bias_tl = einops.rearrange(
+                                v_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
+                            )
 
                             # Concatenate Q, K, V biases into joint QKV bias [3*d_model]
                             qkv_bias = torch.cat([q_bias_hf, k_bias_hf, v_bias_hf], dim=0)
 
                             # Load into the qkv component (c_attn)
-                            if hasattr(attn_component, 'qkv') and hasattr(attn_component.qkv, '_original_component'):
+                            if hasattr(attn_component, "qkv") and hasattr(
+                                attn_component.qkv, "_original_component"
+                            ):
                                 qkv_component = attn_component.qkv._original_component
-                                if hasattr(qkv_component, 'bias'):
+                                if hasattr(qkv_component, "bias"):
                                     qkv_component.bias.data = qkv_bias
                                     loaded_count += 1
 
@@ -1487,7 +1520,9 @@ class TransformerBridge(nn.Module):
                         attn_component._hooked_weights_extracted = True
 
                         if verbose:
-                            print(f"    Loaded processed QKV weights for layer {layer_idx} (JointQKVAttention)")
+                            print(
+                                f"    Loaded processed QKV weights for layer {layer_idx} (JointQKVAttention)"
+                            )
                             print(f"      Q/K/V HF format: {q_weight_hf.shape}")
                             print(f"      Q/K/V TL format: {q_weight_tl.shape}")
                             print(f"      Reconstructed joint QKV HF format: {qkv_weight.shape}")
@@ -1503,7 +1538,7 @@ class TransformerBridge(nn.Module):
 
             try:
                 # Parse the key to get component path
-                parts = tb_key.split('.')
+                parts = tb_key.split(".")
 
                 # Navigate through Bridge components
                 component = self
@@ -1517,7 +1552,7 @@ class TransformerBridge(nn.Module):
                             component = getattr(component, part)
                         else:
                             # Try looking in submodules
-                            if hasattr(component, '_modules') and part in component._modules:
+                            if hasattr(component, "_modules") and part in component._modules:
                                 component = component._modules[part]
                             else:
                                 raise AttributeError(f"Component {part} not found")
@@ -1526,7 +1561,7 @@ class TransformerBridge(nn.Module):
                 param_name = parts[-1]  # 'weight' or 'bias'
 
                 # The component might have _original_component that holds the actual parameter
-                if hasattr(component, '_original_component'):
+                if hasattr(component, "_original_component"):
                     target_component = component._original_component
                 else:
                     target_component = component
