@@ -41,15 +41,32 @@ class StopAtLayerException(Exception):
         super().__init__(f"Stopped at layer {layer_idx}")
 
 
-def collect_aliases_recursive(hook_dict, prefix=""):
-    """Recursively collect hook aliases from a nested hook dictionary."""
+def build_alias_to_canonical_map(hook_dict, prefix=""):
+    """Build a mapping from alias hook names to their canonical names.
+
+    Args:
+        hook_dict: Dictionary mapping hook names to HookPoint objects
+        prefix: Prefix for nested keys
+
+    Returns:
+        Dictionary mapping alias names to canonical names
+
+    Example:
+        If hook_dict contains:
+        - "blocks.0.hook_q" -> HookPoint(name="blocks.0.attn.q.hook_out")
+
+        Returns:
+        - {"blocks.0.hook_q": "blocks.0.attn.q.hook_out"}
+    """
     aliases = {}
     for key, value in hook_dict.items():
         full_key = f"{prefix}.{key}" if prefix else key
         if isinstance(value, dict):
-            aliases.update(collect_aliases_recursive(value, full_key))
+            aliases.update(build_alias_to_canonical_map(value, full_key))
         elif hasattr(value, "name"):
-            aliases[full_key] = value.name
+            # If the key differs from the HookPoint's name, it's an alias
+            if key != value.name:
+                aliases[full_key] = value.name
     return aliases
 
 
@@ -126,6 +143,10 @@ class TransformerBridge(nn.Module):
             str, HookPoint
         ] = {}  # Dynamic registry of hook names to HookPoints
         self._hook_registry_initialized = False  # Track if registry has been initialized
+        self._hook_alias_registry: Dict[
+            str, Union[str, List[str]]
+        ] = {}  # Permanent registry of hook aliases
+        self._property_alias_registry: Dict[str, str] = {}  # Permanent registry of property aliases
 
         # Add device information to config from the loaded model
         if not hasattr(self.cfg, "device") or self.cfg.device is None:
@@ -142,8 +163,11 @@ class TransformerBridge(nn.Module):
         original_model = self.__dict__["original_model"]
         set_original_components(self, self.adapter, original_model)
 
-        # Initialize hook registry after components are set up
+        # # Initialize hook registry after components are set up
         self._initialize_hook_registry()
+
+        # Register aliases after all components are set up
+        self._register_aliases()
 
         # Intiialize dictionary containing hooks that will be cached
         self._initialize_hooks_to_cache()
@@ -159,6 +183,59 @@ class TransformerBridge(nn.Module):
     def original_model(self, value: nn.Module) -> None:
         """Set the original model."""
         self.__dict__["original_model"] = value
+
+    def _register_aliases(self) -> None:
+        """Register bridge-level aliases.
+
+        This is called at the END of __init__ when all components are set up.
+        It registers the top-level bridge aliases (hook_embed, hook_pos_embed, etc.)
+        and creates direct attribute references.
+        """
+        # Register hook aliases from class attribute
+        if self.hook_aliases:
+            self._hook_alias_registry.update(self.hook_aliases)
+
+            # Create direct attribute references for hook aliases
+            for alias_name, target_path in self.hook_aliases.items():
+                try:
+                    # Resolve the target object (handles both single targets and lists)
+                    if isinstance(target_path, list):
+                        # For list-based fallbacks, try each target until one works
+                        for single_target in target_path:
+                            try:
+                                target_obj = self
+                                for part in single_target.split("."):
+                                    target_obj = getattr(target_obj, part)
+                                # Found it, set the alias
+                                object.__setattr__(self, alias_name, target_obj)
+                                break
+                            except AttributeError:
+                                continue
+                    else:
+                        # Single target
+                        target_obj = self
+                        for part in target_path.split("."):
+                            target_obj = getattr(target_obj, part)
+                        object.__setattr__(self, alias_name, target_obj)
+                except AttributeError:
+                    # Target doesn't exist yet, skip
+                    pass
+
+    def _register_all_aliases_recursive(self) -> None:
+        """Recursively register aliases on all bridge components.
+
+        This walks through all components and calls _register_aliases() on each one.
+        Used after weight processing to ensure aliases point to processed weights.
+        """
+        # Register on self first
+        if hasattr(self, "_register_aliases"):
+            self._register_aliases()
+
+        # Walk through all PyTorch modules recursively
+        for module in self.modules():
+            if module is not self and hasattr(module, "_register_aliases"):
+                # Type checker: _register_aliases is a method on GeneralizedComponent
+                getattr(module, "_register_aliases")()
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Override setattr to track HookPoint objects dynamically."""
@@ -195,10 +272,6 @@ class TransformerBridge(nn.Module):
 
         # Scan existing components for hooks
         self._scan_existing_hooks(self, "")
-
-        # Add bridge aliases if compatibility mode is enabled
-        if self.compatibility_mode:
-            self._add_aliases_to_hooks(self._hook_registry)
 
         self._hook_registry_initialized = True
 
@@ -395,7 +468,6 @@ class TransformerBridge(nn.Module):
         """Get all HookPoint objects in the model for compatibility with TransformerLens."""
         hooks = self._hook_registry.copy()
 
-        # Add aliases if compatibility mode is enabled
         if self.compatibility_mode:
             self._add_aliases_to_hooks(hooks)
 
@@ -497,7 +569,7 @@ class TransformerBridge(nn.Module):
         hooks_to_cache = {}
 
         if self.compatibility_mode:
-            aliases = collect_aliases_recursive(self.hook_dict)
+            aliases = build_alias_to_canonical_map(self.hook_dict)
 
         if include_all:
             self.hooks_to_cache = self.hook_dict
@@ -525,12 +597,6 @@ class TransformerBridge(nn.Module):
         # Check if this is a registered PyTorch module (added via add_module)
         if hasattr(self, "_modules") and name in self._modules:
             return self._modules[name]
-
-        # Check if this is a hook alias when compatibility mode is enabled
-        if self.compatibility_mode:
-            resolved_hook = resolve_alias(self, name, self.hook_aliases)
-            if resolved_hook is not None:
-                return resolved_hook
 
         # Try to get from original_model if it exists
         if "original_model" in self.__dict__ and self.__dict__["original_model"] is not None:
@@ -867,6 +933,10 @@ class TransformerBridge(nn.Module):
                 center_writing_weights=center_writing_weights,
                 center_unembed=center_unembed,
             )
+
+        # Register property aliases AFTER weight processing
+        # This ensures aliases point to the correct (processed) weights
+        self._register_all_aliases_recursive()
 
     def _setup_no_processing_hooks(self) -> None:
         """Setup hooks for no_processing mode in all attention layers.
@@ -4846,8 +4916,8 @@ class TransformerBridge(nn.Module):
             Tuple of (output, cache)
         """
         # Process names_filter to create a callable that handles legacy hook names
-        # Collect all aliases from bridge components (both hook and cache aliases)
-        aliases = collect_aliases_recursive(self.hook_dict)
+        # Build alias mapping to resolve legacy hook names to canonical names
+        aliases = build_alias_to_canonical_map(self.hook_dict)
 
         def create_names_filter_fn(filter_input):
             if filter_input is None:
@@ -5166,8 +5236,8 @@ class TransformerBridge(nn.Module):
         # Helper function to apply hooks based on name or filter function
         def apply_hooks(hooks: List[Tuple[Union[str, Callable], Callable]], is_fwd: bool):
             direction: Literal["fwd", "bwd"] = "fwd" if is_fwd else "bwd"
-            # Collect aliases for resolving legacy hook names
-            aliases = collect_aliases_recursive(self.hook_dict)
+            # Build alias mapping for resolving legacy hook names
+            aliases = build_alias_to_canonical_map(self.hook_dict)
 
             for hook_name_or_filter, hook_fn in hooks:
                 # Wrap the hook function to handle remove_batch_dim if needed
