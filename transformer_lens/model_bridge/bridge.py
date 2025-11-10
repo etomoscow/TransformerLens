@@ -1253,7 +1253,11 @@ class TransformerBridge(nn.Module):
         raw_state_dict = self.original_model.state_dict()
         state_dict = {}
         for key, value in raw_state_dict.items():
-            clean_key = key.replace("._original_component", "")
+            # Remove ALL occurrences of ._original_component (not just the first one)
+            # Some layers can have multiple levels of wrapping, especially last layers
+            clean_key = key
+            while "._original_component" in clean_key:
+                clean_key = clean_key.replace("._original_component", "")
             state_dict[clean_key] = value.clone()
 
         # Get architecture adapter for path translation

@@ -279,25 +279,71 @@ class ProcessWeights:
 
         # Extract tensors based on actual format detection, not just adapter presence
         if adapter and uses_hf_format and not uses_tl_format:
-            # State dict is in HuggingFace format - convert to TransformerLens format
-            wq_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                f"blocks.{layer}.attn.W_Q", adapter, state_dict, cfg, layer
-            )
-            wk_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                f"blocks.{layer}.attn.W_K", adapter, state_dict, cfg, layer
-            )
-            wv_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                f"blocks.{layer}.attn.W_V", adapter, state_dict, cfg, layer
-            )
-            bq_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                f"blocks.{layer}.attn.b_Q", adapter, state_dict, cfg, layer
-            )
-            bk_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                f"blocks.{layer}.attn.b_K", adapter, state_dict, cfg, layer
-            )
-            bv_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                f"blocks.{layer}.attn.b_V", adapter, state_dict, cfg, layer
-            )
+            # First check if weights are already in split format (from earlier processing)
+            # This handles JointQKV models where weights have been split but not yet converted to TL format
+            split_q_key = f"blocks.{layer}.attn.q.weight"
+            split_k_key = f"blocks.{layer}.attn.k.weight"
+            split_v_key = f"blocks.{layer}.attn.v.weight"
+
+            # DEBUG: Print for layers 9, 10, 11
+            if layer in [9, 10, 11]:
+                print(f"\n[DEBUG] Layer {layer} - Checking split keys:")
+                print(f"  {split_q_key} exists: {split_q_key in state_dict}")
+                print(f"  {split_k_key} exists: {split_k_key in state_dict}")
+                print(f"  {split_v_key} exists: {split_v_key in state_dict}")
+
+            if split_q_key in state_dict and split_k_key in state_dict and split_v_key in state_dict:
+                # Weights are already split - load them directly and convert to TL format
+                # These are in HF format [d_model, d_model]
+                import einops
+
+                wq_hf = state_dict[split_q_key]
+                wk_hf = state_dict[split_k_key]
+                wv_hf = state_dict[split_v_key]
+
+                # Convert from HF format [d_model, d_model] to TL format [n_heads, d_model, d_head]
+                wq_tensor = einops.rearrange(wq_hf, "m (n h) -> n m h", n=cfg.n_heads)
+                wk_tensor = einops.rearrange(wk_hf, "m (n h) -> n m h", n=cfg.n_heads)
+                wv_tensor = einops.rearrange(wv_hf, "m (n h) -> n m h", n=cfg.n_heads)
+
+                # Check for biases in split format
+                split_bq_key = f"blocks.{layer}.attn.q.bias"
+                split_bk_key = f"blocks.{layer}.attn.k.bias"
+                split_bv_key = f"blocks.{layer}.attn.v.bias"
+
+                bq_tensor = None
+                bk_tensor = None
+                bv_tensor = None
+
+                if split_bq_key in state_dict:
+                    bq_hf = state_dict[split_bq_key]
+                    bq_tensor = einops.rearrange(bq_hf, "(n h) -> n h", n=cfg.n_heads)
+                if split_bk_key in state_dict:
+                    bk_hf = state_dict[split_bk_key]
+                    bk_tensor = einops.rearrange(bk_hf, "(n h) -> n h", n=cfg.n_heads)
+                if split_bv_key in state_dict:
+                    bv_hf = state_dict[split_bv_key]
+                    bv_tensor = einops.rearrange(bv_hf, "(n h) -> n h", n=cfg.n_heads)
+            else:
+                # Weights are in combined format (e.g., c_attn) - extract using adapter
+                wq_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                    f"blocks.{layer}.attn.W_Q", adapter, state_dict, cfg, layer
+                )
+                wk_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                    f"blocks.{layer}.attn.W_K", adapter, state_dict, cfg, layer
+                )
+                wv_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                    f"blocks.{layer}.attn.W_V", adapter, state_dict, cfg, layer
+                )
+                bq_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                    f"blocks.{layer}.attn.b_Q", adapter, state_dict, cfg, layer
+                )
+                bk_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                    f"blocks.{layer}.attn.b_K", adapter, state_dict, cfg, layer
+                )
+                bv_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                    f"blocks.{layer}.attn.b_V", adapter, state_dict, cfg, layer
+                )
         else:
             # State dict is already in TransformerLens format - use directly
             # Handle case where some keys might not exist (e.g., grouped query attention or optional biases)
@@ -366,6 +412,10 @@ class ProcessWeights:
         """
         layer = layer_idx
 
+        # DEBUG: Print for layers 9, 10, 11
+        if layer in [9, 10, 11]:
+            print(f"[DEBUG] _fold_layer called for layer {layer}")
+
         # Extract all tensors in TransformerLens format using the new extraction function
         tensors = ProcessWeights.extract_attention_tensors_for_folding(
             state_dict, cfg, layer, adapter
@@ -382,10 +432,24 @@ class ProcessWeights:
         ln1_w = tensors["ln1_w"]
         keys = tensors["keys"]
 
+        # DEBUG for layers 9, 10, 11
+        if layer in [9, 10, 11]:
+            print(f"[DEBUG] Layer {layer} - After extraction:")
+            print(f"  wq_tensor is None: {wq_tensor is None}")
+            if wq_tensor is not None:
+                print(f"  wq_tensor shape: {wq_tensor.shape}")
+            print(f"  wk_tensor is None: {wk_tensor is None}")
+            print(f"  wv_tensor is None: {wv_tensor is None}")
+            print(f"  bq_tensor is None: {bq_tensor is None}")
+            print(f"  bk_tensor is None: {bk_tensor is None}")
+            print(f"  bv_tensor is None: {bv_tensor is None}")
+
         # Check if we have the required tensors for layer norm folding
         # For grouped query attention models, some tensors might be None
         if wq_tensor is None:
             # Skip layer norm folding for this layer if missing critical tensors
+            if layer in [9, 10, 11]:
+                print(f"[DEBUG] Layer {layer} - EARLY RETURN: wq_tensor is None")
             return
 
         # Type assertions for mypy for required tensors
@@ -446,6 +510,10 @@ class ProcessWeights:
             wq_tensor, wk_tensor, wv_tensor = ProcessWeights.center_attention_weights(
                 wq_tensor, wk_tensor, wv_tensor
             )
+
+        # DEBUG for layers 9, 10, 11
+        if layer in [9, 10, 11]:
+            print(f"[DEBUG] Layer {layer} - About to call _store_processed_attention_tensors")
 
         # Store processed tensors back to state dict
         ProcessWeights._store_processed_attention_tensors(
@@ -684,6 +752,13 @@ class ProcessWeights:
                 state_dict[tb_w_k_key] = einops.rearrange(wk_tensor, "i m h -> m (i h)")
                 state_dict[tb_w_v_key] = einops.rearrange(wv_tensor, "i m h -> m (i h)")
 
+                # DEBUG: Print for layers 9, 10, 11
+                if layer in [9, 10, 11]:
+                    print(f"[DEBUG] Layer {layer} - Stored split format keys:")
+                    print(f"  {tb_w_q_key}")
+                    print(f"  {tb_w_k_key}")
+                    print(f"  {tb_w_v_key}")
+
                 # Biases: [n_heads, d_head] -> [d_model]
                 if bq_tensor is not None:
                     state_dict[tb_b_q_key] = einops.rearrange(bq_tensor, "i h -> (i h)")
@@ -702,11 +777,25 @@ class ProcessWeights:
 
                 # Delete only Q/K/V keys, not output projection (W_O)
                 # Match keys containing q/k/v/qkv/c_attn but not o/c_proj
+                # IMPORTANT: Add "." after hf_layer_prefix to avoid matching multi-digit layers
+                # (e.g., "transformer.h.1" should not match "transformer.h.10" or "transformer.h.11")
                 keys_to_delete = [
                     k for k in list(state_dict.keys())
-                    if k.startswith(hf_layer_prefix) and '.attn.' in k
+                    if k.startswith(hf_layer_prefix + ".") and '.attn.' in k
                     and any(qkv_marker in k for qkv_marker in ['.q.', '.k.', '.v.', '.qkv.', '.c_attn.'])
                 ]
+
+                # DEBUG for layers 0, 1, 9, 10, 11
+                if layer in [0, 1, 9, 10, 11]:
+                    print(f"[DEBUG] Layer {layer} - Deleting keys:")
+                    print(f"  hf_layer_prefix: {hf_layer_prefix}")
+                    print(f"  keys_to_delete count: {len(keys_to_delete)}")
+                    if layer in [0, 1]:
+                        # For layer 0 and 1, show all keys (might be many)
+                        print(f"  keys_to_delete: {keys_to_delete[:20]}")  # First 20
+                    else:
+                        print(f"  keys_to_delete: {keys_to_delete}")
+
                 for key_to_remove in keys_to_delete:
                     del state_dict[key_to_remove]
             else:
@@ -1279,8 +1368,24 @@ class ProcessWeights:
         )
 
         for layer in range(cfg.n_layers):
+            # FIRST: Check for split format keys created by fold_layer_norm (e.g., blocks.{i}.attn.v.bias)
+            # These are in a hybrid format with HF-style layout but split Q/K/V
+            split_v_bias_key = f"blocks.{layer}.attn.v.bias"
+            if split_v_bias_key in state_dict:
+                # State dict has split format keys from fold_layer_norm
+                # Use these directly (they're in HF format [d_model])
+                # Need to use adapter to translate W_O and b_O keys since fold_layer_norm
+                # doesn't convert these to split format
+                b_V_key = split_v_bias_key
+                if adapter:
+                    W_O_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn.W_O", adapter)
+                    b_O_key = ProcessWeights._get_param_key(f"blocks.{layer}.attn.b_O", adapter)
+                else:
+                    # Fallback: try TL format first
+                    W_O_key = f"blocks.{layer}.attn.W_O"
+                    b_O_key = f"blocks.{layer}.attn.b_O"
             # Get parameter keys for this layer based on format detection
-            if uses_tl_format and not uses_hf_format:
+            elif uses_tl_format and not uses_hf_format:
                 # State dict is in TransformerLens format - use TL keys directly
                 if getattr(cfg, "n_key_value_heads", None) is None:
                     b_V_key = f"blocks.{layer}.attn.b_V"
@@ -1331,7 +1436,37 @@ class ProcessWeights:
                 b_O_original = state_dict[b_O_key]
 
                 # Handle different tensor formats
-                if len(b_V.shape) == 1 and len(W_O.shape) == 2:
+                # Check if this is a split format key (e.g., blocks.{i}.attn.v.bias)
+                # These are created by fold_layer_norm and contain ONLY the V bias, not combined QKV
+                is_split_format = ".attn.v.bias" in b_V_key or ".attn.k.bias" in b_V_key
+
+                if is_split_format and len(b_V.shape) == 1 and len(W_O.shape) == 2:
+                    # Split format: V bias is already separated [d_model], W_O is [d_model, d_model]
+                    n_heads = cfg.n_heads
+                    d_head = cfg.d_head
+                    d_model = cfg.d_model
+
+                    # The bias is already just the V bias (not combined QKV)
+                    b_V_only = b_V  # [d_model] = [n_heads * d_head]
+
+                    # Reshape for computation: [n_heads * d_head] -> [n_heads, d_head]
+                    b_V_reshaped = b_V_only.reshape(n_heads, d_head)
+
+                    # W_O is [d_model, d_model], reshape to [n_heads, d_head, d_model]
+                    W_O_reshaped = einops.rearrange(W_O, "(i h) m -> i h m", i=n_heads)
+
+                    # Compute the folded bias: sum over heads and d_head dimensions
+                    folded_b_O = b_O_original + (b_V_reshaped[:, :, None] * W_O_reshaped).sum(
+                        [0, 1]
+                    )
+
+                    # Store the folded output bias
+                    state_dict[b_O_key] = folded_b_O
+
+                    # Zero out the V bias (the entire bias since it's already split)
+                    state_dict[b_V_key] = torch.zeros_like(b_V)
+
+                elif len(b_V.shape) == 1 and len(W_O.shape) == 2:
                     # HuggingFace format: combined QKV bias [3 * n_heads * d_head], W_O [d_model, d_model]
                     n_heads = cfg.n_heads
                     d_head = cfg.d_head
@@ -1691,7 +1826,11 @@ class ProcessWeights:
         state_dict = model.state_dict()
         cleaned_state_dict = {}
         for key, tensor in state_dict.items():
-            clean_key = key.replace("._original_component", "")
+            # Remove ALL occurrences of ._original_component (not just the first one)
+            # Some layers can have multiple levels of wrapping, especially last layers
+            clean_key = key
+            while "._original_component" in clean_key:
+                clean_key = clean_key.replace("._original_component", "")
             cleaned_state_dict[clean_key] = tensor.clone()
 
         return cleaned_state_dict
@@ -1716,8 +1855,16 @@ class ProcessWeights:
         ):
             raise ValueError("Architecture adapter must have conversion_rules set")
 
-        # Get the HF state dict
-        hf_state_dict = hf_model.state_dict()
+        # Get the HF state dict and clean ._original_component suffixes
+        raw_hf_state_dict = hf_model.state_dict()
+        hf_state_dict = {}
+        for key, tensor in raw_hf_state_dict.items():
+            # Remove ALL occurrences of ._original_component (not just the first one)
+            # Some layers can have multiple levels of wrapping, especially last layers
+            clean_key = key
+            while "._original_component" in clean_key:
+                clean_key = clean_key.replace("._original_component", "")
+            hf_state_dict[clean_key] = tensor
 
         # Extract target keys from component mapping via conversion rules instead of hardcoded list
         target_keys = ProcessWeights._extract_tl_keys_from_conversion_rules(architecture_adapter)
@@ -2019,6 +2166,12 @@ class ProcessWeights:
                 )  # [d_model, 3 * n_heads * d_head]
                 hf_state_dict[f"{hf_layer_prefix}.attn.c_attn.weight"] = c_attn_weight
 
+                # ALSO create split format for bridge.py compatibility
+                # Bridge.py JointQKVAttention components expect split q/k/v.weight keys
+                hf_state_dict[f"{layer_prefix}.attn.q.weight"] = W_Q_flat
+                hf_state_dict[f"{layer_prefix}.attn.k.weight"] = W_K_flat
+                hf_state_dict[f"{layer_prefix}.attn.v.weight"] = W_V_flat
+
             if f"{layer_prefix}.attn.b_Q" in tl_state_dict:
                 b_Q = tl_state_dict[f"{layer_prefix}.attn.b_Q"]  # [n_heads, d_head]
                 b_K = tl_state_dict[f"{layer_prefix}.attn.b_K"]
@@ -2031,6 +2184,11 @@ class ProcessWeights:
 
                 c_attn_bias = torch.cat([b_Q_flat, b_K_flat, b_V_flat], dim=0)
                 hf_state_dict[f"{hf_layer_prefix}.attn.c_attn.bias"] = c_attn_bias
+
+                # ALSO create split format for bridge.py compatibility
+                hf_state_dict[f"{layer_prefix}.attn.q.bias"] = b_Q_flat
+                hf_state_dict[f"{layer_prefix}.attn.k.bias"] = b_K_flat
+                hf_state_dict[f"{layer_prefix}.attn.v.bias"] = b_V_flat
 
             # Attention output projection
             if f"{layer_prefix}.attn.W_O" in tl_state_dict:

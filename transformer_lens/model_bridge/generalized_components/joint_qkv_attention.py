@@ -84,9 +84,14 @@ class JointQKVAttentionBridge(AttentionBridge):
         self.q.hook_in.hook_conversion = self.qkv_conversion_rule
         self.k.hook_in.hook_conversion = self.qkv_conversion_rule
         self.v.hook_in.hook_conversion = self.qkv_conversion_rule
-        self.q.hook_out.hook_conversion = self.qkv_conversion_rule
-        self.k.hook_out.hook_conversion = self.qkv_conversion_rule
-        self.v.hook_out.hook_conversion = self.qkv_conversion_rule
+        # NOTE: We do NOT apply conversion rules to hook_out in compatibility mode
+        # because we need Q/K/V to stay in 4D format [batch, seq, n_heads, d_head]
+        # for the subsequent transpose operation in _compatibility_mode_forward_with_hooks.
+        # The ConditionalRearrangeConversion.revert() would incorrectly convert them back to 3D,
+        # breaking the transpose and matmul operations.
+        # self.q.hook_out.hook_conversion = self.qkv_conversion_rule
+        # self.k.hook_out.hook_conversion = self.qkv_conversion_rule
+        # self.v.hook_out.hook_conversion = self.qkv_conversion_rule
 
         # Store processed weights after weight processing
         self._processed_weights: Optional[Dict[str, torch.Tensor]] = None
@@ -545,6 +550,7 @@ class JointQKVAttentionBridge(AttentionBridge):
         use_cache = kwargs.get("use_cache", False)
 
         # Transpose for attention computation: [batch, seq, heads, d_head] -> [batch, heads, seq, d_head]
+        # IMPORTANT: Reassign to q to ensure hook modifications are preserved
         q = q.transpose(1, 2)
         k_new = k.transpose(1, 2)
         v_new = v.transpose(1, 2)
