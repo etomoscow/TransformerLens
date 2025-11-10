@@ -5,6 +5,7 @@ This module contains the bridge component for attention layers that use a fused 
 
 from typing import Any, Callable, Dict, Optional, cast
 
+import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -105,21 +106,56 @@ class JointQKVAttentionBridge(AttentionBridge):
         self._reference_model: Optional[Any] = None
         self._layer_idx: Optional[int] = None
 
-    def _create_qkv_conversion_rule(self) -> RearrangeHookConversion:
+    def _create_qkv_conversion_rule(self) -> BaseHookConversion:
         """Create the appropriate conversion rule for the individual q, k, and v matrices.
 
         Returns:
-            RearrangeHookConversion for individual q, k, and v matrices
+            BaseHookConversion for individual q, k, and v matrices
         """
-        pattern = "batch seq (num_attention_heads d_head) -> batch seq num_attention_heads d_head"
-
         # keep mypy happy
         assert self.config is not None
 
-        return RearrangeHookConversion(
-            pattern,
-            num_attention_heads=self.config.n_heads,
-        )
+        # Create a custom conversion that checks tensor shape before applying rearrange
+        # This handles both unprocessed (3D) and processed (4D) weights
+        class ConditionalRearrangeConversion(BaseHookConversion):
+            def __init__(self, n_heads: int):
+                super().__init__()
+                self.n_heads = n_heads
+                self.pattern = "batch seq (num_attention_heads d_head) -> batch seq num_attention_heads d_head"
+
+            def handle_conversion(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
+                if input_value.ndim == 4:
+                    # Already in correct format [batch, seq, n_heads, d_head], no conversion needed
+                    return input_value
+                elif input_value.ndim == 3:
+                    # Need conversion from [batch, seq, d_model] to [batch, seq, n_heads, d_head]
+                    return einops.rearrange(
+                        input_value,
+                        self.pattern,
+                        num_attention_heads=self.n_heads,
+                    )
+                else:
+                    raise ValueError(
+                        f"Expected 3D or 4D tensor, got {input_value.ndim}D with shape {input_value.shape}"
+                    )
+
+            def revert(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
+                if input_value.ndim == 3:
+                    # Already in flat format, no revert needed
+                    return input_value
+                elif input_value.ndim == 4:
+                    # Revert from [batch, seq, n_heads, d_head] to [batch, seq, d_model]
+                    return einops.rearrange(
+                        input_value,
+                        "batch seq num_attention_heads d_head -> batch seq (num_attention_heads d_head)",
+                        num_attention_heads=self.n_heads,
+                    )
+                else:
+                    raise ValueError(
+                        f"Expected 3D or 4D tensor, got {input_value.ndim}D with shape {input_value.shape}"
+                    )
+
+        return ConditionalRearrangeConversion(self.config.n_heads)
 
     def set_original_component(self, original_component: torch.nn.Module) -> None:
         """Set the original component that this bridge wraps and initialize LinearBridges for q, k, and v transformations.
@@ -177,7 +213,11 @@ class JointQKVAttentionBridge(AttentionBridge):
         self._processed_b_O = b_O
 
         # Mark that we should use processed weights in forward pass
-        self._use_processed_weights = True
+        # Only set this flag if we actually have the weights
+        if W_Q is not None and W_K is not None and W_V is not None and W_O is not None:
+            self._use_processed_weights = True
+        else:
+            self._use_processed_weights = False
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass through the qkv linear transformation with hooks.
@@ -480,9 +520,17 @@ class JointQKVAttentionBridge(AttentionBridge):
             v_input = self.v.hook_in(input_tensor)
 
         # Compute Q, K, V using the separate input tensors
-        q = simple_attn_linear(q_input, self._W_Q, self._b_Q)
-        k = simple_attn_linear(k_input, self._W_K, self._b_K)
-        v = simple_attn_linear(v_input, self._W_V, self._b_V)
+        # If using processed weights, use _processed_W_* attributes, otherwise use _W_* attributes
+        W_Q = self._processed_W_Q if hasattr(self, "_processed_W_Q") and self._processed_W_Q is not None else self._W_Q
+        W_K = self._processed_W_K if hasattr(self, "_processed_W_K") and self._processed_W_K is not None else self._W_K
+        W_V = self._processed_W_V if hasattr(self, "_processed_W_V") and self._processed_W_V is not None else self._W_V
+        b_Q = self._processed_b_Q if hasattr(self, "_processed_b_Q") and self._processed_b_Q is not None else self._b_Q
+        b_K = self._processed_b_K if hasattr(self, "_processed_b_K") and self._processed_b_K is not None else self._b_K
+        b_V = self._processed_b_V if hasattr(self, "_processed_b_V") and self._processed_b_V is not None else self._b_V
+
+        q = simple_attn_linear(q_input, W_Q, b_Q)
+        k = simple_attn_linear(k_input, W_K, b_K)
+        v = simple_attn_linear(v_input, W_V, b_V)
 
         # Apply output hooks
         q = self.q.hook_out(q)

@@ -233,7 +233,9 @@ class ProcessWeights:
             Tuple of (uses_tl_format, uses_hf_format)
         """
         # Sample keys to check format
-        tl_key_sample = f"blocks.{layer}.attn.W_Q"
+        # Use embedding key instead of attention key since we may add TL attention keys
+        # during processing but keep other keys in HF format
+        tl_key_sample = "embed.W_E"
         hf_key_sample = ProcessWeights._get_param_key(tl_key_sample, adapter) if adapter else None
 
         uses_tl_format = tl_key_sample in state_dict
@@ -418,16 +420,26 @@ class ProcessWeights:
                     bq_tensor, bk_tensor, bv_tensor = ProcessWeights.fold_layer_norm_biases(  # type: ignore[arg-type]
                         wq_tensor, wk_tensor, wv_tensor, bq_tensor, bk_tensor, bv_tensor, ln1_b  # type: ignore[arg-type]
                     )
+                # Replace ln bias with zeros (identity for bias) instead of deleting
                 if keys["ln1_b"] in state_dict:
-                    del state_dict[keys["ln1_b"]]
+                    state_dict[keys["ln1_b"]] = torch.zeros_like(ln1_b)
+                # ALSO set alternate naming if it exists (ln1 vs ln_1)
+                alternate_b_key = keys["ln1_b"].replace("ln_1", "ln1") if "ln_1" in keys["ln1_b"] else keys["ln1_b"].replace("ln1", "ln_1")
+                if alternate_b_key != keys["ln1_b"] and alternate_b_key in state_dict:
+                    state_dict[alternate_b_key] = torch.zeros_like(ln1_b)
 
             # Only fold weights if all tensors exist
             if wk_tensor is not None and wv_tensor is not None:
                 wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
                     wq_tensor, wk_tensor, wv_tensor, ln1_w
                 )
+            # Replace ln weight with ones (identity for weight) instead of deleting
             if keys["ln1_w"] in state_dict:
-                del state_dict[keys["ln1_w"]]
+                state_dict[keys["ln1_w"]] = torch.ones_like(ln1_w)
+            # ALSO set alternate naming if it exists (ln1 vs ln_1)
+            alternate_w_key = keys["ln1_w"].replace("ln_1", "ln1") if "ln_1" in keys["ln1_w"] else keys["ln1_w"].replace("ln1", "ln_1")
+            if alternate_w_key != keys["ln1_w"] and alternate_w_key in state_dict:
+                state_dict[alternate_w_key] = torch.ones_like(ln1_w)
 
         # Center the weights if requested
         if center_weights and wk_tensor is not None and wv_tensor is not None:
@@ -516,7 +528,12 @@ class ProcessWeights:
                 state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
                     state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
                 ).sum(-2)
-                del state_dict[ln2_b_key]
+                # Replace ln2 bias with zeros (identity for bias) instead of deleting
+                state_dict[ln2_b_key] = torch.zeros_like(state_dict[ln2_b_key])
+                # ALSO set alternate naming if it exists (ln2 vs ln_2)
+                alternate_ln2_b_key = ln2_b_key.replace("ln_2", "ln2") if "ln_2" in ln2_b_key else ln2_b_key.replace("ln2", "ln_2")
+                if alternate_ln2_b_key != ln2_b_key and alternate_ln2_b_key in state_dict:
+                    state_dict[alternate_ln2_b_key] = torch.zeros_like(state_dict[ln2_b_key])
 
             # TODO this is causing slight divergence
             state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
@@ -526,9 +543,14 @@ class ProcessWeights:
                     state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
                 )
 
-            del state_dict[ln2_w_key]
+            # Replace ln2 weight with ones (identity for weight) instead of deleting
+            state_dict[ln2_w_key] = torch.ones_like(state_dict[ln2_w_key])
+            # ALSO set alternate naming if it exists (ln2 vs ln_2)
+            alternate_ln2_w_key = ln2_w_key.replace("ln_2", "ln2") if "ln_2" in ln2_w_key else ln2_w_key.replace("ln2", "ln_2")
+            if alternate_ln2_w_key != ln2_w_key and alternate_ln2_w_key in state_dict:
+                state_dict[alternate_ln2_w_key] = torch.ones_like(state_dict[ln2_w_key])
 
-        if center_weights:
+        if center_weights and mlp_W_in_key in state_dict:
             # Center the weights that read in from the LayerNormPre
             state_dict[mlp_W_in_key] -= einops.reduce(
                 state_dict[mlp_W_in_key],
@@ -648,11 +670,45 @@ class ProcessWeights:
                 new_qkv_weight = torch.cat([W_Q_hf, W_K_hf, W_V_hf], dim=1)  # [d_model, 3*d_model]
                 new_qkv_bias = torch.cat([b_Q_hf, b_K_hf, b_V_hf])  # [3*d_model]
 
-                # Update state dict with combined format
-                state_dict[hf_w_q_key] = new_qkv_weight
-                state_dict[
-                    adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_Q")
-                ] = new_qkv_bias
+                # Store in TransformerBridge format: blocks.{layer}.attn.q.weight
+                tb_w_q_key = f"blocks.{layer}.attn.q.weight"
+                tb_w_k_key = f"blocks.{layer}.attn.k.weight"
+                tb_w_v_key = f"blocks.{layer}.attn.v.weight"
+                tb_b_q_key = f"blocks.{layer}.attn.q.bias"
+                tb_b_k_key = f"blocks.{layer}.attn.k.bias"
+                tb_b_v_key = f"blocks.{layer}.attn.v.bias"
+
+                # Convert back to HF format for storage
+                # Weights: [n_heads, d_model, d_head] -> [d_model, d_model]
+                state_dict[tb_w_q_key] = einops.rearrange(wq_tensor, "i m h -> m (i h)")
+                state_dict[tb_w_k_key] = einops.rearrange(wk_tensor, "i m h -> m (i h)")
+                state_dict[tb_w_v_key] = einops.rearrange(wv_tensor, "i m h -> m (i h)")
+
+                # Biases: [n_heads, d_head] -> [d_model]
+                if bq_tensor is not None:
+                    state_dict[tb_b_q_key] = einops.rearrange(bq_tensor, "i h -> (i h)")
+                    state_dict[tb_b_k_key] = einops.rearrange(bk_tensor, "i h -> (i h)")
+                    state_dict[tb_b_v_key] = einops.rearrange(bv_tensor, "i h -> (i h)")
+
+                # Remove HF format QKV attention keys from state dict (keep only TransformerBridge format)
+                # The Bridge creates multiple versions of Q/K/V weights for compatibility:
+                # - split (.q.weight, .k.weight, .v.weight)
+                # - joint (.c_attn.weight, .qkv.weight)
+                # We need to remove all Q/K/V variants but KEEP W_O (output projection)
+                # because W_O is processed by other functions like center_writing_weights
+
+                # Get the HF layer prefix (e.g., "transformer.h.0" for GPT-2)
+                hf_layer_prefix = adapter.translate_transformer_lens_path(f"blocks.{layer}").rstrip(".")
+
+                # Delete only Q/K/V keys, not output projection (W_O)
+                # Match keys containing q/k/v/qkv/c_attn but not o/c_proj
+                keys_to_delete = [
+                    k for k in list(state_dict.keys())
+                    if k.startswith(hf_layer_prefix) and '.attn.' in k
+                    and any(qkv_marker in k for qkv_marker in ['.q.', '.k.', '.v.', '.qkv.', '.c_attn.'])
+                ]
+                for key_to_remove in keys_to_delete:
+                    del state_dict[key_to_remove]
             else:
                 # Separate Q, K, V format - convert back individually
                 # Get translated keys for separate format
@@ -806,8 +862,13 @@ class ProcessWeights:
             raise ValueError(
                 f"Unexpected tensor shapes: unembedding {unembed_weight.shape}, layer norm {ln_weight.shape}"
             )
+        # Replace ln_final weight with ones (identity for weight) instead of deleting
         if ln_final_w_key in state_dict:
-            del state_dict[ln_final_w_key]
+            state_dict[ln_final_w_key] = torch.ones_like(ln_weight)
+        # ALSO set alternate naming if it exists (ln_final vs final_layernorm, etc.)
+        alternate_final_w_key = ln_final_w_key.replace("ln_f", "ln_final") if "ln_f" in ln_final_w_key else ln_final_w_key.replace("ln_final", "ln_f")
+        if alternate_final_w_key != ln_final_w_key and alternate_final_w_key in state_dict:
+            state_dict[alternate_final_w_key] = torch.ones_like(ln_weight)
 
         if center_weights:
             # Center the weights that read in from the LayerNormPre
@@ -896,8 +957,13 @@ class ProcessWeights:
 
             # TODO this is causing slight divergence - FIXED
             state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + bias_contribution
+            # Replace ln_final bias with zeros (identity for bias) instead of deleting
             if ln_final_b_key in state_dict:
-                del state_dict[ln_final_b_key]
+                state_dict[ln_final_b_key] = torch.zeros_like(ln_bias)
+            # ALSO set alternate naming if it exists
+            alternate_final_b_key = ln_final_b_key.replace("ln_f", "ln_final") if "ln_f" in ln_final_b_key else ln_final_b_key.replace("ln_final", "ln_f")
+            if alternate_final_b_key != ln_final_b_key and alternate_final_b_key in state_dict:
+                state_dict[alternate_final_b_key] = torch.zeros_like(ln_bias)
 
     @staticmethod
     def fold_layer_norm(

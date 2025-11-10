@@ -41,6 +41,13 @@ from transformer_lens.benchmarks.hook_registration import (
 )
 from transformer_lens.benchmarks.utils import BenchmarkResult, format_results
 from transformer_lens.benchmarks.weight_processing import (
+    benchmark_attention_output_centering,
+    benchmark_layer_norm_folding,
+    benchmark_mlp_output_centering,
+    benchmark_no_nan_inf,
+    benchmark_unembed_centering,
+    benchmark_value_bias_folding,
+    benchmark_weight_magnitudes,
     benchmark_weight_modification,
     benchmark_weight_processing,
     benchmark_weight_sharing,
@@ -538,6 +545,15 @@ def run_benchmark_suite(
 
             # weight_modification doesn't need reference model
             results.append(benchmark_weight_modification(bridge_processed, test_text))
+
+            # Detailed weight processing validation benchmarks (don't need reference model)
+            results.append(benchmark_layer_norm_folding(bridge_processed, test_text))
+            results.append(benchmark_attention_output_centering(bridge_processed, test_text))
+            results.append(benchmark_mlp_output_centering(bridge_processed, test_text))
+            results.append(benchmark_unembed_centering(bridge_processed, test_text))
+            results.append(benchmark_value_bias_folding(bridge_processed, test_text))
+            results.append(benchmark_no_nan_inf(bridge_processed, test_text))
+            results.append(benchmark_weight_magnitudes(bridge_processed, test_text))
         except Exception as e:
             if verbose:
                 print(f"✗ Weight processing benchmark failed: {e}\n")

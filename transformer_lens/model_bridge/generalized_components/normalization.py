@@ -78,9 +78,10 @@ class NormalizationBridge(GeneralizedComponent):
             result = self._hf_autograd_forward(hidden_states)
         # Check if we should use LayerNormPre behavior (when layer norm folding is enabled)
         elif hasattr(self.config, "layer_norm_folding") and self.config.layer_norm_folding:
-            # LayerNormPre mode: center and normalize without learnable parameters
-            # This matches LayerNormPre behavior exactly
-            result = self._layernorm_pre_forward(hidden_states)
+            # When layer norm folding is enabled, the original component has identity weights (w=1, b=0)
+            # So we can just call the original HF LayerNorm, which will apply LayerNorm with identity params
+            # This is equivalent to LayerNormPre (center + scale) but uses the original computation
+            result = self._hf_autograd_forward(hidden_states)
         else:
             # Standard normalization behavior with learnable parameters
             if not getattr(self.config, "uses_rms_norm", False):

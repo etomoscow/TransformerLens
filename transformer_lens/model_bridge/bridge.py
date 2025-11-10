@@ -1249,11 +1249,12 @@ class TransformerBridge(nn.Module):
             print("  Extracting state dict from existing model...")
 
         # Extract state dict from existing model and clean ._original_component suffixes
+        # IMPORTANT: Clone tensors to prevent in-place modifications from corrupting original_model
         raw_state_dict = self.original_model.state_dict()
         state_dict = {}
         for key, value in raw_state_dict.items():
             clean_key = key.replace("._original_component", "")
-            state_dict[clean_key] = value
+            state_dict[clean_key] = value.clone()
 
         # Get architecture adapter for path translation
         adapter = self.adapter
@@ -1340,27 +1341,209 @@ class TransformerBridge(nn.Module):
         self._configure_components_for_processing(verbose=verbose)
         self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
 
-        # Load processed weights back into original_model
-        # Need to restore ._original_component suffixes for loading
+        # Load processed weights directly into Bridge components
+        # Use the architecture adapter to navigate the component hierarchy
         if verbose:
-            print("  Loading processed weights back into original model...")
+            print("  Loading processed weights into Bridge components...")
 
-        # Map cleaned keys back to original keys with ._original_component suffixes
-        original_state_dict = self.original_model.state_dict()
-        restored_state_dict = {}
+        loaded_count = 0
+        missing_count = 0
 
-        for original_key in original_state_dict.keys():
-            clean_key = original_key.replace("._original_component", "")
-            if clean_key in state_dict:
-                restored_state_dict[original_key] = state_dict[clean_key]
+        # First pass: Load processed QKV weights for JointQKVAttention layers
+        # We need to handle these specially by reconstructing the joint QKV weight
+        import einops
+        from transformer_lens.model_bridge.generalized_components.joint_qkv_attention import (
+            JointQKVAttentionBridge,
+        )
 
-        load_result = self.original_model.load_state_dict(restored_state_dict, strict=False)
+        for layer_idx in range(self.cfg.n_layers):
+            # Check if this layer has JointQKVAttention
+            if hasattr(self, "blocks") and layer_idx < len(self.blocks):
+                attn_component = self.blocks[layer_idx].attn
+                if isinstance(attn_component, JointQKVAttentionBridge):
+                    # Look for Q/K/V weights in state dict
+                    q_weight_key = f"blocks.{layer_idx}.attn.q.weight"
+                    k_weight_key = f"blocks.{layer_idx}.attn.k.weight"
+                    v_weight_key = f"blocks.{layer_idx}.attn.v.weight"
+                    q_bias_key = f"blocks.{layer_idx}.attn.q.bias"
+                    k_bias_key = f"blocks.{layer_idx}.attn.k.bias"
+                    v_bias_key = f"blocks.{layer_idx}.attn.v.bias"
 
-        if verbose and (load_result.missing_keys or load_result.unexpected_keys):
-            if load_result.missing_keys:
-                print(f"    Warning: Missing keys: {len(load_result.missing_keys)}")
-            if load_result.unexpected_keys:
-                print(f"    Warning: Unexpected keys: {len(load_result.unexpected_keys)}")
+                    if q_weight_key in state_dict and k_weight_key in state_dict and v_weight_key in state_dict:
+                        # Get processed weights in HF format [d_model, d_model]
+                        q_weight_hf = state_dict[q_weight_key]
+                        k_weight_hf = state_dict[k_weight_key]
+                        v_weight_hf = state_dict[v_weight_key]
+
+                        # Convert from HF format [d_model, d_model] to TL format [n_heads, d_model, d_head]
+                        q_weight_tl = einops.rearrange(q_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads)
+                        k_weight_tl = einops.rearrange(k_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads)
+                        v_weight_tl = einops.rearrange(v_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads)
+
+                        # Concatenate Q, K, V into joint QKV weight [d_model, 3*d_model]
+                        qkv_weight = torch.cat([q_weight_hf, k_weight_hf, v_weight_hf], dim=1)
+
+                        # Load into the qkv component (c_attn)
+                        if hasattr(attn_component, 'qkv') and hasattr(attn_component.qkv, '_original_component'):
+                            qkv_component = attn_component.qkv._original_component
+                            if hasattr(qkv_component, 'weight'):
+                                qkv_component.weight.data = qkv_weight.T  # Conv1D uses transposed weights
+                                loaded_count += 1
+
+                        # Set the _W_* attributes for HookedTransformer compatibility (already in TL format)
+                        attn_component._W_Q = q_weight_tl
+                        attn_component._W_K = k_weight_tl
+                        attn_component._W_V = v_weight_tl
+
+                        # Also call set_processed_weights to enable processed weight forward pass
+                        # We need to get W_O as well (output projection)
+                        # W_O may still be in HuggingFace format after processing
+                        # Try TL format first, then fall back to HF format
+                        o_weight_key_tl = f"blocks.{layer_idx}.attn.W_O"
+                        if o_weight_key_tl in state_dict:
+                            o_weight_key = o_weight_key_tl
+                        else:
+                            # Fall back to HF format using adapter
+                            o_weight_key = self.adapter.translate_transformer_lens_path(f"blocks.{layer_idx}.attn.W_O")
+
+                        if o_weight_key in state_dict:
+                            o_weight_tl = state_dict[o_weight_key]  # [n_heads, d_head, d_model] or [d_model, d_model]
+                            # Try TL format first, then fall back to HF format for bias
+                            o_bias_key_tl = f"blocks.{layer_idx}.attn.b_O"
+                            if o_bias_key_tl in state_dict:
+                                o_bias_key = o_bias_key_tl
+                            else:
+                                o_bias_key = self.adapter.translate_transformer_lens_path(f"blocks.{layer_idx}.attn.b_O")
+                            o_bias = state_dict.get(o_bias_key, None)
+
+                            # Convert W_O from TL format [n_heads, d_head, d_model] to HF format [d_model, d_model]
+                            # set_processed_weights expects W_O in HF format
+                            if o_weight_tl.ndim == 3:
+                                # TL format: [n_heads, d_head, d_model] -> HF format: [d_model, d_model]
+                                o_weight_hf = einops.rearrange(o_weight_tl, "n h m -> (n h) m")
+                            else:
+                                # Already in HF format [d_model, d_model]
+                                o_weight_hf = o_weight_tl
+
+                            # Get biases in TL format [n_heads, d_head] if they exist
+                            b_Q_tl = None
+                            b_K_tl = None
+                            b_V_tl = None
+                            if q_bias_key in state_dict:
+                                b_Q_tl = einops.rearrange(state_dict[q_bias_key], "(n h) -> n h", n=self.cfg.n_heads)
+                                b_K_tl = einops.rearrange(state_dict[k_bias_key], "(n h) -> n h", n=self.cfg.n_heads)
+                                b_V_tl = einops.rearrange(state_dict[v_bias_key], "(n h) -> n h", n=self.cfg.n_heads)
+
+                            # Call set_processed_weights with TL format Q/K/V and HF format W_O
+                            attn_component.set_processed_weights(
+                                W_Q=q_weight_tl,
+                                W_K=k_weight_tl,
+                                W_V=v_weight_tl,
+                                W_O=o_weight_hf,
+                                b_Q=b_Q_tl,
+                                b_K=b_K_tl,
+                                b_V=b_V_tl,
+                                b_O=o_bias
+                            )
+
+                        # Handle biases if they exist
+                        if q_bias_key in state_dict:
+                            q_bias_hf = state_dict[q_bias_key]  # [d_model]
+                            k_bias_hf = state_dict[k_bias_key]  # [d_model]
+                            v_bias_hf = state_dict[v_bias_key]  # [d_model]
+
+                            # Convert from HF format [d_model] to TL format [n_heads, d_head]
+                            q_bias_tl = einops.rearrange(q_bias_hf, "(n h) -> n h", n=self.cfg.n_heads)
+                            k_bias_tl = einops.rearrange(k_bias_hf, "(n h) -> n h", n=self.cfg.n_heads)
+                            v_bias_tl = einops.rearrange(v_bias_hf, "(n h) -> n h", n=self.cfg.n_heads)
+
+                            # Concatenate Q, K, V biases into joint QKV bias [3*d_model]
+                            qkv_bias = torch.cat([q_bias_hf, k_bias_hf, v_bias_hf], dim=0)
+
+                            # Load into the qkv component (c_attn)
+                            if hasattr(attn_component, 'qkv') and hasattr(attn_component.qkv, '_original_component'):
+                                qkv_component = attn_component.qkv._original_component
+                                if hasattr(qkv_component, 'bias'):
+                                    qkv_component.bias.data = qkv_bias
+                                    loaded_count += 1
+
+                            # Set the _b_* attributes for HookedTransformer compatibility (already in TL format)
+                            attn_component._b_Q = q_bias_tl
+                            attn_component._b_K = k_bias_tl
+                            attn_component._b_V = v_bias_tl
+
+                        # Mark that we've extracted hooked weights (for HookedTransformer compatibility)
+                        attn_component._hooked_weights_extracted = True
+
+                        if verbose:
+                            print(f"    Loaded processed QKV weights for layer {layer_idx} (JointQKVAttention)")
+                            print(f"      Q/K/V HF format: {q_weight_hf.shape}")
+                            print(f"      Q/K/V TL format: {q_weight_tl.shape}")
+                            print(f"      Reconstructed joint QKV HF format: {qkv_weight.shape}")
+
+        # Second pass: Load all other weights normally
+        for tb_key, weight_tensor in state_dict.items():
+            # Skip QKV weights we already handled above
+            if ".attn.q." in tb_key or ".attn.k." in tb_key or ".attn.v." in tb_key:
+                continue
+
+            # TransformerBridge keys have format: blocks.0.attn.q.weight
+            # We need to navigate the Bridge component hierarchy to find the right component
+
+            try:
+                # Parse the key to get component path
+                parts = tb_key.split('.')
+
+                # Navigate through Bridge components
+                component = self
+                for i, part in enumerate(parts[:-1]):  # Exclude final 'weight' or 'bias'
+                    if part.isdigit():
+                        # Numeric index (e.g., layer number)
+                        component = component[int(part)]
+                    else:
+                        # Named component
+                        if hasattr(component, part):
+                            component = getattr(component, part)
+                        else:
+                            # Try looking in submodules
+                            if hasattr(component, '_modules') and part in component._modules:
+                                component = component._modules[part]
+                            else:
+                                raise AttributeError(f"Component {part} not found")
+
+                # Now set the parameter on the final component
+                param_name = parts[-1]  # 'weight' or 'bias'
+
+                # The component might have _original_component that holds the actual parameter
+                if hasattr(component, '_original_component'):
+                    target_component = component._original_component
+                else:
+                    target_component = component
+
+                # Set the parameter directly
+                if hasattr(target_component, param_name):
+                    param = getattr(target_component, param_name)
+                    if param is not None and isinstance(param, torch.nn.Parameter):
+                        param.data = weight_tensor
+                        loaded_count += 1
+                    elif param is None:
+                        # Parameter exists but is None, create it
+                        setattr(target_component, param_name, torch.nn.Parameter(weight_tensor))
+                        loaded_count += 1
+                else:
+                    if verbose:
+                        print(f"    Warning: Parameter {param_name} not found in {tb_key}")
+                    missing_count += 1
+
+            except (AttributeError, IndexError, KeyError, TypeError) as e:
+                if verbose:
+                    print(f"    Warning: Could not load {tb_key}: {e}")
+                missing_count += 1
+
+        if verbose:
+            print(f"    Loaded {loaded_count} weights into Bridge components")
+            print(f"    Skipped {missing_count} keys")
+            print(f"    Processed state_dict has {len(state_dict)} keys")
 
         # Enable processed weights mode on all components
         # This makes components use _forward_with_processed_weights instead of calling HF modules
@@ -1390,6 +1573,10 @@ class TransformerBridge(nn.Module):
             enable_processed_weights(self.unembed)
 
         object.__setattr__(self, "_weights_processed", True)
+
+        # Set layer_norm_folding flag in config if layer norms were folded
+        if fold_ln:
+            object.__setattr__(self.cfg, "layer_norm_folding", True)
 
         if verbose:
             print("✓ Weight processing complete!")
@@ -1584,32 +1771,38 @@ class TransformerBridge(nn.Module):
         adapter = self.adapter
         cfg = self.cfg
 
-        # Convert processed HF format weights to TL format (including splitting joint QKV)
-        # This handles both joint QKV formats (like GPT-2) and separate Q/K/V formats
-        W_Q = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.attn.W_Q", adapter, processed_weights, cfg, layer_idx
-        )
-        W_K = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.attn.W_K", adapter, processed_weights, cfg, layer_idx
-        )
-        W_V = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.attn.W_V", adapter, processed_weights, cfg, layer_idx
-        )
-        W_O = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.attn.W_O", adapter, processed_weights, cfg, layer_idx
-        )
-        b_Q = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.attn.b_Q", adapter, processed_weights, cfg, layer_idx
-        )
-        b_K = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.attn.b_K", adapter, processed_weights, cfg, layer_idx
-        )
-        b_V = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.attn.b_V", adapter, processed_weights, cfg, layer_idx
-        )
-        b_O = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.attn.b_O", adapter, processed_weights, cfg, layer_idx
-        )
+        # Get base HF key (e.g., "transformer.h.0.attn") and construct split weight keys
+        # For GPT-2, the processed_weights dict contains split Q/K/V weights at keys like:
+        # transformer.h.0.attn.q.weight, transformer.h.0.attn.k.weight, etc.
+        base_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_Q", adapter)
+        # base_key will be something like "transformer.h.0.attn.c_attn.weight"
+        # We need to extract the prefix before the last component
+        # For split weights, keys are: transformer.h.{i}.attn.q.weight (not c_attn.q.weight)
+        parts = base_key.rsplit(".", 2)  # Split off last two parts (e.g., "c_attn" and "weight")
+        if len(parts) == 3:
+            attn_prefix = parts[0]  # "transformer.h.0.attn"
+        else:
+            attn_prefix = base_key.rsplit(".", 1)[0]  # Fallback
+
+        # Load from TL format keys directly (separate Q/K/V)
+        # Weight processing stores these as separate tensors in TL format
+        tl_w_q_key = f"blocks.{layer_idx}.attn.W_Q"
+        tl_w_k_key = f"blocks.{layer_idx}.attn.W_K"
+        tl_w_v_key = f"blocks.{layer_idx}.attn.W_V"
+        tl_w_o_key = f"blocks.{layer_idx}.attn.W_O"
+        tl_b_q_key = f"blocks.{layer_idx}.attn.b_Q"
+        tl_b_k_key = f"blocks.{layer_idx}.attn.b_K"
+        tl_b_v_key = f"blocks.{layer_idx}.attn.b_V"
+        tl_b_o_key = f"blocks.{layer_idx}.attn.b_O"
+
+        W_Q = processed_weights.get(tl_w_q_key)  # Already in TL format: [n_heads, d_model, d_head]
+        W_K = processed_weights.get(tl_w_k_key)
+        W_V = processed_weights.get(tl_w_v_key)
+        W_O = processed_weights.get(tl_w_o_key)
+        b_Q = processed_weights.get(tl_b_q_key)  # Already in TL format: [n_heads, d_head]
+        b_K = processed_weights.get(tl_b_k_key)
+        b_V = processed_weights.get(tl_b_v_key)
+        b_O = processed_weights.get(tl_b_o_key)
 
         attn_component.set_processed_weights(W_Q, W_K, W_V, W_O, b_Q, b_K, b_V, b_O)
 
@@ -1624,19 +1817,17 @@ class TransformerBridge(nn.Module):
         adapter = self.adapter
         cfg = self.cfg
 
-        # Convert processed HF format weights to TL format (including format conversion)
-        W_in = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.mlp.W_in", adapter, processed_weights, cfg, layer_idx
-        )
-        W_out = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.mlp.W_out", adapter, processed_weights, cfg, layer_idx
-        )
-        b_in = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.mlp.b_in", adapter, processed_weights, cfg, layer_idx
-        )
-        b_out = ProcessWeights.convert_tensor_to_tl_format(
-            f"blocks.{layer_idx}.mlp.b_out", adapter, processed_weights, cfg, layer_idx
-        )
+        # processed_weights is already in TL format - directly look up TL keys
+        # Get HF keys from adapter for lookup
+        W_in_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.W_in", adapter)
+        W_out_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.W_out", adapter)
+        b_in_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.b_in", adapter)
+        b_out_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.b_out", adapter)
+
+        W_in = processed_weights.get(W_in_key)
+        W_out = processed_weights.get(W_out_key)
+        b_in = processed_weights.get(b_in_key)
+        b_out = processed_weights.get(b_out_key)
 
         if W_in is None or W_out is None:
             return
@@ -1724,7 +1915,7 @@ class TransformerBridge(nn.Module):
             if hasattr(block, "hook_in"):
                 residual = block.hook_in(residual)
 
-            # Pre-attention layer norm (identity if folded)
+            # Pre-attention layer norm (NormalizationBridge handles folding automatically)
             if hasattr(block, "ln1"):
                 normed_residual = block.ln1(residual)
             else:
@@ -1743,7 +1934,7 @@ class TransformerBridge(nn.Module):
             if hasattr(block, "hook_resid_mid"):
                 residual = block.hook_resid_mid(residual)
 
-            # Pre-MLP layer norm (identity if folded)
+            # Pre-MLP layer norm (NormalizationBridge handles folding automatically)
             if hasattr(block, "ln2"):
                 normed_residual = block.ln2(residual)
             else:
@@ -1764,7 +1955,7 @@ class TransformerBridge(nn.Module):
             if hasattr(block, "hook_out"):
                 residual = block.hook_out(residual)
 
-        # Final layer norm (identity if folded)
+        # Final layer norm (NormalizationBridge handles folding automatically)
         if hasattr(self, "ln_final"):
             residual = self.ln_final(residual)
 
