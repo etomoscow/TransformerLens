@@ -204,6 +204,12 @@ class JointQKVAttentionBridge(AttentionBridge):
         Returns:
             Output tensor after qkv linear transformation
         """
+        # If we're using processed weights (_use_processed_weights is True),
+        # use the compatibility mode forward that uses 3D weights like HookedTransformer
+        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
+            return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
+
+        # Otherwise, use the standard forward pass with 2D weights
         hooked_input = self._apply_attention_input_hook(*args, **kwargs)
 
         q_output = self.q(hooked_input)
@@ -421,17 +427,6 @@ class JointQKVAttentionBridge(AttentionBridge):
         if not hasattr(self, "_hooked_weights_extracted") or not self._hooked_weights_extracted:
             self._extract_hooked_transformer_weights()
 
-            # In compatibility mode with split Q/K/V, we don't need conversion rules
-            # because simple_attn_linear already produces tensors in the correct shape [batch, seq, heads, d_head]
-            # Disable conversion rules permanently to avoid issues during backward pass
-            if self._hooked_weights_extracted:
-                self.q.hook_in.hook_conversion = None
-                self.k.hook_in.hook_conversion = None
-                self.v.hook_in.hook_conversion = None
-                self.q.hook_out.hook_conversion = None
-                self.k.hook_out.hook_conversion = None
-                self.v.hook_out.hook_conversion = None
-
         # Fall back to original component if weight extraction failed
         if (
             not self._hooked_weights_extracted
@@ -485,18 +480,41 @@ class JointQKVAttentionBridge(AttentionBridge):
             k_input = input_tensor
             v_input = input_tensor
 
-        # Compute Q, K, V using LinearBridge components' forward pass
-        # The split_qkv_matrix adapter returns plain nn.Linear modules that output 3D tensors [batch, seq, n_heads*d_head]
-        # LinearBridge.forward() calls:
-        #   1. hook_in (applies conversion rule)
-        #   2. original_component (nn.Linear, outputs 3D)
-        #   3. hook_out (applies conversion rule: 3D → 4D [batch, seq, n_heads, d_head])
-        # The hook_out conversion transforms 3D to 4D using ConditionalRearrangeConversion,
-        # matching what simple_attn_linear does in HookedTransformer
-        q = self.q(q_input)
-        k = self.k(k_input)
-        v = self.v(v_input)
-        # q, k, v are now 4D tensors [batch, seq, n_heads, d_head] after hook_out conversion
+        # Compute Q, K, V using the extracted 3D weights directly (like HookedTransformer)
+        # This matches HookedTransformer's simple_attn_linear computation
+        # W_Q, W_K, W_V: [n_heads, d_model, d_head]
+        # input: [batch, seq, d_model]
+        # output: [batch, seq, n_heads, d_head]
+        import einops
+
+        # Use simple_attn_linear pattern from HookedTransformer while manually firing hooks
+        # This ensures all hooks fire properly while using 3D weights
+        from transformer_lens.utilities.attention import simple_attn_linear
+
+        # Fire hook_in hooks manually for Q, K, V inputs
+        q_input = self.q.hook_in(q_input)
+        k_input = self.k.hook_in(k_input)
+        v_input = self.v.hook_in(v_input)
+
+        # Temporarily disable conversion rules since simple_attn_linear produces correct 4D format
+        original_q_conversion = self.q.hook_out.hook_conversion
+        original_k_conversion = self.k.hook_out.hook_conversion
+        original_v_conversion = self.v.hook_out.hook_conversion
+        self.q.hook_out.hook_conversion = None
+        self.k.hook_out.hook_conversion = None
+        self.v.hook_out.hook_conversion = None
+
+        try:
+            # Calculate Q, K, V using 3D weights and fire hook_out
+            # simple_attn_linear: [batch, pos, d_model] x [n_heads, d_model, d_head] -> [batch, pos, n_heads, d_head]
+            q = self.q.hook_out(simple_attn_linear(q_input, self._W_Q, self._b_Q))
+            k = self.k.hook_out(simple_attn_linear(k_input, self._W_K, self._b_K))
+            v = self.v.hook_out(simple_attn_linear(v_input, self._W_V, self._b_V))
+        finally:
+            # Restore conversion rules
+            self.q.hook_out.hook_conversion = original_q_conversion
+            self.k.hook_out.hook_conversion = original_k_conversion
+            self.v.hook_out.hook_conversion = original_v_conversion
 
         # Handle KV caching
         # Don't use "or" because DynamicCache might evaluate to False in boolean context
@@ -557,15 +575,32 @@ class JointQKVAttentionBridge(AttentionBridge):
         attn_output = torch.matmul(attn_weights, v)
 
         # Transpose back: [batch, heads, seq, d_head] -> [batch, seq, heads, d_head]
-        attn_output = attn_output.transpose(1, 2).contiguous()
+        z = attn_output.transpose(1, 2).contiguous()
 
-        # Reshape to flat: [batch, seq, heads * d_head]
-        attn_output = attn_output.view(attn_output.shape[0], attn_output.shape[1], -1)
+        # Apply hook_z (on 4D format before output projection)
+        z = self.o.hook_in(z)
 
-        # Apply output projection through LinearBridge (captures hook_z via o.hook_in)
-        # This works for both processed and unprocessed weights because the LinearBridge
-        # wraps the original component which has the correct weights loaded
-        attn_output = self.o(attn_output)
+        # Use HookedTransformer's pattern for output projection with 3D W_O
+        if hasattr(self, "_W_O") and self._W_O is not None:
+            # Rearrange W_O [n_heads, d_head, d_model] -> [d_model, n_heads*d_head] for F.linear
+            w = einops.rearrange(
+                self._W_O, "head_index d_head d_model -> d_model (head_index d_head)"
+            )
+
+            # Flatten z [batch, seq, n_heads, d_head] -> [batch, seq, n_heads*d_head]
+            z_flat = z.reshape(z.shape[0], z.shape[1], -1)
+
+            # Apply F.linear
+            import torch.nn.functional as F
+            attn_output = F.linear(z_flat, w, self._b_O if hasattr(self, "_b_O") else None)
+
+            # Apply hook_out from LinearBridge
+            attn_output = self.o.hook_out(attn_output)
+        else:
+            # Fall back to using LinearBridge with 2D weights
+            # Reshape to flat: [batch, seq, heads * d_head]
+            z_flat = z.view(z.shape[0], z.shape[1], -1)
+            attn_output = self.o(z_flat)
 
         attn_output = self.hook_out(attn_output)
 
@@ -1068,23 +1103,16 @@ class JointQKVAttentionBridge(AttentionBridge):
             self._b_V = self._processed_b_V
 
             if hasattr(self, "_processed_W_O") and self._processed_W_O is not None:
-                # Convert W_O from HF format [d_model, d_model] to TL format [n_heads, d_head, d_model]
-                import einops
+                # W_O is already in TL format [n_heads, d_head, d_model] from bridge processing
+                self._W_O = self._processed_W_O
+            else:
+                # Set to None explicitly if _processed_W_O doesn't exist
+                self._W_O = None
 
-                if self._processed_W_O.ndim == 2:
-                    # HF format -> TL format
-                    if self.config is None:
-                        raise ValueError("Config is required for weight conversion")
-                    n_heads = self.config.n_heads
-                    d_head = self.config.d_head
-                    self._W_O = einops.rearrange(
-                        self._processed_W_O, "(n h) m -> n h m", n=n_heads, h=d_head
-                    )
-                else:
-                    # Already in TL format
-                    self._W_O = self._processed_W_O
             if hasattr(self, "_processed_b_O") and self._processed_b_O is not None:
                 self._b_O = self._processed_b_O
+            else:
+                self._b_O = None
 
             self._hooked_weights_extracted = True
             return

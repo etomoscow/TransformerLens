@@ -285,13 +285,6 @@ class ProcessWeights:
             split_k_key = f"blocks.{layer}.attn.k.weight"
             split_v_key = f"blocks.{layer}.attn.v.weight"
 
-            # DEBUG: Print for layers 9, 10, 11
-            if layer in [9, 10, 11]:
-                print(f"\n[DEBUG] Layer {layer} - Checking split keys:")
-                print(f"  {split_q_key} exists: {split_q_key in state_dict}")
-                print(f"  {split_k_key} exists: {split_k_key in state_dict}")
-                print(f"  {split_v_key} exists: {split_v_key in state_dict}")
-
             if (
                 split_q_key in state_dict
                 and split_k_key in state_dict
@@ -421,10 +414,6 @@ class ProcessWeights:
         """
         layer = layer_idx
 
-        # DEBUG: Print for layers 9, 10, 11
-        if layer in [9, 10, 11]:
-            print(f"[DEBUG] _fold_layer called for layer {layer}")
-
         # Extract all tensors in TransformerLens format using the new extraction function
         tensors = ProcessWeights.extract_attention_tensors_for_folding(
             state_dict, cfg, layer, adapter
@@ -441,24 +430,10 @@ class ProcessWeights:
         ln1_w = tensors["ln1_w"]
         keys = tensors["keys"]
 
-        # DEBUG for layers 9, 10, 11
-        if layer in [9, 10, 11]:
-            print(f"[DEBUG] Layer {layer} - After extraction:")
-            print(f"  wq_tensor is None: {wq_tensor is None}")
-            if wq_tensor is not None and isinstance(wq_tensor, torch.Tensor):
-                print(f"  wq_tensor shape: {wq_tensor.shape}")
-            print(f"  wk_tensor is None: {wk_tensor is None}")
-            print(f"  wv_tensor is None: {wv_tensor is None}")
-            print(f"  bq_tensor is None: {bq_tensor is None}")
-            print(f"  bk_tensor is None: {bk_tensor is None}")
-            print(f"  bv_tensor is None: {bv_tensor is None}")
-
         # Check if we have the required tensors for layer norm folding
         # For grouped query attention models, some tensors might be None
         if wq_tensor is None:
             # Skip layer norm folding for this layer if missing critical tensors
-            if layer in [9, 10, 11]:
-                print(f"[DEBUG] Layer {layer} - EARLY RETURN: wq_tensor is None")
             return
 
         # Type assertions for mypy for required tensors
@@ -527,10 +502,6 @@ class ProcessWeights:
             wq_tensor, wk_tensor, wv_tensor = ProcessWeights.center_attention_weights(
                 wq_tensor, wk_tensor, wv_tensor
             )
-
-        # DEBUG for layers 9, 10, 11
-        if layer in [9, 10, 11]:
-            print(f"[DEBUG] Layer {layer} - About to call _store_processed_attention_tensors")
 
         # Store processed tensors back to state dict
         ProcessWeights._store_processed_attention_tensors(
@@ -771,20 +742,12 @@ class ProcessWeights:
                 tb_b_k_key = f"blocks.{layer}.attn.k.bias"
                 tb_b_v_key = f"blocks.{layer}.attn.v.bias"
 
-                # Convert back to HF format for storage
-                # Weights: [n_heads, d_model, d_head] -> [d_model, d_model]
+                # Store in 2D format for internal calculations: [d_model, d_model]
                 state_dict[tb_w_q_key] = einops.rearrange(wq_tensor, "i m h -> m (i h)")
                 state_dict[tb_w_k_key] = einops.rearrange(wk_tensor, "i m h -> m (i h)")
                 state_dict[tb_w_v_key] = einops.rearrange(wv_tensor, "i m h -> m (i h)")
 
-                # DEBUG: Print for layers 9, 10, 11
-                if layer in [9, 10, 11]:
-                    print(f"[DEBUG] Layer {layer} - Stored split format keys:")
-                    print(f"  {tb_w_q_key}")
-                    print(f"  {tb_w_k_key}")
-                    print(f"  {tb_w_v_key}")
-
-                # Biases: [n_heads, d_head] -> [d_model]
+                # Biases: Store in 2D format for internal calculations
                 if bq_tensor is not None:
                     state_dict[tb_b_q_key] = einops.rearrange(bq_tensor, "i h -> (i h)")
                     state_dict[tb_b_k_key] = einops.rearrange(bk_tensor, "i h -> (i h)")
@@ -815,17 +778,6 @@ class ProcessWeights:
                         qkv_marker in k for qkv_marker in [".q.", ".k.", ".v.", ".qkv.", ".c_attn."]
                     )
                 ]
-
-                # DEBUG for layers 0, 1, 9, 10, 11
-                if layer in [0, 1, 9, 10, 11]:
-                    print(f"[DEBUG] Layer {layer} - Deleting keys:")
-                    print(f"  hf_layer_prefix: {hf_layer_prefix}")
-                    print(f"  keys_to_delete count: {len(keys_to_delete)}")
-                    if layer in [0, 1]:
-                        # For layer 0 and 1, show all keys (might be many)
-                        print(f"  keys_to_delete: {keys_to_delete[:20]}")  # First 20
-                    else:
-                        print(f"  keys_to_delete: {keys_to_delete}")
 
                 for key_to_remove in keys_to_delete:
                     del state_dict[key_to_remove]

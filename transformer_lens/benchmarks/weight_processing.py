@@ -350,7 +350,7 @@ def benchmark_layer_norm_folding(
         # Try different key patterns for different architectures
         ln_keys = [
             "model.layers.0.input_layernorm.weight",  # Gemma style
-            "transformer.h.0.ln_1.weight",  # GPT-2 style
+            "blocks.0.ln1.weight",  # GPT-2 style (TransformerLens format)
             "gpt_neox.layers.0.input_layernorm.weight",  # GPT-NeoX style
         ]
 
@@ -746,8 +746,12 @@ def benchmark_weight_magnitudes(
             if "weight" not in key and "bias" not in key:
                 continue
 
+            # Skip internal _original_component keys - these are implementation details
+            if "_original_component" in key:
+                continue
+
             # Skip value biases - they are expected to be zero after folding
-            if ".v.bias" in key or ".v._original_component.bias" in key:
+            if ".v.bias" in key:
                 continue
 
             mean_abs = torch.mean(torch.abs(value)).item()

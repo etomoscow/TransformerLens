@@ -94,7 +94,7 @@ class WeightProcessingBenchmark:
 
         # Check if ln1 weights exist for first block
         ln1_key_patterns = [
-            f"transformer.h.0.ln_1.weight",  # GPT-2
+            f"blocks.0.ln1.weight",  # GPT-2 (TransformerLens format)
             f"model.layers.0.input_layernorm.weight",  # Gemma
         ]
 
@@ -170,7 +170,7 @@ class WeightProcessingBenchmark:
 
         # Check attention output (W_O / o_proj)
         wo_key_patterns = [
-            "transformer.h.0.attn.c_proj.weight",  # GPT-2
+            "blocks.0.attn.o.weight",  # GPT-2 (TransformerLens format)
             "model.layers.0.self_attn.o_proj.weight",  # Gemma
         ]
 
@@ -215,7 +215,7 @@ class WeightProcessingBenchmark:
 
         # Check MLP output
         mlp_out_patterns = [
-            "transformer.h.0.mlp.c_proj.weight",  # GPT-2
+            "blocks.0.mlp.out",  # GPT-2 (TransformerLens format)
             "model.layers.0.mlp.down_proj.weight",  # Gemma
         ]
 
@@ -304,7 +304,7 @@ class WeightProcessingBenchmark:
 
         # Check if b_V exists and is zero
         bv_patterns = [
-            "transformer.h.0.attn.c_attn.bias",  # GPT-2 (joint QKV)
+            "blocks.0.attn.v.bias",  # GPT-2 (TransformerLens format)
             "model.layers.0.self_attn.v_proj.bias",  # Gemma
         ]
 
@@ -314,32 +314,8 @@ class WeightProcessingBenchmark:
                 bv_key = pattern
                 break
 
-        # For GPT-2 with joint QKV, we need to extract just the V portion
-        if bv_key and "c_attn" in bv_key:
-            # GPT-2 case: c_attn has QKV concatenated
-            full_bias = state_dict[bv_key]
-            # Split into Q, K, V (each is d_model sized)
-            d_model = self.cfg.d_model
-            qkv_biases = full_bias.reshape(3, d_model)
-            bv = qkv_biases[2]  # V is third
-
-            bv_is_zero = torch.allclose(bv, torch.zeros_like(bv), atol=1e-6)
-            bv_mean = bv.abs().mean().item()
-
-            self.results.append(
-                WeightProcessingCheck(
-                    name="value_bias_folding",
-                    passed=bv_is_zero,
-                    details={
-                        "bv_mean_abs": bv_mean,
-                        "threshold": 1e-6,
-                        "bias_type": "joint_qkv",
-                    },
-                    message=f"Value bias {'is' if bv_is_zero else 'is NOT'} zero after folding (mean={bv_mean:.8f})",
-                )
-            )
-        elif bv_key:
-            # Separate V projection case
+        # Check value bias (already split in TransformerLens format)
+        if bv_key:
             bv = state_dict[bv_key]
             bv_is_zero = torch.allclose(bv, torch.zeros_like(bv), atol=1e-6)
             bv_mean = bv.abs().mean().item()
@@ -351,7 +327,6 @@ class WeightProcessingBenchmark:
                     details={
                         "bv_mean_abs": bv_mean,
                         "threshold": 1e-6,
-                        "bias_type": "separate_v",
                     },
                     message=f"Value bias {'is' if bv_is_zero else 'is NOT'} zero after folding (mean={bv_mean:.8f})",
                 )
