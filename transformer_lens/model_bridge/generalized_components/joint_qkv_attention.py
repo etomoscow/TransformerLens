@@ -84,12 +84,12 @@ class JointQKVAttentionBridge(AttentionBridge):
             if not hasattr(self, submodule_name):
                 setattr(self, submodule_name, submodule)
 
-        # Apply hook conversion to both hook_in and hook_out
-        # hook_in: Convert 3D input to expected format if needed
+        # Apply hook conversion ONLY to hook_out, not hook_in
+        # hook_in should remain 3D [batch, seq, d_model] (input to the linear layer)
         # hook_out: Convert 3D linear output [batch, seq, n_heads*d_head] to 4D [batch, seq, n_heads, d_head]
-        self.q.hook_in.hook_conversion = self.qkv_conversion_rule
-        self.k.hook_in.hook_conversion = self.qkv_conversion_rule
-        self.v.hook_in.hook_conversion = self.qkv_conversion_rule
+        # self.q.hook_in.hook_conversion = self.qkv_conversion_rule  # Removed - should be 3D
+        # self.k.hook_in.hook_conversion = self.qkv_conversion_rule  # Removed - should be 3D
+        # self.v.hook_in.hook_conversion = self.qkv_conversion_rule  # Removed - should be 3D
 
         self.q.hook_out.hook_conversion = self.qkv_conversion_rule
         self.k.hook_out.hook_conversion = self.qkv_conversion_rule
