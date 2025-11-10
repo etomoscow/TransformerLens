@@ -1795,27 +1795,33 @@ class TransformerBridge(nn.Module):
         else:
             attn_prefix = base_key.rsplit(".", 1)[0]  # Fallback
 
-        # Load from TL format keys directly (separate Q/K/V)
-        # Weight processing stores these as separate tensors in TL format
-        tl_w_q_key = f"blocks.{layer_idx}.attn.W_Q"
-        tl_w_k_key = f"blocks.{layer_idx}.attn.W_K"
-        tl_w_v_key = f"blocks.{layer_idx}.attn.W_V"
-        tl_w_o_key = f"blocks.{layer_idx}.attn.W_O"
-        tl_b_q_key = f"blocks.{layer_idx}.attn.b_Q"
-        tl_b_k_key = f"blocks.{layer_idx}.attn.b_K"
-        tl_b_v_key = f"blocks.{layer_idx}.attn.b_V"
-        tl_b_o_key = f"blocks.{layer_idx}.attn.b_O"
+        # Extract split Q/K/V weights from the processed_weights dict
+        # Weight processing stores these at TransformerLens-style keys like "blocks.0.attn.q.weight"
+        # in 2D format [d_model, (n_heads*d_head)]
+        w_q_key = f"blocks.{layer_idx}.attn.q.weight"
+        w_k_key = f"blocks.{layer_idx}.attn.k.weight"
+        w_v_key = f"blocks.{layer_idx}.attn.v.weight"
+        w_o_key = f"{attn_prefix}.c_proj.weight"
 
-        W_Q = processed_weights.get(tl_w_q_key)  # Already in TL format: [n_heads, d_model, d_head]
-        W_K = processed_weights.get(tl_w_k_key)
-        W_V = processed_weights.get(tl_w_v_key)
-        W_O = processed_weights.get(tl_w_o_key)
-        b_Q = processed_weights.get(tl_b_q_key)  # Already in TL format: [n_heads, d_head]
-        b_K = processed_weights.get(tl_b_k_key)
-        b_V = processed_weights.get(tl_b_v_key)
-        b_O = processed_weights.get(tl_b_o_key)
+        b_q_key = f"blocks.{layer_idx}.attn.q.bias"
+        b_k_key = f"blocks.{layer_idx}.attn.k.bias"
+        b_v_key = f"blocks.{layer_idx}.attn.v.bias"
+        b_o_key = f"{attn_prefix}.c_proj.bias"
 
-        attn_component.set_processed_weights(W_Q, W_K, W_V, W_O, b_Q, b_K, b_V, b_O)
+        W_Q = processed_weights.get(w_q_key)
+        W_K = processed_weights.get(w_k_key)
+        W_V = processed_weights.get(w_v_key)
+        W_O = processed_weights.get(w_o_key)
+
+        b_Q = processed_weights.get(b_q_key)
+        b_K = processed_weights.get(b_k_key)
+        b_V = processed_weights.get(b_v_key)
+        b_O = processed_weights.get(b_o_key)
+
+        # Call set_processed_weights on the attention component
+        # The weights from weight_processing are already in 2D format, so pass them directly
+        if W_Q is not None and W_K is not None and W_V is not None and W_O is not None:
+            attn_component.set_processed_weights(W_Q, W_K, W_V, W_O, b_Q, b_K, b_V, b_O)
 
     def _load_mlp_weights(self, mlp_component, layer_idx, processed_weights, verbose: bool = False):
         """Load MLP weights into the MLPBridge or JointGateUpMLPBridge component.

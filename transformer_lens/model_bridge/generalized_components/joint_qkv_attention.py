@@ -75,8 +75,9 @@ class JointQKVAttentionBridge(AttentionBridge):
         else:
             self.qkv_conversion_rule = self._create_qkv_conversion_rule()
 
-        # Create LinearBridge components for q, k, and v activations
+        # Create LinearBridge components for q, k, v activations
         # PyTorch automatically registers them as submodules when assigned as attributes
+        # Note: o (output projection) is provided as a submodule by the architecture adapter
         self.q = LinearBridge(name="q")
         self.k = LinearBridge(name="k")
         self.v = LinearBridge(name="v")
@@ -162,7 +163,7 @@ class JointQKVAttentionBridge(AttentionBridge):
         return ConditionalRearrangeConversion(self.config.n_heads)
 
     def set_original_component(self, original_component: torch.nn.Module) -> None:
-        """Set the original component that this bridge wraps and initialize LinearBridges for q, k, and v transformations.
+        """Set the original component that this bridge wraps and initialize LinearBridges for q, k, v, and o transformations.
 
         Args:
             original_component: The original attention layer to wrap
@@ -179,64 +180,8 @@ class JointQKVAttentionBridge(AttentionBridge):
         self.k.set_original_component(k_transformation)
         self.v.set_original_component(v_transformation)
 
-    def set_processed_weights(
-        self,
-        W_Q: torch.Tensor,
-        W_K: torch.Tensor,
-        W_V: torch.Tensor,
-        W_O: torch.Tensor,
-        b_Q: Optional[torch.Tensor] = None,
-        b_K: Optional[torch.Tensor] = None,
-        b_V: Optional[torch.Tensor] = None,
-        b_O: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Set the processed weights for JointQKV attention.
-
-        The processed weights from weight processing are stored as 2D tensors after folding.
-        We pass them directly to the LinearBridge components and also store them in
-        _processed_W_* attributes for use by _extract_hooked_transformer_weights().
-
-        Args:
-            W_Q: Query weight tensor [d_model, (n_heads*d_head)]
-            W_K: Key weight tensor [d_model, (n_heads*d_head)]
-            W_V: Value weight tensor [d_model, (n_heads*d_head)]
-            W_O: Output projection weight tensor [d_model, d_model]
-            b_Q: Query bias tensor [(n_heads*d_head)] (optional)
-            b_K: Key bias tensor [(n_heads*d_head)] (optional)
-            b_V: Value bias tensor [(n_heads*d_head)] (optional)
-            b_O: Output bias tensor [d_model] (optional)
-        """
-        # Store the 2D weights for use in _extract_hooked_transformer_weights()
-        self._processed_W_Q = W_Q
-        self._processed_W_K = W_K
-        self._processed_W_V = W_V
-        self._processed_W_O = W_O
-        self._processed_b_Q = b_Q
-        self._processed_b_K = b_K
-        self._processed_b_V = b_V
-        self._processed_b_O = b_O
-
-        # Mark that we should use processed weights in forward pass
-        # Only set this flag if we actually have the weights
-        if W_Q is not None and W_K is not None and W_V is not None and W_O is not None:
-            self._use_processed_weights = True
-        else:
-            self._use_processed_weights = False
-
-        # Inject the processed weights into the Q/K/V LinearBridge components
-        # The processed weights from weight processing are already in 2D format [d_model, (n_heads*d_head)]
-        # after folding, so pass them directly to LinearBridge without rearrangement
-        if W_Q is not None:
-            self.q.set_processed_weights(W_Q, b_Q)
-
-        if W_K is not None:
-            self.k.set_processed_weights(W_K, b_K)
-
-        if W_V is not None:
-            self.v.set_processed_weights(W_V, b_V)
-
-        if W_O is not None:
-            self.o.set_processed_weights(W_O, b_O)
+        # Note: o (output projection) LinearBridge is provided as a submodule by the architecture adapter
+        # and will be initialized separately by the bridge's weight loading process
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass through the qkv linear transformation with hooks.
@@ -251,9 +196,9 @@ class JointQKVAttentionBridge(AttentionBridge):
         # Check if we're using processed weights from a reference model (layer norm folding case)
         # JointQKVAttentionBridge needs to use compatibility mode forward which handles
         # the processed weights correctly and calls the Q/K/V hooks with the right shapes
-        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
-            # Use compatibility mode forward with hooks, which properly handles processed weights
-            return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
+        # if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
+        #     # Use compatibility mode forward with hooks, which properly handles processed weights
+        #     return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
 
         return self._forward_standard(*args, **kwargs)
 
@@ -393,8 +338,9 @@ class JointQKVAttentionBridge(AttentionBridge):
         # Reshape back to [batch, seq_len, d_model]
         attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
 
-        # Apply output projection (GPT-2 uses c_proj)
-        result = original_attn.c_proj(attn_out)  # type: ignore[operator, union-attr]
+        # Apply output projection through LinearBridge (captures hook_z via o.hook_in)
+        # hook_z is aliased to o.hook_in in AttentionBridge.hook_aliases
+        result = self.o(attn_out)
 
         # Apply output hook
         result = self.hook_out(result)
@@ -404,38 +350,38 @@ class JointQKVAttentionBridge(AttentionBridge):
 
     def _forward_standard(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass using standard HF attention component and hook processing."""
-        has_hooks = (
-            self.q.hook_in.has_hooks()
-            or self.k.hook_in.has_hooks()
-            or self.v.hook_in.has_hooks()
-            or self.q.hook_out.has_hooks()
-            or self.k.hook_out.has_hooks()
-            or self.v.hook_out.has_hooks()
-        )
+        # has_hooks = (
+            # self.q.hook_in.has_hooks()
+            # or self.k.hook_in.has_hooks()
+            # or self.v.hook_in.has_hooks()
+            # or self.q.hook_out.has_hooks()
+            # or self.k.hook_out.has_hooks()
+            # or self.v.hook_out.has_hooks()
+        # )
 
         # In compatibility mode, ALWAYS use the split Q/K/V path to ensure
         # backward hooks fire 3 times through ln1 (matching HookedTransformer)
         # This is critical for backward hook parity - even without user hooks on q/k/v,
         # the split computation creates 3 separate backward paths that are needed
         # for ln1 backward hooks to match HookedTransformer's behavior
-        if getattr(self, "compatibility_mode", False):
-            return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
+        # if getattr(self, "compatibility_mode", False):
+        #     return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
 
-        if has_hooks:
+        # if has_hooks:
             # Apply input hook the same way as the super class
-            hooked_input = self._apply_attention_input_hook(*args, **kwargs)
+        hooked_input = self._apply_attention_input_hook(*args, **kwargs)
 
-            q_output = self.q(hooked_input)
-            k_output = self.k(hooked_input)
-            v_output = self.v(hooked_input)
+        q_output = self.q(hooked_input)
+        k_output = self.k(hooked_input)
+        v_output = self.v(hooked_input)
 
-            # Reconstruct attention computation using hooked Q, K, V
-            output = self._reconstruct_attention(q_output, k_output, v_output, **kwargs)
-            output = self._process_output(output)
+        # Reconstruct attention computation using hooked Q, K, V
+        output = self._reconstruct_attention(q_output, k_output, v_output, **kwargs)
+        output = self._process_output(output)
 
-            return output
+        return output
 
-        return super().forward(*args, **kwargs)
+        # return super().forward(*args, **kwargs)
 
     def _compatibility_mode_forward_with_hooks(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass in compatibility mode that matches HookedTransformer behavior exactly.
@@ -648,7 +594,8 @@ class JointQKVAttentionBridge(AttentionBridge):
             if b_O_to_use is not None:
                 attn_output = attn_output + b_O_to_use
         elif hasattr(original_component, "c_proj"):
-            attn_output = original_component.c_proj(attn_output)  # type: ignore[operator]
+            # Apply output projection through LinearBridge (captures hook_z via o.hook_in)
+            attn_output = self.o(attn_output)
 
         attn_output = self.hook_out(attn_output)
 

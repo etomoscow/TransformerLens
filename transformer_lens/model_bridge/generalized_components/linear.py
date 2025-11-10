@@ -2,6 +2,7 @@
 
 from typing import Any, Dict, Optional
 
+import einops
 import torch
 
 from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion import (
@@ -87,13 +88,28 @@ class LinearBridge(GeneralizedComponent):
         so when forward() delegates to original_component, it uses the processed weights.
 
         Handles both Conv1D (GPT-2 style, shape [in, out]) and Linear (shape [out, in]).
+        Also handles 3D weights [n_heads, d_model, d_head] by flattening them first.
 
         Args:
-            weight: The processed weight tensor [in, out] format
-            bias: The processed bias tensor (optional)
+            weight: The processed weight tensor. Can be:
+                - 2D [in, out] format
+                - 3D [n_heads, d_model, d_head] format (will be flattened to 2D)
+            bias: The processed bias tensor (optional). Can be:
+                - 1D [out] format
+                - 2D [n_heads, d_head] format (will be flattened to 1D)
         """
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
+
+        # Handle 3D weight tensors by flattening to 2D
+        if weight.ndim == 3:
+            # Shape: [n_heads, d_model, d_head] -> [d_model, (n_heads*d_head)]
+            weight = einops.rearrange(weight, "n_heads d_model d_head -> d_model (n_heads d_head)")
+
+        # Handle 2D bias tensors by flattening to 1D
+        if bias is not None and bias.ndim == 2:
+            # Shape: [n_heads, d_head] -> [(n_heads*d_head)]
+            bias = einops.rearrange(bias, "n_heads d_head -> (n_heads d_head)")
 
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
