@@ -1142,6 +1142,77 @@ class ArchitectureAdapter:
         # If no pattern matches, return the original key
         return hf_key
 
+    def convert_hf_key_to_tl_key(self, hf_key: str) -> str:
+        """Convert a HuggingFace-style key to TransformerLens format key using component mapping.
+
+        The component mapping keys ARE the TL format names (e.g., "embed", "pos_embed", "blocks").
+        The component.name is the HF path (e.g., "transformer.wte").
+
+        Args:
+            hf_key: The HuggingFace-style key (e.g., "transformer.wte.weight")
+
+        Returns:
+            The TransformerLens format key (e.g., "embed.weight")
+        """
+        if self.component_mapping is None:
+            # If no component mapping, return original key
+            return hf_key
+
+        # Check top-level components first
+        for tl_name, component in self.component_mapping.items():
+            if tl_name == "blocks":
+                continue  # Handle blocks separately
+
+            # The component.name is the HF path (e.g., "transformer.wte")
+            hf_path = component.name
+
+            # Check if the key starts with this component's HF path
+            if hf_key.startswith(hf_path + "."):
+                # Extract the parameter name (e.g., "weight", "bias")
+                param = hf_key[len(hf_path) + 1:]
+                return f"{tl_name}.{param}"
+
+        # Handle blocks (transformer layers)
+        blocks_component = self.component_mapping.get("blocks")
+        if blocks_component:
+            # The blocks component name is the HF prefix (e.g., "transformer.h")
+            hf_blocks_prefix = blocks_component.name
+
+            # Check if this is a block component
+            if hf_key.startswith(hf_blocks_prefix + "."):
+                # Extract layer number and rest of path
+                # e.g., "transformer.h.0.ln_1.weight" -> "0.ln_1.weight"
+                rest = hf_key[len(hf_blocks_prefix) + 1:]
+                parts = rest.split(".", 1)
+
+                if len(parts) >= 2 and parts[0].isdigit():
+                    layer_idx = parts[0]
+                    subkey = parts[1]
+
+                    # Now check submodules within blocks
+                    if hasattr(blocks_component, 'submodules'):
+                        for tl_subname, subcomponent in blocks_component.submodules.items():
+                            # The subcomponent.name is the HF path relative to the block
+                            # e.g., "ln_1" for LayerNorm
+                            hf_subpath = subcomponent.name
+
+                            if subkey.startswith(hf_subpath + "."):
+                                # Extract parameter name
+                                param = subkey[len(hf_subpath) + 1:]
+                                return f"blocks.{layer_idx}.{tl_subname}.{param}"
+
+                            # Also check for nested submodules (e.g., attn.q, mlp.in)
+                            if hasattr(subcomponent, 'submodules'):
+                                for tl_nested_name, nested_comp in subcomponent.submodules.items():
+                                    hf_nested_path = f"{hf_subpath}.{nested_comp.name}"
+
+                                    if subkey.startswith(hf_nested_path + "."):
+                                        param = subkey[len(hf_nested_path) + 1:]
+                                        return f"blocks.{layer_idx}.{tl_subname}.{tl_nested_name}.{param}"
+
+        # If no mapping found, return original key
+        return hf_key
+
     def setup_component_testing(self, hf_model: RemoteModel, bridge_model: Any = None) -> None:
         """Set up model-specific references needed for component testing.
 

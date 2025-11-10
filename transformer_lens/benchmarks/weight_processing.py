@@ -337,38 +337,30 @@ def benchmark_layer_norm_folding(
         BenchmarkResult with layer norm folding verification details
     """
     try:
-        # Get state dict from original model
-        state_dict = bridge.original_model.state_dict()
+        # Get state dict from bridge (should return TransformerLens format keys)
+        state_dict = bridge.state_dict()
 
-        # Clean ._original_component suffixes
-        cleaned_state_dict = {}
-        for key, value in state_dict.items():
-            clean_key = key.replace("._original_component", "")
-            cleaned_state_dict[clean_key] = value
+        # Check first layer normalization weights in TransformerLens format
+        ln_key = "blocks.0.ln1.weight"
 
-        # Check first layer normalization weights
-        # Try different key patterns for different architectures
-        ln_keys = [
-            "model.layers.0.input_layernorm.weight",  # Gemma style
-            "blocks.0.ln1.weight",  # GPT-2 style (TransformerLens format)
-            "gpt_neox.layers.0.input_layernorm.weight",  # GPT-NeoX style
-        ]
+        # Fallback: if TL format key doesn't exist, try common HF format patterns
+        if ln_key not in state_dict:
+            # Try GPT-2 HF format
+            if "transformer.h.0.ln_1.weight" in state_dict:
+                ln_key = "transformer.h.0.ln_1.weight"
+            # Try Gemma HF format
+            elif "model.layers.0.input_layernorm.weight" in state_dict:
+                ln_key = "model.layers.0.input_layernorm.weight"
+            else:
+                return BenchmarkResult(
+                    name="layer_norm_folding",
+                    severity=BenchmarkSeverity.WARNING,
+                    message="Could not find layer norm weights in state dict",
+                    passed=False,
+                )
 
-        ln_weight = None
-        ln_key_found = None
-        for key in ln_keys:
-            if key in cleaned_state_dict:
-                ln_weight = cleaned_state_dict[key]
-                ln_key_found = key
-                break
-
-        if ln_weight is None:
-            return BenchmarkResult(
-                name="layer_norm_folding",
-                severity=BenchmarkSeverity.WARNING,
-                message="Could not find layer norm weights in state dict",
-                passed=False,
-            )
+        # Get the layer norm weight tensor
+        ln_weight = state_dict[ln_key]
 
         # Check if weights are close to identity (all ones for LayerNorm/RMSNorm)
         mean_val = torch.mean(ln_weight).item()
@@ -380,14 +372,14 @@ def benchmark_layer_norm_folding(
                 name="layer_norm_folding",
                 severity=BenchmarkSeverity.INFO,
                 message=f"Layer norm folding verified (mean={mean_val:.6f}, expected={expected_val})",
-                details={"mean": mean_val, "expected": expected_val, "key": ln_key_found},
+                details={"mean": mean_val, "expected": expected_val, "key": ln_key},
             )
         else:
             return BenchmarkResult(
                 name="layer_norm_folding",
                 severity=BenchmarkSeverity.WARNING,
                 message=f"Layer norm weights not identity after folding (mean={mean_val:.6f}, expected={expected_val})",
-                details={"mean": mean_val, "expected": expected_val, "key": ln_key_found},
+                details={"mean": mean_val, "expected": expected_val, "key": ln_key},
                 passed=False,
             )
 
@@ -530,36 +522,27 @@ def benchmark_unembed_centering(
         BenchmarkResult with unembed centering verification details
     """
     try:
-        # Get state dict from original model
-        state_dict = bridge.original_model.state_dict()
+        # Get state dict from bridge (should return TransformerLens format keys)
+        state_dict = bridge.state_dict()
 
-        # Clean ._original_component suffixes
-        cleaned_state_dict = {}
-        for key, value in state_dict.items():
-            clean_key = key.replace("._original_component", "")
-            cleaned_state_dict[clean_key] = value
+        # Check for unembed weight in TransformerLens format
+        unembed_key = "unembed.weight"
 
-        # Try different key patterns for unembed weights
-        unembed_keys = [
-            "lm_head.weight",  # Standard key
-            "model.lm_head.weight",  # Alternative key
-        ]
+        # Fallback: if TL format key doesn't exist, try common HF format patterns
+        if unembed_key not in state_dict:
+            # Try standard HF format
+            if "lm_head.weight" in state_dict:
+                unembed_key = "lm_head.weight"
+            else:
+                return BenchmarkResult(
+                    name="unembed_centering",
+                    severity=BenchmarkSeverity.WARNING,
+                    message="Could not find unembed weights in state dict",
+                    passed=False,
+                )
 
-        w_u = None
-        unembed_key_found = None
-        for key in unembed_keys:
-            if key in cleaned_state_dict:
-                w_u = cleaned_state_dict[key]
-                unembed_key_found = key
-                break
-
-        if w_u is None:
-            return BenchmarkResult(
-                name="unembed_centering",
-                severity=BenchmarkSeverity.WARNING,
-                message="Could not find unembed weights in state dict",
-                passed=False,
-            )
+        # Get the unembed weight tensor
+        w_u = state_dict[unembed_key]
 
         # Compute mean along vocabulary dimension (dim 0)
         mean_abs = torch.mean(torch.abs(torch.mean(w_u, dim=0))).item()
@@ -571,14 +554,14 @@ def benchmark_unembed_centering(
                 name="unembed_centering",
                 severity=BenchmarkSeverity.INFO,
                 message=f"Unembed centering verified (mean={mean_abs:.6f})",
-                details={"mean": mean_abs, "tolerance": tolerance, "key": unembed_key_found},
+                details={"mean": mean_abs, "tolerance": tolerance, "key": unembed_key},
             )
         else:
             return BenchmarkResult(
                 name="unembed_centering",
                 severity=BenchmarkSeverity.WARNING,
                 message=f"Unembed matrix not well-centered (mean={mean_abs:.6f})",
-                details={"mean": mean_abs, "tolerance": tolerance, "key": unembed_key_found},
+                details={"mean": mean_abs, "tolerance": tolerance, "key": unembed_key},
                 passed=False,
             )
 
@@ -672,7 +655,7 @@ def benchmark_no_nan_inf(
     """
     try:
         # Get state dict from original model
-        state_dict = bridge.original_model.state_dict()
+        state_dict = bridge.state_dict()
 
         # Check for NaN/Inf in all tensors
         nan_keys = []
@@ -732,7 +715,7 @@ def benchmark_weight_magnitudes(
     """
     try:
         # Get state dict from original model
-        state_dict = bridge.original_model.state_dict()
+        state_dict = bridge.state_dict()
 
         # Check magnitude ranges
         too_small_keys = []

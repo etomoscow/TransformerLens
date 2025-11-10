@@ -6108,10 +6108,10 @@ class TransformerBridge(nn.Module):
         self.cfg.use_split_qkv_input = use_split_qkv_input
 
     def state_dict(self, destination=None, prefix="", keep_vars=False):
-        """Get state dict with _original_component references filtered out.
+        """Get state dict with TransformerLens format keys.
 
-        This method provides a clean state dict without the internal _original_component
-        references that are used internally by the bridge architecture.
+        Converts HuggingFace format keys to TransformerLens format and filters out
+        _original_component references.
 
         Args:
             destination: Optional dict to store state dict in
@@ -6119,7 +6119,7 @@ class TransformerBridge(nn.Module):
             keep_vars: Whether to keep variables as Variables instead of tensors
 
         Returns:
-            Dict containing the state dict with clean parameter names
+            Dict containing the state dict with TransformerLens format keys
         """
         # Get the raw state dict from the original model
         if destination is not None:
@@ -6129,19 +6129,22 @@ class TransformerBridge(nn.Module):
         else:
             raw_state_dict = self.original_model.state_dict(prefix=prefix, keep_vars=keep_vars)
 
-        # Filter out _original_component references
-        clean_state_dict = {}
+        # Filter out _original_component references and convert keys to TL format
+        tl_state_dict = {}
         for key, value in raw_state_dict.items():
             # Filter out keys that are exactly "_original_component" or start with "_original_component."
-            # This allows submodules like "attn._original_component.OV.weight" to be included
             if key == "_original_component" or key.startswith("_original_component."):
                 continue
 
             # Remove any ._original_component patterns from the key
             clean_key = key.replace("._original_component", "")
-            clean_state_dict[clean_key] = value
 
-        return clean_state_dict
+            # Convert HF format keys to TL format using the adapter's conversion rules
+            tl_key = self.adapter.convert_hf_key_to_tl_key(clean_key)
+
+            tl_state_dict[tl_key] = value
+
+        return tl_state_dict
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         """Load state dict into the model, handling both clean keys and original keys with _original_component references.
