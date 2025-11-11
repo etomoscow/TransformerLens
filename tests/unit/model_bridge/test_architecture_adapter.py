@@ -693,11 +693,11 @@ def test_hf_key_filled_into_original_components():
     test_cases = [
         (
             "transformer.h.0.attn.c_attn.weight",
-            "transformer.h.0._original_component.attn._original_component.c_attn._original_component.weight",
+            "transformer.h.0._original_component.attn._original_component.c_attn.weight",
         ),
         (
             "transformer.h.0.attn.c_attn.bias",
-            "transformer.h.0._original_component.attn._original_component.c_attn._original_component.bias",
+            "transformer.h.0._original_component.attn._original_component.c_attn.bias",
         ),
         (
             "transformer.h.0.mlp.c_fc.weight",

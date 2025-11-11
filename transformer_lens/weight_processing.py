@@ -643,8 +643,9 @@ class ProcessWeights:
                     state_dict[mlp_W_out_key] * state_dict[mlp_ln_b_key][:, None]
                 ).sum(-2)
 
+                # Replace mlp ln bias with zeros (identity for bias) instead of deleting
                 if mlp_ln_b_key in state_dict:
-                    del state_dict[mlp_ln_b_key]
+                    state_dict[mlp_ln_b_key] = torch.zeros_like(state_dict[mlp_ln_b_key])
 
             state_dict[mlp_W_out_key] = (
                 state_dict[mlp_W_out_key] * state_dict[mlp_ln_w_key][:, None]
@@ -658,8 +659,9 @@ class ProcessWeights:
                     "mean",
                 )
 
+            # Replace mlp ln weight with ones (identity for weight) instead of deleting
             if mlp_ln_w_key in state_dict:
-                del state_dict[mlp_ln_w_key]
+                state_dict[mlp_ln_w_key] = torch.ones_like(state_dict[mlp_ln_w_key])
 
     @staticmethod
     def _store_processed_attention_tensors(
@@ -855,9 +857,11 @@ class ProcessWeights:
         """
         # Sample keys to check format
         tl_key_sample = "unembed.W_U"
+        # Also check for alternative TL format (unembed.weight) used by some extractors
+        tl_key_alt = "unembed.weight"
         hf_key_sample = ProcessWeights._get_param_key(tl_key_sample, adapter) if adapter else None
 
-        uses_tl_format = tl_key_sample in state_dict
+        uses_tl_format = tl_key_sample in state_dict or tl_key_alt in state_dict
         uses_hf_format = bool(adapter and hf_key_sample and hf_key_sample in state_dict)
 
         return uses_tl_format, uses_hf_format
@@ -884,11 +888,19 @@ class ProcessWeights:
 
         # Get parameter keys based on format detection
         if uses_tl_format and not uses_hf_format:
-            # State dict is in TransformerLens format - use TL keys directly
-            unembed_b_U_key = "unembed.b_U"
-            unembed_W_U_key = "unembed.W_U"
-            ln_final_b_key = "ln_final.b"
-            ln_final_w_key = "ln_final.w"
+            # State dict is in TransformerLens format - check which variant
+            if "unembed.W_U" in state_dict:
+                # Standard TL format
+                unembed_b_U_key = "unembed.b_U"
+                unembed_W_U_key = "unembed.W_U"
+                ln_final_b_key = "ln_final.b"
+                ln_final_w_key = "ln_final.w"
+            else:
+                # Alternative TL format (unembed.weight instead of unembed.W_U)
+                unembed_b_U_key = "unembed.bias"
+                unembed_W_U_key = "unembed.weight"
+                ln_final_b_key = "ln_final.bias"
+                ln_final_w_key = "ln_final.weight"
         elif adapter and uses_hf_format and not uses_tl_format:
             # State dict is in HuggingFace format - use adapter translation
             unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
@@ -898,10 +910,18 @@ class ProcessWeights:
         else:
             # Fallback: prefer TL format if possible, otherwise use adapter translation
             if uses_tl_format:
-                unembed_b_U_key = "unembed.b_U"
-                unembed_W_U_key = "unembed.W_U"
-                ln_final_b_key = "ln_final.b"
-                ln_final_w_key = "ln_final.w"
+                if "unembed.W_U" in state_dict:
+                    # Standard TL format
+                    unembed_b_U_key = "unembed.b_U"
+                    unembed_W_U_key = "unembed.W_U"
+                    ln_final_b_key = "ln_final.b"
+                    ln_final_w_key = "ln_final.w"
+                else:
+                    # Alternative TL format (unembed.weight instead of unembed.W_U)
+                    unembed_b_U_key = "unembed.bias"
+                    unembed_W_U_key = "unembed.weight"
+                    ln_final_b_key = "ln_final.bias"
+                    ln_final_w_key = "ln_final.weight"
             else:
                 unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
                 unembed_W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)

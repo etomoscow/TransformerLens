@@ -1057,10 +1057,13 @@ class ArchitectureAdapter:
         """Convert a HuggingFace-style key to a bridge key with _original_component references.
 
         Args:
-            hf_key: The HuggingFace-style key (e.g., "transformer.h.0.attn.c_attn.weight")
+            hf_key: The HuggingFace-style key (e.g., "transformer.h.0.attn.c_attn.weight" or "transformer.h.0.mlp.c_fc.weight")
 
         Returns:
-            The bridge key with _original_component references (e.g., "transformer.h.0._original_component.attn._original_component.c_attn._original_component.weight")
+            The bridge key with _original_component references. Note that attention and MLP components
+            follow different patterns:
+            - Attention: "transformer.h.0._original_component.attn._original_component.c_attn.weight"
+            - MLP: "transformer.h.0._original_component.mlp._original_component.c_fc._original_component.weight"
         """
         # Handle different key patterns
         if "transformer.h." in hf_key:
@@ -1068,13 +1071,13 @@ class ArchitectureAdapter:
             if len(parts) >= 4 and parts[2].isdigit():
                 layer = parts[2]
 
-                # Pattern: transformer.h.X.attn.c_attn.weight -> transformer.h.X._original_component.attn._original_component.c_attn._original_component.weight
+                # Pattern: transformer.h.X.attn.c_attn.weight -> transformer.h.X._original_component.attn._original_component.c_attn.weight
                 if "attn.c_attn" in hf_key:
-                    return f"transformer.h.{layer}._original_component.attn._original_component.c_attn._original_component.{parts[-1]}"
+                    return f"transformer.h.{layer}._original_component.attn._original_component.c_attn.{parts[-1]}"
 
-                # Pattern: transformer.h.X.attn.c_proj.weight -> transformer.h.X._original_component.attn._original_component.c_proj._original_component.weight
+                # Pattern: transformer.h.X.attn.c_proj.weight -> transformer.h.X._original_component.attn._original_component.c_proj.weight
                 elif "attn.c_proj" in hf_key:
-                    return f"transformer.h.{layer}._original_component.attn._original_component.c_proj._original_component.{parts[-1]}"
+                    return f"transformer.h.{layer}._original_component.attn._original_component.c_proj.{parts[-1]}"
 
                 # Pattern: transformer.h.X.mlp.c_fc.weight -> transformer.h.X._original_component.mlp._original_component.c_fc._original_component.weight
                 elif "mlp.c_fc" in hf_key:
