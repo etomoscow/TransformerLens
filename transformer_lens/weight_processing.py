@@ -47,11 +47,89 @@ class ProcessWeights:
         if adapter is None:
             return tl_key
 
-        # When an architecture adapter is present, delegate the full TransformerLens
-        # key translation (including suffix) to the adapter. Each adapter already
-        # knows how to map TL parameter names (W_Q, W_O, etc.) to the appropriate
-        # HuggingFace component path.
-        return adapter.translate_transformer_lens_path(tl_key)
+        # Try direct translation first (adapter handles most suffixes natively)
+        try:
+            return adapter.translate_transformer_lens_path(tl_key)
+        except Exception:
+            component_path, param_attr = ProcessWeights._prepare_component_path(tl_key)
+            remote_path = adapter.translate_transformer_lens_path(component_path)
+
+            if param_attr:
+                return f"{remote_path}.{param_attr}"
+            return remote_path
+
+    @staticmethod
+    def _prepare_component_path(tl_key: str) -> tuple[str, str]:
+        """Map a TransformerLens key to (component_path, parameter_attr).
+
+        The component path remains in TransformerLens format so it can be
+        translated by the architecture adapter. The parameter attribute
+        (weight/bias) is appended after translation.
+        """
+
+        suffix_map: Dict[str, tuple[str, str]] = {
+            "W_Q": ("q", "weight"),
+            "_W_Q": ("q", "weight"),
+            "b_Q": ("q", "bias"),
+            "_b_Q": ("q", "bias"),
+            "W_K": ("k", "weight"),
+            "_W_K": ("k", "weight"),
+            "b_K": ("k", "bias"),
+            "_b_K": ("k", "bias"),
+            "W_V": ("v", "weight"),
+            "_W_V": ("v", "weight"),
+            "b_V": ("v", "bias"),
+            "_b_V": ("v", "bias"),
+            "W_O": ("o", "weight"),
+            "b_O": ("o", "bias"),
+            "W_in": ("in", "weight"),
+            "b_in": ("in", "bias"),
+            "W_gate": ("gate", "weight"),
+            "b_gate": ("gate", "bias"),
+            "W_out": ("out", "weight"),
+            "b_out": ("out", "bias"),
+            "W_E": ("", "weight"),
+            "b_E": ("", "bias"),
+            "W_pos": ("", "weight"),
+            "b_pos": ("", "bias"),
+            "W_U": ("", "weight"),
+            "b_U": ("", "bias"),
+            "w": ("", "weight"),
+            "b": ("", "bias"),
+            "weight": ("", "weight"),
+            "bias": ("", "bias"),
+        }
+
+        if "." not in tl_key:
+            return tl_key, ""
+
+        base_path, suffix = tl_key.rsplit(".", 1)
+        if suffix in suffix_map:
+            component_suffix, param_attr = suffix_map[suffix]
+            if component_suffix:
+                base_path = f"{base_path}.{component_suffix}"
+            return base_path, param_attr
+
+        # Default: keep original suffix as attribute (covers rare/custom parameters)
+        return tl_key, suffix
+
+    @staticmethod
+    def _resolve_tl_key(state_dict: Dict[str, torch.Tensor], tl_key: str) -> str:
+        """Resolve a TransformerLens key to whichever variant exists in the state dict.
+
+        Handles legacy aliases like W_Q/W_O by mapping them to the actual component
+        names (e.g., q.weight, o.weight) if the base key is missing.
+        """
+        if tl_key in state_dict:
+            return tl_key
+
+        component_path, param_attr = ProcessWeights._prepare_component_path(tl_key)
+        resolved_key = f"{component_path}.{param_attr}" if param_attr else component_path
+
+        if resolved_key in state_dict:
+            return resolved_key
+
+        return tl_key
 
     @staticmethod
     def _safe_get_tensor(
@@ -86,6 +164,10 @@ class ProcessWeights:
         """
         # Translate key using adapter if provided
         actual_key = ProcessWeights._get_param_key(tl_key, adapter)
+
+        # Resolve TransformerLens aliases when no adapter is available
+        if adapter is None:
+            actual_key = ProcessWeights._resolve_tl_key(state_dict, actual_key)
 
         # Return the tensor if it exists, otherwise the default
         return state_dict.get(actual_key, default)
@@ -1155,6 +1237,11 @@ class ProcessWeights:
                 # Alternative TL format (embed.weight instead of embed.W_E)
                 embed_W_E_key = "embed.weight"
                 pos_embed_W_pos_key = "pos_embed.weight"
+            embed_W_E_key = ProcessWeights._resolve_tl_key(state_dict, embed_W_E_key)
+            if pos_embed_W_pos_key is not None:
+                pos_embed_W_pos_key = ProcessWeights._resolve_tl_key(
+                    state_dict, pos_embed_W_pos_key
+                )
         elif adapter and uses_hf_format and not uses_tl_format:
             # State dict is in HuggingFace format - use adapter translation
             embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
@@ -1179,6 +1266,11 @@ class ProcessWeights:
                     # Alternative TL format (embed.weight instead of embed.W_E)
                     embed_W_E_key = "embed.weight"
                     pos_embed_W_pos_key = "pos_embed.weight"
+                embed_W_E_key = ProcessWeights._resolve_tl_key(state_dict, embed_W_E_key)
+                if pos_embed_W_pos_key is not None:
+                    pos_embed_W_pos_key = ProcessWeights._resolve_tl_key(
+                        state_dict, pos_embed_W_pos_key
+                    )
             else:
                 embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
                 try:
@@ -1221,10 +1313,10 @@ class ProcessWeights:
 
             if uses_tl_format and not uses_hf_format:
                 # State dict is in TransformerLens format - use standard TL keys
-                attn_W_O_key = f"blocks.{l}.attn.W_O"
-                attn_b_O_key = f"blocks.{l}.attn.b_O"
-                mlp_W_out_key = f"blocks.{l}.mlp.W_out"
-                mlp_b_out_key = f"blocks.{l}.mlp.b_out"
+                attn_W_O_key = ProcessWeights._resolve_tl_key(state_dict, f"blocks.{l}.attn.W_O")
+                attn_b_O_key = ProcessWeights._resolve_tl_key(state_dict, f"blocks.{l}.attn.b_O")
+                mlp_W_out_key = ProcessWeights._resolve_tl_key(state_dict, f"blocks.{l}.mlp.W_out")
+                mlp_b_out_key = ProcessWeights._resolve_tl_key(state_dict, f"blocks.{l}.mlp.b_out")
             elif adapter and uses_hf_format and not uses_tl_format:
                 # State dict is in HuggingFace format - use adapter translation
                 attn_W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
@@ -1238,10 +1330,18 @@ class ProcessWeights:
             else:
                 # Fallback: prefer TL format if possible, otherwise use adapter translation
                 if uses_tl_format:
-                    attn_W_O_key = f"blocks.{l}.attn.W_O"
-                    attn_b_O_key = f"blocks.{l}.attn.b_O"
-                    mlp_W_out_key = f"blocks.{l}.mlp.W_out"
-                    mlp_b_out_key = f"blocks.{l}.mlp.b_out"
+                    attn_W_O_key = ProcessWeights._resolve_tl_key(
+                        state_dict, f"blocks.{l}.attn.W_O"
+                    )
+                    attn_b_O_key = ProcessWeights._resolve_tl_key(
+                        state_dict, f"blocks.{l}.attn.b_O"
+                    )
+                    mlp_W_out_key = ProcessWeights._resolve_tl_key(
+                        state_dict, f"blocks.{l}.mlp.W_out"
+                    )
+                    mlp_b_out_key = ProcessWeights._resolve_tl_key(
+                        state_dict, f"blocks.{l}.mlp.b_out"
+                    )
                 else:
                     attn_W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
                     attn_b_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_O", adapter)
