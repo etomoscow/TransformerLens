@@ -206,8 +206,8 @@ class JointQKVAttentionBridge(AttentionBridge):
         """
         # If we're using processed weights (_use_processed_weights is True),
         # use the compatibility mode forward that uses 3D weights like HookedTransformer
-        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
-            return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
+        # if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
+        #     return self._compatibility_mode_forward_with_hooks(*args, **kwargs)
 
         # Otherwise, use the standard forward pass with 2D weights
         hooked_input = self._apply_attention_input_hook(*args, **kwargs)
@@ -861,6 +861,70 @@ class JointQKVAttentionBridge(AttentionBridge):
         )
 
         return output
+
+    def set_processed_weights(
+        self,
+        W_Q: torch.Tensor,
+        W_K: torch.Tensor,
+        W_V: torch.Tensor,
+        W_O: torch.Tensor,
+        b_Q: Optional[torch.Tensor] = None,
+        b_K: Optional[torch.Tensor] = None,
+        b_V: Optional[torch.Tensor] = None,
+        b_O: Optional[torch.Tensor] = None,
+    ) -> None:
+        # """Set processed weights for Joint QKV attention.
+
+        # For Joint QKV attention, the Q/K/V weights are stored in a single c_attn component.
+        # This method handles both 2D format [d_model, (n_heads*d_head)] and 3D TL format
+        # [n_heads, d_model, d_head] for Q/K/V weights.
+
+        # Args:
+        #     W_Q: Query weight tensor (2D or 3D format)
+        #     W_K: Key weight tensor (2D or 3D format)
+        #     W_V: Value weight tensor (2D or 3D format)
+        #     W_O: Output projection weight (2D HF format [d_model, d_model] or 3D TL format)
+        #     b_Q: Query bias tensor (optional)
+        #     b_K: Key bias tensor (optional)
+        #     b_V: Value bias tensor (optional)
+        #     b_O: Output bias tensor (optional)
+        # """
+        import einops
+
+        # Convert Q/K/V weights to TL format [n_heads, d_model, d_head] if needed
+        if W_Q.ndim == 2:
+            # 2D format [d_model, (n_heads*d_head)] -> 3D TL format [n_heads, d_model, d_head]
+            assert self.config is not None
+            n_heads = self.config.n_heads
+            W_Q = einops.rearrange(W_Q, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads)
+            W_K = einops.rearrange(W_K, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads)
+            W_V = einops.rearrange(W_V, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads)
+
+            # Also reshape biases if they exist and are 1D
+            if b_Q is not None and b_Q.ndim == 1:
+                b_Q = einops.rearrange(b_Q, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+            if b_K is not None and b_K.ndim == 1:
+                b_K = einops.rearrange(b_K, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+            if b_V is not None and b_V.ndim == 1:
+                b_V = einops.rearrange(b_V, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+
+        # Store W_Q/W_K/W_V attributes for property access (e.g., bridge.blocks[0].attn.W_Q)
+        # These are now in TL format [n_heads, d_model, d_head]
+        self._W_Q = W_Q
+        self._W_K = W_K
+        self._W_V = W_V
+        self._b_Q = b_Q
+        self._b_K = b_K
+        self._b_V = b_V
+
+        if hasattr(self, "q") and self.q is not None and hasattr(self.q, "set_processed_weights"):
+            self.q.set_processed_weights(weight=W_Q, bias=b_Q)
+        if hasattr(self, "k") and self.k is not None and hasattr(self.k, "set_processed_weights"):
+            self.k.set_processed_weights(weight=W_K, bias=b_K)
+        if hasattr(self, "v") and self.v is not None and hasattr(self.v, "set_processed_weights"):
+            self.v.set_processed_weights(weight=W_V, bias=b_V)
+        if hasattr(self, "o") and self.o is not None and hasattr(self.o, "set_processed_weights"):
+            self.o.set_processed_weights(weight=W_O, bias=b_O)
 
     def process_weights(
         self,
