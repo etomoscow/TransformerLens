@@ -103,8 +103,22 @@ class LinearBridge(GeneralizedComponent):
 
         # Handle 3D weight tensors by flattening to 2D
         if weight.ndim == 3:
-            # Shape: [n_heads, d_model, d_head] -> [d_model, (n_heads*d_head)]
-            weight = einops.rearrange(weight, "n_heads d_model d_head -> d_model (n_heads d_head)")
+            n_heads, dim1, dim2 = weight.shape
+            # Detect if this is W_Q/W_K/W_V format [n_heads, d_model, d_head] or W_O format [n_heads, d_head, d_model]
+            # W_Q/W_K/W_V: d_model (e.g., 768) > d_head (e.g., 64), so dim1 > dim2
+            # W_O: d_head (e.g., 64) < d_model (e.g., 768), so dim1 < dim2
+            if dim1 > dim2:
+                # W_Q/W_K/W_V format: [n_heads, d_model, d_head] -> [d_model, (n_heads*d_head)]
+                # This is the weight for transforming d_model inputs to (n_heads*d_head) outputs
+                weight = einops.rearrange(
+                    weight, "n_heads d_model d_head -> d_model (n_heads d_head)"
+                )
+            else:
+                # W_O format: [n_heads, d_head, d_model] -> [(n_heads*d_head), d_model]
+                # This is the weight for transforming (n_heads*d_head) inputs to d_model outputs
+                weight = einops.rearrange(
+                    weight, "n_heads d_head d_model -> (n_heads d_head) d_model"
+                )
 
         # Handle 2D bias tensors by flattening to 1D
         if bias is not None and bias.ndim == 2:
@@ -113,10 +127,20 @@ class LinearBridge(GeneralizedComponent):
 
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
-                # Check if we need to transpose based on parameter shape
-                # Conv1D expects [in, out], Linear expects [out, in]
-                # weight is provided in [in, out] format
-                if param.shape[0] == weight.shape[0]:
+                # Check layer type to determine if we need to transpose
+                # Conv1D stores weights as [in_features, out_features]
+                # Linear stores weights as [out_features, in_features]
+                # weight is provided in [in_features, out_features] format from flattening
+
+                # Import Conv1D here to avoid circular imports
+                try:
+                    from transformers.pytorch_utils import Conv1D
+
+                    is_conv1d = isinstance(self.original_component, Conv1D)
+                except ImportError:
+                    is_conv1d = False
+
+                if is_conv1d:
                     # Conv1D format - use as-is
                     param.data = weight.contiguous()
                 else:

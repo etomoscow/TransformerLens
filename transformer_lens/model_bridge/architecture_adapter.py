@@ -1423,8 +1423,6 @@ class ArchitectureAdapter:
         """Extract output projection weights in HT format.
 
         Returns W_O in [n_heads, d_head, d_model] format for HookedTransformer compatibility.
-        However, LinearBridge.set_processed_weights expects [n_heads, d_model, d_head] when
-        flattening 3D weights, so we need to return the correct format.
 
         For Conv1D (GPT-2), weight is stored as [d_model, d_model] = [nx, nf].
         For Linear, weight is stored as [d_model, d_model] = [out_features, in_features].
@@ -1432,10 +1430,8 @@ class ArchitectureAdapter:
         weight = out_proj.weight.data
         bias = out_proj.bias.data if hasattr(out_proj, "bias") else None
 
-        # W_O should be [n_heads, d_head, d_model] for HookedTransformer
-        # But set_processed_weights expects [n_heads, d_model, d_head] for correct flattening
-        # So we transpose dimensions 1 and 2
-        W_O = weight.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
+        # W_O in [n_heads, d_head, d_model] format for HookedTransformer
+        W_O = weight.view(n_heads, d_head, d_model).contiguous()
         b_O = bias.contiguous() if bias is not None else None
 
         return W_O, b_O
