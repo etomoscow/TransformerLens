@@ -189,10 +189,8 @@ class JointQKVAttentionBridge(AttentionBridge):
         if hasattr(self, "o") and hasattr(original_component, "c_proj"):
             self.o.set_original_component(original_component.c_proj)
 
-        # Setup hook_z reshaping to ensure hook_z (o.hook_in) has the reshape conversion
-        # This allows hook_z to receive [batch, seq, n_heads, d_head] format
-        if hasattr(self, "o") and self.o is not None and hasattr(self.config, "n_heads"):
-            self._setup_hook_z_reshape()
+        # Note: hook_z reshaping is setup during compatibility mode via setup_no_processing_hooks()
+        # Don't set it up here to avoid breaking non-compatibility mode tests
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass through the qkv linear transformation with hooks.
