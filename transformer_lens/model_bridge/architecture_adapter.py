@@ -1420,21 +1420,35 @@ class ArchitectureAdapter:
         return W, b
 
     def _extract_output_proj(self, out_proj, n_heads, d_head, d_model):
-        """Extract output projection weights in HT format."""
+        """Extract output projection weights in HT format.
+
+        Returns W_O in [n_heads, d_head, d_model] format for HookedTransformer compatibility.
+        However, LinearBridge.set_processed_weights expects [n_heads, d_model, d_head] when
+        flattening 3D weights, so we need to return the correct format.
+
+        For Conv1D (GPT-2), weight is stored as [d_model, d_model] = [nx, nf].
+        For Linear, weight is stored as [d_model, d_model] = [out_features, in_features].
+        """
         weight = out_proj.weight.data
         bias = out_proj.bias.data if hasattr(out_proj, "bias") else None
 
-        W_O = weight.view(n_heads, d_head, d_model).contiguous()
+        # W_O should be [n_heads, d_head, d_model] for HookedTransformer
+        # But set_processed_weights expects [n_heads, d_model, d_head] for correct flattening
+        # So we transpose dimensions 1 and 2
+        W_O = weight.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
         b_O = bias.contiguous() if bias is not None else None
 
         return W_O, b_O
 
     def _disable_hook_conversions(self, attn_bridge):
-        """Disable hook conversions for attention submodules."""
-        for submodule_name in ["q", "k", "v", "o"]:
-            if hasattr(attn_bridge, submodule_name):
-                submodule = getattr(attn_bridge, submodule_name)
-                if hasattr(submodule, "hook_in"):
-                    submodule.hook_in.hook_conversion = None
-                if hasattr(submodule, "hook_out"):
-                    submodule.hook_out.hook_conversion = None
+        """Disable hook conversions for attention submodules.
+
+        Note: In no_processing mode, we DON'T disable conversions because Q/K/V hooks need
+        to convert from 3D [batch, seq, d_model] to 4D [batch, seq, n_heads, d_head].
+        We also preserve o.hook_in.hook_conversion (hook_z).
+
+        This method is kept for potential future use but currently does nothing in no_processing mode.
+        """
+        # Don't disable any conversions in no_processing mode
+        # All hooks (q, k, v, o) need their conversions to work correctly
+        pass
