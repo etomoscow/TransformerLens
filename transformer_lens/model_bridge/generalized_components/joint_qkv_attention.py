@@ -647,67 +647,6 @@ class JointQKVAttentionBridge(AttentionBridge):
     def _reconstruct_attention(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs
     ) -> tuple:
-        """Reconstruct attention computation using separate Q, K, V tensors."""
-        # original_component = self.original_component
-        # assert original_component is not None
-
-        # # Try to use the original _attn method if available
-        # if hasattr(original_component, "_attn"):
-        #     if len(q.shape) == 4:
-        #         q_attn = q.transpose(1, 2)
-        #         k_attn = k.transpose(1, 2)
-        #         v_attn = v.transpose(1, 2)
-        #     elif len(q.shape) == 3:
-        #         batch_size, seq_len, hidden_size = q.shape
-        #         num_heads = int(original_component.num_heads)  # type: ignore[arg-type]
-        #         head_dim: int = hidden_size // num_heads
-
-        #         q_attn = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-        #         k_attn = k.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-        #         v_attn = v.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-        #     else:
-        #         raise ValueError(f"Unexpected Q tensor shape: {q.shape}")
-
-        #     attn_result = original_component._attn(  # type: ignore[operator]
-        #         q_attn,
-        #         k_attn,
-        #         v_attn,
-        #         attention_mask=kwargs.get("attention_mask"),
-        #         head_mask=kwargs.get("head_mask"),
-        #     )
-        #     # Handle different return formats from _attn method
-        #     if len(attn_result) == 2:
-        #         attn_output, attn_weights = attn_result
-        #     elif len(attn_result) == 3:
-        #         attn_output, attn_weights, _ = attn_result  # Ignore past_key_value
-        #     else:
-        #         raise ValueError(
-        #             f"Unexpected number of return values from _attn: {len(attn_result)}"
-        #         )
-
-        #     if hasattr(original_component, "_merge_heads"):
-        #         attn_output_merged = original_component._merge_heads(  # type: ignore[operator]
-        #             attn_output, original_component.num_heads, original_component.head_dim
-        #         )
-        #     else:
-        #         batch_size, num_heads, seq_len, head_dim = attn_output.shape
-        #         hidden_size = num_heads * head_dim
-        #         attn_output_merged = (
-        #             attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
-        #         )
-
-        #     if hasattr(self, "o") and self.o is not None:
-        #         attn_output_merged = self.o(attn_output_merged)
-
-        #     # Return format should match what GPT2Block expects (exactly 2 values)
-        #     # The GPT2Block handles past_key_value separately
-        #     return (attn_output_merged, attn_weights)
-        # else:
-        #         return self._manual_attention_computation(q, k, v, **kwargs)
-
-        # def _manual_attention_computation(
-        #     self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs
-        # ) -> tuple:
         """Manual attention computation as fallback using TransformerLens computation logic."""
         original_component = self.original_component
         assert original_component is not None
@@ -873,22 +812,22 @@ class JointQKVAttentionBridge(AttentionBridge):
         b_V: Optional[torch.Tensor] = None,
         b_O: Optional[torch.Tensor] = None,
     ) -> None:
-        # """Set processed weights for Joint QKV attention.
+        """Set processed weights for Joint QKV attention.
 
-        # For Joint QKV attention, the Q/K/V weights are stored in a single c_attn component.
-        # This method handles both 2D format [d_model, (n_heads*d_head)] and 3D TL format
-        # [n_heads, d_model, d_head] for Q/K/V weights.
+        For Joint QKV attention, the Q/K/V weights are stored in a single c_attn component.
+        This method handles both 2D format [d_model, (n_heads*d_head)] and 3D TL format
+        [n_heads, d_model, d_head] for Q/K/V weights.
 
-        # Args:
-        #     W_Q: Query weight tensor (2D or 3D format)
-        #     W_K: Key weight tensor (2D or 3D format)
-        #     W_V: Value weight tensor (2D or 3D format)
-        #     W_O: Output projection weight (2D HF format [d_model, d_model] or 3D TL format)
-        #     b_Q: Query bias tensor (optional)
-        #     b_K: Key bias tensor (optional)
-        #     b_V: Value bias tensor (optional)
-        #     b_O: Output bias tensor (optional)
-        # """
+        Args:
+            W_Q: Query weight tensor (2D or 3D format)
+            W_K: Key weight tensor (2D or 3D format)
+            W_V: Value weight tensor (2D or 3D format)
+            W_O: Output projection weight (2D HF format [d_model, d_model] or 3D TL format)
+            b_Q: Query bias tensor (optional)
+            b_K: Key bias tensor (optional)
+            b_V: Value bias tensor (optional)
+            b_O: Output bias tensor (optional)
+        """
         import einops
 
         # Convert Q/K/V weights to TL format [n_heads, d_model, d_head] if needed
@@ -896,9 +835,15 @@ class JointQKVAttentionBridge(AttentionBridge):
             # 2D format [d_model, (n_heads*d_head)] -> 3D TL format [n_heads, d_model, d_head]
             assert self.config is not None
             n_heads = self.config.n_heads
-            W_Q = einops.rearrange(W_Q, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads)
-            W_K = einops.rearrange(W_K, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads)
-            W_V = einops.rearrange(W_V, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads)
+            W_Q = einops.rearrange(
+                W_Q, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
+            W_K = einops.rearrange(
+                W_K, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
+            W_V = einops.rearrange(
+                W_V, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
 
             # Also reshape biases if they exist and are 1D
             if b_Q is not None and b_Q.ndim == 1:
