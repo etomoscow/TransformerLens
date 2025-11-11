@@ -5224,9 +5224,29 @@ class TransformerBridge(nn.Module):
         # Store hooks that we add so we can remove them later
         added_hooks: List[Tuple[HookPoint, str]] = []
 
+        # Determine effective stop_at_layer for filtering
+        effective_stop_layer = None
+        if stop_at_layer is not None and hasattr(self, "blocks"):
+            if stop_at_layer < 0:
+                effective_stop_layer = len(self.blocks) + stop_at_layer
+            else:
+                effective_stop_layer = stop_at_layer
+
         def add_hook_to_point(
             hook_point: HookPoint, hook_fn: Callable, name: str, dir: Literal["fwd", "bwd"] = "fwd"
         ):
+            # If stop_at_layer is set, check if this hook should be excluded
+            if effective_stop_layer is not None and name.startswith("blocks."):
+                try:
+                    # Extract layer number from hook name like "blocks.5.attn.hook_q"
+                    layer_num = int(name.split(".")[1])
+                    # Skip hooks from layers >= stop_at_layer
+                    if layer_num >= effective_stop_layer:
+                        return
+                except (IndexError, ValueError):
+                    # If we can't parse the layer number, include the hook
+                    pass
+
             hook_point.add_hook(hook_fn, dir=dir)
             added_hooks.append((hook_point, name))
 
@@ -5428,10 +5448,32 @@ class TransformerBridge(nn.Module):
         # Use hook dictionary to get all available hooks
         hook_dict = self.hook_dict
 
-        # Filter hooks based on names_filter
+        # Determine effective stop_at_layer for filtering
+        effective_stop_layer = None
+        if stop_at_layer is not None and hasattr(self, "blocks"):
+            if stop_at_layer < 0:
+                effective_stop_layer = len(self.blocks) + stop_at_layer
+            else:
+                effective_stop_layer = stop_at_layer
+
+        # Filter hooks based on names_filter and stop_at_layer
         for hook_name, hook in hook_dict.items():
             # Only add hook if it passes the names filter
             if names_filter_fn(hook_name):
+                # If stop_at_layer is set, exclude hooks from layers >= stop_at_layer
+                if effective_stop_layer is not None:
+                    # Check if this hook is from a block layer that should be excluded
+                    if hook_name.startswith("blocks."):
+                        try:
+                            # Extract layer number from hook name like "blocks.5.attn.hook_q"
+                            layer_num = int(hook_name.split(".")[1])
+                            # Skip hooks from layers >= stop_at_layer
+                            if layer_num >= effective_stop_layer:
+                                continue
+                        except (IndexError, ValueError):
+                            # If we can't parse the layer number, include the hook
+                            pass
+
                 hooks.append((hook, hook_name))
 
         # Register hooks
@@ -5632,9 +5674,29 @@ class TransformerBridge(nn.Module):
         # Store hooks that we add so we can remove them later
         added_hooks: List[Tuple[HookPoint, str]] = []
 
+        # Determine effective stop_at_layer for filtering
+        effective_stop_layer = None
+        if stop_at_layer is not None and hasattr(self, "blocks"):
+            if stop_at_layer < 0:
+                effective_stop_layer = len(self.blocks) + stop_at_layer
+            else:
+                effective_stop_layer = stop_at_layer
+
         def add_hook_to_point(
             hook_point: HookPoint, hook_fn: Callable, name: str, dir: Literal["fwd", "bwd"] = "fwd"
         ):
+            # If stop_at_layer is set, check if this hook should be excluded
+            if effective_stop_layer is not None and name.startswith("blocks."):
+                try:
+                    # Extract layer number from hook name like "blocks.5.attn.hook_q"
+                    layer_num = int(name.split(".")[1])
+                    # Skip hooks from layers >= stop_at_layer
+                    if layer_num >= effective_stop_layer:
+                        return
+                except (IndexError, ValueError):
+                    # If we can't parse the layer number, include the hook
+                    pass
+
             # In compatibility mode, if registering with an alias name (different from canonical),
             # call the hook with both the canonical name and the alias name
             if self.compatibility_mode and name != hook_point.name:

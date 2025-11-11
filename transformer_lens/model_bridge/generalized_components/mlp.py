@@ -71,6 +71,11 @@ class MLPBridge(GeneralizedComponent):
             # Apply input hook
             hidden_states = self.hook_in(hidden_states)
 
+            # Also fire in.hook_in if it exists (for compatibility)
+            in_module = getattr(self, "in", None) or getattr(self, "input", None)
+            if in_module and hasattr(in_module, "hook_in"):
+                hidden_states = in_module.hook_in(hidden_states)
+
             # Use the processed weights directly with the same computation as reference model
             if hasattr(self, "_processed_W_in") and hasattr(self, "_processed_W_out"):
                 # Input projection using TransformerLens format weights [d_model, d_mlp]
@@ -123,11 +128,21 @@ class MLPBridge(GeneralizedComponent):
             # Apply output hook
             output = self.hook_out(output)
 
+            # Also fire out.hook_out if it exists (for compatibility)
+            if hasattr(self, "out") and hasattr(self.out, "hook_out"):
+                output = self.out.hook_out(output)
+
             return output
 
         # Default path: use original component (unprocessed weights)
         hidden_states = args[0]
         hidden_states = self.hook_in(hidden_states)
+
+        # Also fire in.hook_in if it exists (for compatibility)
+        in_module = getattr(self, "in", None) or getattr(self, "input", None)
+        if in_module and hasattr(in_module, "hook_in"):
+            hidden_states = in_module.hook_in(hidden_states)
+
         new_args = (hidden_states,) + args[1:]
 
         original_component = self.original_component
@@ -138,6 +153,11 @@ class MLPBridge(GeneralizedComponent):
 
         output = original_component(*new_args, **kwargs)
         output = self.hook_out(output)
+
+        # Also fire out.hook_out if it exists (for compatibility)
+        if hasattr(self, "out") and hasattr(self.out, "hook_out"):
+            output = self.out.hook_out(output)
+
         return output
 
     def set_processed_weights(

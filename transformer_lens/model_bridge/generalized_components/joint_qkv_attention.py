@@ -220,6 +220,39 @@ class JointQKVAttentionBridge(AttentionBridge):
 
         return output
 
+    def _process_output(self, output: Any) -> Any:
+        """Process the output from _reconstruct_attention.
+
+        This override skips the duplicate hook_pattern call since
+        _reconstruct_attention already applies both hook_attn_scores
+        and hook_pattern correctly.
+
+        Args:
+            output: Output tuple from _reconstruct_attention (attn_output, attn_weights)
+
+        Returns:
+            Processed output with hook_out applied
+        """
+        # Extract attention pattern from the output tuple if present
+        attn_pattern = None
+        if isinstance(output, tuple) and len(output) >= 2:
+            attn_pattern = output[1]
+
+        # Store the pattern for potential use (but don't re-hook it)
+        if attn_pattern is not None:
+            self._pattern = attn_pattern
+
+        # Apply hook_hidden_states to the attention output (first element of tuple)
+        if isinstance(output, tuple) and len(output) > 0 and isinstance(output[0], torch.Tensor):
+            processed_output = list(output)
+            processed_output[0] = self.hook_hidden_states(output[0])
+            output = tuple(processed_output)
+
+        # Apply hook_out to the main output
+        output = self._apply_hook_out_to_output(output)
+
+        return output
+
     def _forward_folded(self, *args: Any, **kwargs: Any) -> Any:
         """Forward pass using folded weights (split QKV with standard c_attn).
 
@@ -688,11 +721,17 @@ class JointQKVAttentionBridge(AttentionBridge):
                 attention_mask = attention_mask[..., :seq_len, :]
             attn_scores = attn_scores + attention_mask
 
+        # Apply hook_attn_scores to raw scores BEFORE softmax
+        attn_scores = self.hook_attn_scores(attn_scores)
+
         # Apply softmax to get attention weights
         attn_weights = torch.nn.functional.softmax(attn_scores, dim=-1)
 
         if hasattr(original_component, "attn_dropout"):
             attn_weights = original_component.attn_dropout(attn_weights)  # type: ignore[operator]  # type: ignore[operator]
+
+        # Apply hook_pattern to probabilities AFTER softmax
+        attn_weights = self.hook_pattern(attn_weights)
 
         # Apply attention to values
         attn_output = torch.matmul(attn_weights, v)  # [batch, n_heads, seq, d_head]

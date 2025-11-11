@@ -568,11 +568,9 @@ class AttentionBridge(GeneralizedComponent):
             if not isinstance(attn_pattern, torch.Tensor):
                 raise TypeError(f"Expected 'pattern' to be a Tensor, got {type(attn_pattern)}")
 
-            # For now, hook the pattern as scores as well so the CI passes,
-            # until we figured out how to properly hook the scores before softmax is applied
-            attn_pattern = self.hook_attn_scores(attn_pattern)
-
-            # Create attention pattern the same way as old implementation
+            # Note: hook_attn_scores is already applied in wrapped_forward BEFORE softmax
+            # We only need to hook the pattern here (wrapped_forward also hooks it, but
+            # this handles the case where wrapped_forward is not used, e.g., maintain_native_attention=True)
             attn_pattern = self.hook_pattern(attn_pattern)
 
             # Store the pattern for potential use in result calculation
