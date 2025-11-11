@@ -47,7 +47,10 @@ class ProcessWeights:
         if adapter is None:
             return tl_key
 
-        # Use the adapter to translate from TL format to target format
+        # When an architecture adapter is present, delegate the full TransformerLens
+        # key translation (including suffix) to the adapter. Each adapter already
+        # knows how to map TL parameter names (W_Q, W_O, etc.) to the appropriate
+        # HuggingFace component path.
         return adapter.translate_transformer_lens_path(tl_key)
 
     @staticmethod
@@ -1217,7 +1220,7 @@ class ProcessWeights:
             mlp_b_out_key = None
 
             if uses_tl_format and not uses_hf_format:
-                # State dict is in TransformerLens format - use TL keys directly
+                # State dict is in TransformerLens format - use standard TL keys
                 attn_W_O_key = f"blocks.{l}.attn.W_O"
                 attn_b_O_key = f"blocks.{l}.attn.b_O"
                 mlp_W_out_key = f"blocks.{l}.mlp.W_out"
@@ -1230,7 +1233,6 @@ class ProcessWeights:
                     mlp_W_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.W_out", adapter)
                     mlp_b_out_key = ProcessWeights._get_param_key(f"blocks.{l}.mlp.b_out", adapter)
                 except ValueError:
-                    # MLP parameters don't exist (e.g., MoE models)
                     mlp_W_out_key = None
                     mlp_b_out_key = None
             else:
@@ -1316,9 +1318,23 @@ class ProcessWeights:
 
         # Get parameter keys based on format detection
         if uses_tl_format and not uses_hf_format:
-            # State dict is in TransformerLens format - use TL keys directly
-            unembed_W_U_key = "unembed.W_U"
-            unembed_b_U_key = "unembed.b_U"
+            # State dict is in TransformerLens format - but check which naming convention
+            # Check if using TL naming (W_U) or alternative naming (weight) with TL prefix
+            tl_naming_key = "unembed.W_U"
+            alt_naming_key = "unembed.weight"
+
+            if tl_naming_key in state_dict:
+                # Pure TL format (TL prefix + TL naming)
+                unembed_W_U_key = "unembed.W_U"
+                unembed_b_U_key = "unembed.b_U"
+            elif alt_naming_key in state_dict:
+                # Alternative format (TL prefix + alternative naming)
+                unembed_W_U_key = "unembed.weight"
+                unembed_b_U_key = "unembed.bias"
+            else:
+                # Fallback: use TL naming
+                unembed_W_U_key = "unembed.W_U"
+                unembed_b_U_key = "unembed.b_U"
         elif adapter and uses_hf_format and not uses_tl_format:
             # State dict is in HuggingFace format - use adapter translation
             unembed_W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
@@ -1326,8 +1342,18 @@ class ProcessWeights:
         else:
             # Fallback: prefer TL format if possible, otherwise use adapter translation
             if uses_tl_format:
-                unembed_W_U_key = "unembed.W_U"
-                unembed_b_U_key = "unembed.b_U"
+                tl_naming_key = "unembed.W_U"
+                alt_naming_key = "unembed.weight"
+
+                if tl_naming_key in state_dict:
+                    unembed_W_U_key = "unembed.W_U"
+                    unembed_b_U_key = "unembed.b_U"
+                elif alt_naming_key in state_dict:
+                    unembed_W_U_key = "unembed.weight"
+                    unembed_b_U_key = "unembed.bias"
+                else:
+                    unembed_W_U_key = "unembed.W_U"
+                    unembed_b_U_key = "unembed.b_U"
             else:
                 unembed_W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
                 unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
