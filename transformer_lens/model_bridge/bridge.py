@@ -213,6 +213,9 @@ class TransformerBridge(nn.Module):
                                     target_obj = getattr(target_obj, part)
                                 # Found it, set the alias
                                 object.__setattr__(self, alias_name, target_obj)
+                                # If this is a HookPoint, update its name to the alias name
+                                if isinstance(target_obj, HookPoint):
+                                    target_obj.name = alias_name
                                 break
                             except AttributeError:
                                 continue
@@ -222,6 +225,9 @@ class TransformerBridge(nn.Module):
                         for part in target_path.split("."):
                             target_obj = getattr(target_obj, part)
                         object.__setattr__(self, alias_name, target_obj)
+                        # If this is a HookPoint, update its name to the alias name
+                        if isinstance(target_obj, HookPoint):
+                            target_obj.name = alias_name
                 except AttributeError:
                     # Target doesn't exist yet, skip
                     pass
@@ -343,7 +349,7 @@ class TransformerBridge(nn.Module):
 
         # Check if this is a HookPoint being set
         if isinstance(value, HookPoint):
-            # Set the name on the HookPoint
+            # Set the name on the HookPoint (will be overridden by alias registration if applicable)
             value.name = name
             # Add to registry
             self._hook_registry[name] = value
@@ -456,6 +462,9 @@ class TransformerBridge(nn.Module):
         if not all_aliases:
             return
 
+        # Track which HookPoints have been aliased to avoid overwriting names
+        aliased_hook_ids = set()
+
         for alias_name, target in all_aliases.items():
             # Use the existing alias system to resolve the target hook
             # Convert to Dict[str, str] for resolve_alias if target_name is a list
@@ -466,6 +475,12 @@ class TransformerBridge(nn.Module):
                         target_hook = resolve_alias(self, alias_name, {alias_name: single_target})
                         if target_hook is not None:
                             hooks[alias_name] = target_hook
+                            # Update the HookPoint's name to the alias name (but only if not already aliased)
+                            if isinstance(target_hook, HookPoint):
+                                hook_id = id(target_hook)
+                                if hook_id not in aliased_hook_ids:
+                                    target_hook.name = alias_name
+                                    aliased_hook_ids.add(hook_id)
                             break
                     except AttributeError:
                         # Skip this target if it can't be resolved (e.g., during initialization)
@@ -475,6 +490,12 @@ class TransformerBridge(nn.Module):
                     target_hook = resolve_alias(self, alias_name, {alias_name: target})
                     if target_hook is not None:
                         hooks[alias_name] = target_hook
+                        # Update the HookPoint's name to the alias name (but only if not already aliased)
+                        if isinstance(target_hook, HookPoint):
+                            hook_id = id(target_hook)
+                            if hook_id not in aliased_hook_ids:
+                                target_hook.name = alias_name
+                                aliased_hook_ids.add(hook_id)
                 except AttributeError:
                     # Skip this alias if it can't be resolved (e.g., during initialization)
                     continue
@@ -2301,7 +2322,11 @@ class TransformerBridge(nn.Module):
                 if isinstance(hook_name_or_filter, str):
                     hook_point = self.get_hook_point(hook_name_or_filter)
                     if hook_point is not None:
-                        add_hook_to_point(hook_point, hook_fn, hook_name_or_filter, "fwd")
+                        # Use use_alias_only=True to avoid firing the hook twice
+                        # (once for canonical name, once for alias name)
+                        add_hook_to_point(
+                            hook_point, hook_fn, hook_name_or_filter, "fwd", use_alias_only=True
+                        )
                 elif callable(hook_name_or_filter):
                     # Filter function - apply to all matching hooks
                     # In compatibility mode, hook_dict contains multiple names for the same HookPoint
@@ -2318,16 +2343,11 @@ class TransformerBridge(nn.Module):
                                 hook_point_to_names[hp_id] = []
                             hook_point_to_names[hp_id].append(name)
 
-                    # Register each hook once, preferring alias names
+                    # Register each hook once, using the HookPoint's internal name (which is the alias)
                     for hp_id, matching_names in hook_point_to_names.items():
                         hook_point = hook_dict[matching_names[0]]
-                        # Prefer alias name (name != hook_point.name) over canonical name
-                        name_to_use = matching_names[0]
-                        for name in matching_names:
-                            if name != hook_point.name:
-                                # Found an alias name, use it
-                                name_to_use = name
-                                break
+                        # Use the HookPoint's internal name (which has been set to the alias name)
+                        name_to_use = hook_point.name if hook_point.name else matching_names[0]
                         # Use use_alias_only=True to avoid calling the hook twice
                         add_hook_to_point(
                             hook_point, hook_fn, name_to_use, "fwd", use_alias_only=True
@@ -2338,7 +2358,11 @@ class TransformerBridge(nn.Module):
                 if isinstance(hook_name_or_filter, str):
                     hook_point = self.get_hook_point(hook_name_or_filter)
                     if hook_point is not None:
-                        add_hook_to_point(hook_point, hook_fn, hook_name_or_filter, "bwd")
+                        # Use use_alias_only=True to avoid firing the hook twice
+                        # (once for canonical name, once for alias name)
+                        add_hook_to_point(
+                            hook_point, hook_fn, hook_name_or_filter, "bwd", use_alias_only=True
+                        )
                 elif callable(hook_name_or_filter):
                     # Filter function - apply to all matching hooks
                     # In compatibility mode, hook_dict contains multiple names for the same HookPoint
@@ -2355,16 +2379,11 @@ class TransformerBridge(nn.Module):
                                 bwd_hook_point_to_names[hp_id] = []
                             bwd_hook_point_to_names[hp_id].append(name)
 
-                    # Register each hook once, preferring alias names
+                    # Register each hook once, using the HookPoint's internal name (which is the alias)
                     for hp_id, matching_names in bwd_hook_point_to_names.items():
                         hook_point = hook_dict[matching_names[0]]
-                        # Prefer alias name (name != hook_point.name) over canonical name
-                        name_to_use = matching_names[0]
-                        for name in matching_names:
-                            if name != hook_point.name:
-                                # Found an alias name, use it
-                                name_to_use = name
-                                break
+                        # Use the HookPoint's internal name (which has been set to the alias name)
+                        name_to_use = hook_point.name if hook_point.name else matching_names[0]
                         # Use use_alias_only=True to avoid calling the hook twice
                         add_hook_to_point(
                             hook_point, hook_fn, name_to_use, "bwd", use_alias_only=True
@@ -5785,9 +5804,19 @@ class TransformerBridge(nn.Module):
                 else:
                     # Filter function
                     hook_dict = self.hook_dict
+                    # Track which HookPoints we've already added to avoid duplicates from aliases
+                    seen_hooks = set()
                     for name, hook_point in hook_dict.items():
                         if hook_name_or_filter(name):
-                            add_hook_to_point(hook_point, hook_fn, name, direction)
+                            # Skip if we've already added this HookPoint (via an alias)
+                            hook_id = id(hook_point)
+                            if hook_id in seen_hooks:
+                                continue
+                            seen_hooks.add(hook_id)
+                            # Use the HookPoint's internal name if it differs from the dict key
+                            # (this happens when the dict key is a canonical name but the alias is preferred)
+                            hook_name_to_use = hook_point.name if hook_point.name else name
+                            add_hook_to_point(hook_point, hook_fn, hook_name_to_use, direction)
 
         try:
             # Apply forward hooks
