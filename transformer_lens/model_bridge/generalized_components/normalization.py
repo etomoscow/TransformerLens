@@ -75,12 +75,15 @@ class NormalizationBridge(GeneralizedComponent):
         # Check if we should use HuggingFace's autograd directly (for exact gradient matching)
         if self.use_native_layernorm_autograd:
             # Use HuggingFace LayerNorm's forward directly to preserve exact computational graph
-            result = self._hf_autograd_forward(hidden_states)
+            # But still fire hooks by decomposing the computation
+            result = self._hf_autograd_forward_with_hooks(hidden_states)
         # Check if we should use LayerNormPre behavior (when layer norm folding is enabled)
         elif hasattr(self.config, "layer_norm_folding") and self.config.layer_norm_folding:
-            # LayerNormPre mode: center and normalize without learnable parameters
-            # This matches LayerNormPre behavior exactly
-            result = self._layernorm_pre_forward(hidden_states)
+            # When layer norm folding is enabled, the original component has identity weights (w=1, b=0)
+            # So we can just call the original HF LayerNorm, which will apply LayerNorm with identity params
+            # This is equivalent to LayerNormPre (center + scale) but uses the original computation
+            # IMPORTANT: Still fire hooks for compatibility with HookedTransformer behavior
+            result = self._hf_autograd_forward_with_hooks(hidden_states)
         else:
             # Standard normalization behavior with learnable parameters
             if not getattr(self.config, "uses_rms_norm", False):
@@ -136,6 +139,46 @@ class NormalizationBridge(GeneralizedComponent):
 
         # Simply delegate to the original HuggingFace component
         # This ensures exact numerical match including all dtype handling and computational graph
+        return self.original_component(x)
+
+    def _hf_autograd_forward_with_hooks(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass that preserves HF's autograd while firing intermediate hooks.
+
+        This method calls HF's LayerNorm for the final result (to preserve exact gradients),
+        but also computes intermediate values to fire hook_scale and hook_normalized.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Normalized output tensor from HF's LayerNorm
+        """
+        if self.original_component is None:
+            raise RuntimeError(f"Original component not set for {self.name}")
+
+        # Compute intermediate values for hooks (without affecting the computational graph)
+        # These computations match what LayerNorm does internally
+        with torch.no_grad():
+            # Check if we're using RMSNorm or LayerNorm
+            if not getattr(self.config, "uses_rms_norm", False):
+                # LayerNorm: center first
+                x_centered = x - x.mean(-1, keepdim=True)
+            else:
+                # RMSNorm: no centering
+                x_centered = x
+
+            # Compute scale for hook
+            eps = getattr(self.config, "eps", 1e-5)
+            scale = (x_centered.pow(2).mean(-1, keepdim=True) + eps).sqrt()
+
+            # Compute normalized value for hook
+            x_normalized = x_centered / scale
+
+        # Fire hooks with the intermediate values (these don't affect gradients)
+        _ = self.hook_scale(scale)
+        _ = self.hook_normalized(x_normalized)
+
+        # Return the result from HF's LayerNorm to preserve exact autograd
         return self.original_component(x)
 
     def _layernorm_pre_forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -41,6 +41,13 @@ from transformer_lens.benchmarks.hook_registration import (
 )
 from transformer_lens.benchmarks.utils import BenchmarkResult, format_results
 from transformer_lens.benchmarks.weight_processing import (
+    benchmark_attention_output_centering,
+    benchmark_layer_norm_folding,
+    benchmark_mlp_output_centering,
+    benchmark_no_nan_inf,
+    benchmark_unembed_centering,
+    benchmark_value_bias_folding,
+    benchmark_weight_magnitudes,
     benchmark_weight_modification,
     benchmark_weight_processing,
     benchmark_weight_sharing,
@@ -133,7 +140,14 @@ def run_benchmark_suite(
     try:
         if verbose:
             print("Loading TransformerBridge (unprocessed)...")
-        bridge_unprocessed = TransformerBridge.boot_transformers(model_name, device=device)  # type: ignore[attr-defined]
+        # Detect dtype from HF model if available, otherwise use float32
+        bridge_dtype = torch.float32
+        if hf_model is not None:
+            try:
+                bridge_dtype = next(hf_model.parameters()).dtype
+            except StopIteration:
+                pass
+        bridge_unprocessed = TransformerBridge.boot_transformers(model_name, device=device, dtype=bridge_dtype)  # type: ignore[attr-defined]
         if verbose:
             print("✓ TransformerBridge loaded (unprocessed)\n")
     except Exception as e:
@@ -316,7 +330,14 @@ def run_benchmark_suite(
     try:
         if verbose:
             print("Loading TransformerBridge (processed)...")
-        bridge_processed = TransformerBridge.boot_transformers(model_name, device=device)  # type: ignore[attr-defined]
+        # Use same dtype detection as Phase 1
+        bridge_dtype = torch.float32
+        if hf_model is not None:
+            try:
+                bridge_dtype = next(hf_model.parameters()).dtype
+            except StopIteration:
+                pass
+        bridge_processed = TransformerBridge.boot_transformers(model_name, device=device, dtype=bridge_dtype)  # type: ignore[attr-defined]
         bridge_processed.enable_compatibility_mode(disable_warnings=True)
         if verbose:
             print("✓ TransformerBridge compatibility mode enabled (processed)\n")
@@ -524,6 +545,15 @@ def run_benchmark_suite(
 
             # weight_modification doesn't need reference model
             results.append(benchmark_weight_modification(bridge_processed, test_text))
+
+            # Detailed weight processing validation benchmarks (don't need reference model)
+            results.append(benchmark_layer_norm_folding(bridge_processed, test_text))
+            results.append(benchmark_attention_output_centering(bridge_processed, test_text))
+            results.append(benchmark_mlp_output_centering(bridge_processed, test_text))
+            results.append(benchmark_unembed_centering(bridge_processed, test_text))
+            results.append(benchmark_value_bias_folding(bridge_processed, test_text))
+            results.append(benchmark_no_nan_inf(bridge_processed, test_text))
+            results.append(benchmark_weight_magnitudes(bridge_processed, test_text))
         except Exception as e:
             if verbose:
                 print(f"✗ Weight processing benchmark failed: {e}\n")

@@ -97,9 +97,25 @@ class MoEBridge(GeneralizedComponent):
                 f"Original component not set for {self.name}. Call set_original_component() first."
             )
 
-        # Apply input hook
+        # Get the target dtype from the original component's parameters
+        target_dtype = None
+        try:
+            target_dtype = next(self.original_component.parameters()).dtype
+        except StopIteration:
+            # Component has no parameters, keep inputs as-is
+            pass
+
+        # Apply input hook and dtype conversion
         if len(args) > 0:
-            args = (self.hook_in(args[0]),) + args[1:]
+            hooked = self.hook_in(args[0])
+            # Cast to target dtype if needed and input is a float tensor
+            if (
+                target_dtype is not None
+                and isinstance(hooked, torch.Tensor)
+                and hooked.is_floating_point()
+            ):
+                hooked = hooked.to(dtype=target_dtype)
+            args = (hooked,) + args[1:]
 
         # Call the original MoE component
         output = self.original_component(*args, **kwargs)
