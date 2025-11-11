@@ -518,7 +518,10 @@ class JointQKVAttentionBridge(AttentionBridge):
 
         # Handle KV caching
         # Don't use "or" because DynamicCache might evaluate to False in boolean context
-        past_key_value_arg = kwargs.get("past_key_value")
+        # Try newer parameter name first (past_key_values), then fall back to older names
+        past_key_value_arg = kwargs.get("past_key_values")
+        if past_key_value_arg is None:
+            past_key_value_arg = kwargs.get("past_key_value")
         if past_key_value_arg is None:
             past_key_value_arg = kwargs.get("layer_past")
         use_cache = kwargs.get("use_cache", False)
@@ -570,9 +573,6 @@ class JointQKVAttentionBridge(AttentionBridge):
         # Apply dropout if the original component has it
         if hasattr(original_component, "attn_dropout"):
             attn_weights = original_component.attn_dropout(attn_weights)  # type: ignore[operator]
-
-        # Debug: print shapes before matmul
-        # print(f"DEBUG: attn_weights.shape = {attn_weights.shape}, v.shape = {v.shape}")
 
         # Compute attention output
         attn_output = torch.matmul(attn_weights, v)
