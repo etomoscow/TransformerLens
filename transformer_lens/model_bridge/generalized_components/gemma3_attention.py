@@ -193,8 +193,18 @@ class PositionEmbeddingsAttentionBridge(AttentionBridge):
         output = self.original_component(*args, **kwargs)
 
         # Apply hook_out to the output
-        # HF Gemma3Attention returns a tuple: (hidden_states, attention_weights)
-        # We only hook the first element (hidden_states)
-        output = (self.hook_out(output[0]),) + output[1:]
+        # HF attention returns a tuple, but the decoder layer expects exactly 2 values:
+        # (hidden_states, attention_weights)
+        # Some models may return additional values (e.g., past_key_value for caching)
+        # but we must only return the first 2 to match what the decoder layer expects
+        if isinstance(output, tuple) and len(output) >= 2:
+            # Return only first 2 elements: (hooked_hidden_states, attention_weights)
+            output = (self.hook_out(output[0]), output[1])
+        elif isinstance(output, tuple) and len(output) == 1:
+            # Single element tuple (unusual but handle it)
+            output = (self.hook_out(output[0]),)
+        else:
+            # Not a tuple, just hook the output directly
+            output = self.hook_out(output)
 
         return output

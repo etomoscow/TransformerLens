@@ -236,9 +236,10 @@ class ProcessWeights:
         # Use embedding key instead of attention key since we may add TL attention keys
         # during processing but keep other keys in HF format
         tl_key_sample = "embed.W_E"
+        tl_key_alt = "embed.weight"  # Alternative TL format
         hf_key_sample = ProcessWeights._get_param_key(tl_key_sample, adapter) if adapter else None
 
-        uses_tl_format = tl_key_sample in state_dict
+        uses_tl_format = tl_key_sample in state_dict or tl_key_alt in state_dict
         uses_hf_format = bool(adapter and hf_key_sample and hf_key_sample in state_dict)
 
         return uses_tl_format, uses_hf_format
@@ -1142,9 +1143,15 @@ class ProcessWeights:
         # Get parameter keys based on format detection
         pos_embed_W_pos_key: str | None
         if uses_tl_format and not uses_hf_format:
-            # State dict is in TransformerLens format - use TL keys directly
-            embed_W_E_key = "embed.W_E"
-            pos_embed_W_pos_key = "pos_embed.W_pos"
+            # State dict is in TransformerLens format - check which variant
+            if "embed.W_E" in state_dict:
+                # Standard TL format
+                embed_W_E_key = "embed.W_E"
+                pos_embed_W_pos_key = "pos_embed.W_pos"
+            else:
+                # Alternative TL format (embed.weight instead of embed.W_E)
+                embed_W_E_key = "embed.weight"
+                pos_embed_W_pos_key = "pos_embed.weight"
         elif adapter and uses_hf_format and not uses_tl_format:
             # State dict is in HuggingFace format - use adapter translation
             embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
@@ -1161,8 +1168,14 @@ class ProcessWeights:
         else:
             # Fallback: prefer TL format if possible, otherwise use adapter translation
             if uses_tl_format:
-                embed_W_E_key = "embed.W_E"
-                pos_embed_W_pos_key = "pos_embed.W_pos"
+                if "embed.W_E" in state_dict:
+                    # Standard TL format
+                    embed_W_E_key = "embed.W_E"
+                    pos_embed_W_pos_key = "pos_embed.W_pos"
+                else:
+                    # Alternative TL format (embed.weight instead of embed.W_E)
+                    embed_W_E_key = "embed.weight"
+                    pos_embed_W_pos_key = "pos_embed.weight"
             else:
                 embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
                 try:

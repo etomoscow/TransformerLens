@@ -571,6 +571,9 @@ class JointQKVAttentionBridge(AttentionBridge):
         if hasattr(original_component, "attn_dropout"):
             attn_weights = original_component.attn_dropout(attn_weights)  # type: ignore[operator]
 
+        # Debug: print shapes before matmul
+        # print(f"DEBUG: attn_weights.shape = {attn_weights.shape}, v.shape = {v.shape}")
+
         # Compute attention output
         attn_output = torch.matmul(attn_weights, v)
 
