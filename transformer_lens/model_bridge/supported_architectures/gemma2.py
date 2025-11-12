@@ -14,6 +14,8 @@ from transformer_lens.model_bridge.generalized_components import (
     LinearBridge,
     MLPBridge,
     NormalizationBridge,
+    RMSNormalizationBridge,
+    RotaryEmbeddingBridge,
     UnembeddingBridge,
 )
 
@@ -28,6 +30,9 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
         self.cfg.gated_mlp = True
 
         self.cfg.uses_rms_norm = True
+
+        # Note: n_key_value_heads is now automatically mapped from num_key_value_heads
+        # by map_default_transformer_lens_config() in sources/transformers.py
 
         self.conversion_rules = HookConversionSet(
             {
@@ -49,14 +54,14 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
                     "model.layers.{i}.self_attn.k_proj.weight",
                     RearrangeHookConversion(
                         "(n h) m -> n m h",
-                        n=getattr(self.cfg, "num_key_value_heads", self.cfg.n_heads),
+                        n=getattr(self.cfg, "n_key_value_heads", self.cfg.n_heads),
                     ),
                 ),
                 "blocks.{i}.attn.v": (
                     "model.layers.{i}.self_attn.v_proj.weight",
                     RearrangeHookConversion(
                         "(n h) m -> n m h",
-                        n=getattr(self.cfg, "num_key_value_heads", self.cfg.n_heads),
+                        n=getattr(self.cfg, "n_key_value_heads", self.cfg.n_heads),
                     ),
                 ),
                 "blocks.{i}.attn.o": (
@@ -73,15 +78,17 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
 
         self.component_mapping = {
             "embed": EmbeddingBridge(name="model.embed_tokens"),
-            "rotary_emb": EmbeddingBridge(name="model.rotary_emb"),
+            "rotary_emb": RotaryEmbeddingBridge(name="model.rotary_emb"),
             "blocks": BlockBridge(
                 name="model.layers",
                 submodules={
-                    "ln1": NormalizationBridge(name="input_layernorm", config=self.cfg),
-                    "ln1_post": NormalizationBridge(
+                    "ln1": RMSNormalizationBridge(name="input_layernorm", config=self.cfg),
+                    "ln1_post": RMSNormalizationBridge(
                         name="post_attention_layernorm", config=self.cfg
                     ),
-                    "ln2": NormalizationBridge(name="pre_feedforward_layernorm", config=self.cfg),
+                    "ln2": RMSNormalizationBridge(
+                        name="pre_feedforward_layernorm", config=self.cfg
+                    ),
                     "ln2_post": NormalizationBridge(
                         name="post_feedforward_layernorm", config=self.cfg
                     ),
@@ -105,6 +112,6 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
                     ),
                 },
             ),
-            "ln_final": NormalizationBridge(name="model.norm", config=self.cfg),
+            "ln_final": RMSNormalizationBridge(name="model.norm", config=self.cfg),
             "unembed": UnembeddingBridge(name="lm_head"),
         }

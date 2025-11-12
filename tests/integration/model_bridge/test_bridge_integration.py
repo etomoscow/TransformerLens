@@ -227,16 +227,18 @@ def test_joint_qkv_custom_conversion_rule(gpt2_bridge):
         qkv_conversion_rule=custom_qkv_conversion_rule,
     )
 
-    # Verify the custom conversion rule was set on Q, K, V components
+    # Verify the custom conversion rule was set on Q, K, V hook_out (not hook_in)
+    # hook_in should remain 3D [batch, seq, d_model] without conversion
+    # hook_out gets the conversion to 4D [batch, seq, n_heads, d_head]
     assert (
-        test_bridge.q.hook_in.hook_conversion is custom_qkv_conversion_rule
-    ), "Custom QKV conversion rule should be set on hook_in of Q"
+        test_bridge.q.hook_in.hook_conversion is None
+    ), "hook_in should NOT have conversion (should be 3D)"
     assert (
-        test_bridge.k.hook_in.hook_conversion is custom_qkv_conversion_rule
-    ), "Custom QKV conversion rule should be set on hook_in of K"
+        test_bridge.k.hook_in.hook_conversion is None
+    ), "hook_in should NOT have conversion (should be 3D)"
     assert (
-        test_bridge.v.hook_in.hook_conversion is custom_qkv_conversion_rule
-    ), "Custom QKV conversion rule should be set on hook_in of V"
+        test_bridge.v.hook_in.hook_conversion is None
+    ), "hook_in should NOT have conversion (should be 3D)"
     assert (
         test_bridge.q.hook_out.hook_conversion is custom_qkv_conversion_rule
     ), "Custom QKV conversion rule should be set on hook_out of Q"
@@ -724,6 +726,43 @@ def test_TransformerBridge_hooks_backward_hooks():
     # Verify the hooks were called appropriately
     assert hook_called["hooked"], "HookedTransformer backward hook should have been called"
     assert hook_called["bridge"], "TransformerBridge backward hook should now be called correctly"
+
+
+@pytest.mark.skipif(bool(os.getenv("CI")), reason="Skip Gemma2 test in CI to avoid timeout")
+def test_TransformerBridge_gemma2_forward():
+    """Test that TransformerBridge properly handles Gemma2's position_embeddings.
+
+    Gemma2 uses rotary embeddings that return a (cos, sin) tuple which must be
+    preserved through the bridge and passed to attention layers correctly.
+    """
+    # Load Gemma2 model
+    bridge = TransformerBridge.boot_transformers("google/gemma-2-2b-it", device="cpu")
+
+    # Create test input
+    test_input = torch.tensor([[1, 2, 3, 4, 5]])
+
+    # Forward pass should work without errors
+    with torch.no_grad():
+        bridge_output = bridge(test_input)
+        hf_output = bridge.original_model(test_input)
+
+    # Verify outputs match
+    assert isinstance(bridge_output, torch.Tensor), "Output should be a tensor"
+    assert isinstance(hf_output.logits, torch.Tensor), "HF output should have logits"
+
+    # Check shapes match
+    assert (
+        bridge_output.shape == hf_output.logits.shape
+    ), f"Output shapes should match: {bridge_output.shape} vs {hf_output.logits.shape}"
+
+    # Check that outputs are close (they should be identical)
+    max_diff = torch.max(torch.abs(bridge_output - hf_output.logits)).item()
+    assert max_diff < 1e-4, f"Outputs should match closely, max diff: {max_diff}"
+
+    # Verify that rotary_emb exists and has the expected hooks
+    assert hasattr(bridge, "rotary_emb"), "Bridge should have rotary_emb component"
+    assert hasattr(bridge.rotary_emb, "hook_cos"), "rotary_emb should have hook_cos"
+    assert hasattr(bridge.rotary_emb, "hook_sin"), "rotary_emb should have hook_sin"
 
 
 if __name__ == "__main__":
