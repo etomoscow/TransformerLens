@@ -1787,6 +1787,53 @@ class TransformerBridge(nn.Module):
             print(f"    Skipped {missing_count} keys")
             print(f"    Processed state_dict has {len(state_dict)} keys")
 
+        # After loading processed weights, set layer norm weights to identity if folding was enabled
+        # This ensures state_dict() returns the correct values for benchmarks
+        if fold_ln:
+            for layer_idx in range(self.cfg.n_layers):
+                # Set ln1 and ln2 weights to 1.0 (identity) for all layers
+                for ln_name in ["ln1", "ln2"]:
+                    try:
+                        block = self.blocks[layer_idx]
+                        ln_component = getattr(block, ln_name, None)
+                        if ln_component is not None:
+                            # Get the actual normalization module
+                            if hasattr(ln_component, "_original_component"):
+                                norm_module = ln_component._original_component
+                            else:
+                                norm_module = ln_component
+
+                            # Set weight to ones
+                            if hasattr(norm_module, "weight") and norm_module.weight is not None:
+                                with torch.no_grad():
+                                    norm_module.weight.fill_(1.0)
+
+                            # Set bias to zeros if it exists
+                            if hasattr(norm_module, "bias") and norm_module.bias is not None:
+                                with torch.no_grad():
+                                    norm_module.bias.zero_()
+                    except (AttributeError, IndexError):
+                        pass
+
+            # Set ln_final weight to 1.0 as well
+            try:
+                if hasattr(self, "ln_final"):
+                    ln_final = self.ln_final
+                    if hasattr(ln_final, "_original_component"):
+                        norm_module = ln_final._original_component
+                    else:
+                        norm_module = ln_final
+
+                    if hasattr(norm_module, "weight") and norm_module.weight is not None:
+                        with torch.no_grad():
+                            norm_module.weight.fill_(1.0)
+
+                    if hasattr(norm_module, "bias") and norm_module.bias is not None:
+                        with torch.no_grad():
+                            norm_module.bias.zero_()
+            except (AttributeError, IndexError):
+                pass
+
         # Enable processed weights mode on all components
         # This makes components use _forward_with_processed_weights instead of calling HF modules
         if verbose:
@@ -4043,9 +4090,45 @@ class TransformerBridge(nn.Module):
                         "ln_2.bias",
                         "ln_f.weight",
                         "ln_f.bias",
+                        "input_layernorm.weight",
+                        "post_attention_layernorm.weight",
+                        "pre_feedforward_layernorm.weight",
+                        "post_feedforward_layernorm.weight",
                     ]
                 ):
                     expected_missing_keys.add(key)
+
+            # For missing layer norm keys, set them to identity (1.0 for weights, 0.0 for biases)
+            # This ensures state_dict() returns the correct folded values
+            # We need to actually modify the parameters in the model, not just a local state_dict
+            for key in expected_missing_keys:
+                # Navigate to the actual parameter in the model
+                try:
+                    parts = key.split(".")
+                    obj = self.original_model
+                    for part in parts[:-1]:
+                        if part.isdigit():
+                            obj = obj[int(part)]
+                        else:
+                            obj = getattr(obj, part, None)
+                            if obj is None:
+                                break
+
+                    if obj is not None:
+                        param_name = parts[-1]
+                        if hasattr(obj, param_name):
+                            param = getattr(obj, param_name)
+                            if param is not None and isinstance(param, torch.nn.Parameter):
+                                with torch.no_grad():
+                                    if "weight" in key:
+                                        # Set weights to identity (ones)
+                                        param.fill_(1.0)
+                                    elif "bias" in key:
+                                        # Set biases to zero
+                                        param.zero_()
+                except (AttributeError, IndexError, KeyError):
+                    # Skip if we can't navigate to this parameter
+                    pass
 
             # Remove expected missing keys from the missing_keys set
             actual_missing_keys = set(missing_keys) - expected_missing_keys
