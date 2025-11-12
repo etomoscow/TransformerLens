@@ -8,12 +8,11 @@ from transformer_lens.conversion_utils.conversion_steps import (
 )
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
-    AttentionBridge,
     BlockBridge,
     EmbeddingBridge,
     LinearBridge,
     MLPBridge,
-    NormalizationBridge,
+    PositionEmbeddingsAttentionBridge,
     RMSNormalizationBridge,
     RotaryEmbeddingBridge,
     UnembeddingBridge,
@@ -82,6 +81,7 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
             "blocks": BlockBridge(
                 name="model.layers",
                 submodules={
+                    # Gemma 2 uses RMSNorm for all normalization layers
                     "ln1": RMSNormalizationBridge(name="input_layernorm", config=self.cfg),
                     "ln1_post": RMSNormalizationBridge(
                         name="post_attention_layernorm", config=self.cfg
@@ -89,10 +89,11 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
                     "ln2": RMSNormalizationBridge(
                         name="pre_feedforward_layernorm", config=self.cfg
                     ),
-                    "ln2_post": NormalizationBridge(
+                    "ln2_post": RMSNormalizationBridge(
                         name="post_feedforward_layernorm", config=self.cfg
                     ),
-                    "attn": AttentionBridge(
+                    # Gemma 2 uses PositionEmbeddingsAttentionBridge like Gemma 3
+                    "attn": PositionEmbeddingsAttentionBridge(
                         name="self_attn",
                         config=self.cfg,
                         submodules={
