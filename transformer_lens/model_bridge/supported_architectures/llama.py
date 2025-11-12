@@ -13,13 +13,33 @@ from transformer_lens.model_bridge.generalized_components import (
     EmbeddingBridge,
     LinearBridge,
     MLPBridge,
-    NormalizationBridge,
+    RMSNormalizationBridge,
+    RotaryEmbeddingBridge,
     UnembeddingBridge,
 )
 
 
 class LlamaArchitectureAdapter(ArchitectureAdapter):
-    """Architecture adapter for Llama models."""
+    """Architecture adapter for Llama models.
+
+    Optional Parameters (may not exist in state_dict):
+    -------------------------------------------------
+    LLaMA models do NOT have biases on attention and MLP projections:
+
+    - blocks.{i}.attn.b_Q - No bias on query projection
+    - blocks.{i}.attn.b_K - No bias on key projection
+    - blocks.{i}.attn.b_V - No bias on value projection
+    - blocks.{i}.attn.b_O - No bias on output projection
+    - blocks.{i}.mlp.b_in - No bias on MLP input (up_proj)
+    - blocks.{i}.mlp.b_gate - No bias on MLP gate projection
+    - blocks.{i}.mlp.b_out - No bias on MLP output (down_proj)
+    - blocks.{i}.ln1.b - RMSNorm has no bias
+    - blocks.{i}.ln2.b - RMSNorm has no bias
+    - ln_final.b - RMSNorm has no bias
+
+    Weight processing must handle these missing biases gracefully using
+    ProcessWeights._safe_get_tensor() or by checking for None values.
+    """
 
     def __init__(self, cfg: Any) -> None:
         """Initialize the Llama architecture adapter."""
@@ -32,9 +52,17 @@ class LlamaArchitectureAdapter(ArchitectureAdapter):
             "d_vocab": cfg.d_vocab,
         }
 
+        # Add GQA support for Llama 3.1, 3.2, and later models
+        # Must set directly on cfg, not just in default_config
+        if hasattr(cfg, "n_key_value_heads") and cfg.n_key_value_heads is not None:
+            self.default_config["n_key_value_heads"] = cfg.n_key_value_heads
+            self.cfg.n_key_value_heads = cfg.n_key_value_heads
+
         self.cfg.gated_mlp = True
 
         self.cfg.uses_rms_norm = True
+        # Llama uses 'variance_epsilon' instead of 'eps' for RMSNorm
+        self.cfg.eps_attr = "variance_epsilon"
 
         self.conversion_rules = HookConversionSet(
             {
@@ -47,11 +75,17 @@ class LlamaArchitectureAdapter(ArchitectureAdapter):
                 ),
                 "blocks.{i}.attn.k": (
                     "model.layers.{i}.self_attn.k_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                    RearrangeHookConversion(
+                        "(n h) m -> n m h",
+                        n=getattr(self.cfg, "n_key_value_heads", self.cfg.n_heads),
+                    ),
                 ),
                 "blocks.{i}.attn.v": (
                     "model.layers.{i}.self_attn.v_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                    RearrangeHookConversion(
+                        "(n h) m -> n m h",
+                        n=getattr(self.cfg, "n_key_value_heads", self.cfg.n_heads),
+                    ),
                 ),
                 "blocks.{i}.attn.o": (
                     "model.layers.{i}.self_attn.o_proj.weight",
@@ -67,12 +101,12 @@ class LlamaArchitectureAdapter(ArchitectureAdapter):
 
         self.component_mapping = {
             "embed": EmbeddingBridge(name="model.embed_tokens"),
-            "rotary_emb": EmbeddingBridge(name="model.rotary_emb"),
+            "rotary_emb": RotaryEmbeddingBridge(name="model.rotary_emb"),
             "blocks": BlockBridge(
                 name="model.layers",
                 submodules={
-                    "ln1": NormalizationBridge(name="input_layernorm", config=self.cfg),
-                    "ln2": NormalizationBridge(name="post_attention_layernorm", config=self.cfg),
+                    "ln1": RMSNormalizationBridge(name="input_layernorm", config=self.cfg),
+                    "ln2": RMSNormalizationBridge(name="post_attention_layernorm", config=self.cfg),
                     "attn": AttentionBridge(
                         name="self_attn",
                         config=self.cfg,
@@ -93,6 +127,6 @@ class LlamaArchitectureAdapter(ArchitectureAdapter):
                     ),
                 },
             ),
-            "ln_final": NormalizationBridge(name="model.norm", config=self.cfg),
+            "ln_final": RMSNormalizationBridge(name="model.norm", config=self.cfg),
             "unembed": UnembeddingBridge(name="lm_head"),
         }
