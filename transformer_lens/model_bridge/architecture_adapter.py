@@ -1057,10 +1057,13 @@ class ArchitectureAdapter:
         """Convert a HuggingFace-style key to a bridge key with _original_component references.
 
         Args:
-            hf_key: The HuggingFace-style key (e.g., "transformer.h.0.attn.c_attn.weight")
+            hf_key: The HuggingFace-style key (e.g., "transformer.h.0.attn.c_attn.weight" or "transformer.h.0.mlp.c_fc.weight")
 
         Returns:
-            The bridge key with _original_component references (e.g., "transformer.h.0._original_component.attn._original_component.c_attn._original_component.weight")
+            The bridge key with _original_component references. Note that attention and MLP components
+            follow different patterns:
+            - Attention: "transformer.h.0._original_component.attn._original_component.c_attn.weight"
+            - MLP: "transformer.h.0._original_component.mlp._original_component.c_fc._original_component.weight"
         """
         # Handle different key patterns
         if "transformer.h." in hf_key:
@@ -1068,13 +1071,13 @@ class ArchitectureAdapter:
             if len(parts) >= 4 and parts[2].isdigit():
                 layer = parts[2]
 
-                # Pattern: transformer.h.X.attn.c_attn.weight -> transformer.h.X._original_component.attn._original_component.c_attn._original_component.weight
+                # Pattern: transformer.h.X.attn.c_attn.weight -> transformer.h.X._original_component.attn._original_component.c_attn.weight
                 if "attn.c_attn" in hf_key:
-                    return f"transformer.h.{layer}._original_component.attn._original_component.c_attn._original_component.{parts[-1]}"
+                    return f"transformer.h.{layer}._original_component.attn._original_component.c_attn.{parts[-1]}"
 
-                # Pattern: transformer.h.X.attn.c_proj.weight -> transformer.h.X._original_component.attn._original_component.c_proj._original_component.weight
+                # Pattern: transformer.h.X.attn.c_proj.weight -> transformer.h.X._original_component.attn._original_component.c_proj.weight
                 elif "attn.c_proj" in hf_key:
-                    return f"transformer.h.{layer}._original_component.attn._original_component.c_proj._original_component.{parts[-1]}"
+                    return f"transformer.h.{layer}._original_component.attn._original_component.c_proj.{parts[-1]}"
 
                 # Pattern: transformer.h.X.mlp.c_fc.weight -> transformer.h.X._original_component.mlp._original_component.c_fc._original_component.weight
                 elif "mlp.c_fc" in hf_key:
@@ -1095,6 +1098,10 @@ class ArchitectureAdapter:
                 # Pattern: transformer.h.X.mlp.input.weight -> transformer.h.X._original_component.mlp.input._original_component.weight
                 elif "mlp.input" in hf_key:
                     return f"transformer.h.{layer}._original_component.mlp.input._original_component.{parts[-1]}"
+
+                # Pattern: transformer.h.X.mlp.in.weight -> transformer.h.X._original_component.mlp.in._original_component.weight
+                elif "mlp.in" in hf_key:
+                    return f"transformer.h.{layer}._original_component.mlp.in._original_component.{parts[-1]}"
 
                 # Pattern: transformer.h.X.mlp.out.weight -> transformer.h.X._original_component.mlp.out._original_component.weight
                 elif "mlp.out" in hf_key:
@@ -1137,3 +1144,307 @@ class ArchitectureAdapter:
 
         # If no pattern matches, return the original key
         return hf_key
+
+    def convert_hf_key_to_tl_key(self, hf_key: str) -> str:
+        """Convert a HuggingFace-style key to TransformerLens format key using component mapping.
+
+        The component mapping keys ARE the TL format names (e.g., "embed", "pos_embed", "blocks").
+        The component.name is the HF path (e.g., "transformer.wte").
+
+        Args:
+            hf_key: The HuggingFace-style key (e.g., "transformer.wte.weight")
+
+        Returns:
+            The TransformerLens format key (e.g., "embed.weight")
+        """
+        if self.component_mapping is None:
+            # If no component mapping, return original key
+            return hf_key
+
+        # Check top-level components first
+        for tl_name, component in self.component_mapping.items():
+            if tl_name == "blocks":
+                continue  # Handle blocks separately
+
+            # The component.name is the HF path (e.g., "transformer.wte")
+            hf_path = component.name
+
+            # Check if the key starts with this component's HF path
+            if hf_path is not None and hf_key.startswith(hf_path + "."):
+                # Extract the parameter name (e.g., "weight", "bias")
+                param = hf_key[len(hf_path) + 1 :]
+                return f"{tl_name}.{param}"
+
+        # Handle blocks (transformer layers)
+        blocks_component = self.component_mapping.get("blocks")
+        if blocks_component:
+            # The blocks component name is the HF prefix (e.g., "transformer.h")
+            hf_blocks_prefix = blocks_component.name
+
+            # Check if this is a block component
+            if hf_blocks_prefix is not None and hf_key.startswith(hf_blocks_prefix + "."):
+                # Extract layer number and rest of path
+                # e.g., "transformer.h.0.ln_1.weight" -> "0.ln_1.weight"
+                rest = hf_key[len(hf_blocks_prefix) + 1 :]
+                parts = rest.split(".", 1)
+
+                if len(parts) >= 2 and parts[0].isdigit():
+                    layer_idx = parts[0]
+                    subkey = parts[1]
+
+                    # Now check submodules within blocks
+                    if hasattr(blocks_component, "submodules"):
+                        for tl_subname, subcomponent in blocks_component.submodules.items():
+                            # The subcomponent.name is the HF path relative to the block
+                            # e.g., "ln_1" for LayerNorm
+                            hf_subpath = subcomponent.name
+
+                            if hf_subpath is not None and subkey.startswith(hf_subpath + "."):
+                                # Extract parameter name
+                                param = subkey[len(hf_subpath) + 1 :]
+                                return f"blocks.{layer_idx}.{tl_subname}.{param}"
+
+                            # Also check for nested submodules (e.g., attn.q, mlp.in)
+                            if hasattr(subcomponent, "submodules"):
+                                for tl_nested_name, nested_comp in subcomponent.submodules.items():
+                                    hf_nested_path = f"{hf_subpath}.{nested_comp.name}"
+
+                                    if subkey.startswith(hf_nested_path + "."):
+                                        param = subkey[len(hf_nested_path) + 1 :]
+                                        return f"blocks.{layer_idx}.{tl_subname}.{tl_nested_name}.{param}"
+
+        # If no mapping found, return original key
+        return hf_key
+
+    def setup_component_testing(self, hf_model: RemoteModel, bridge_model: Any = None) -> None:
+        """Set up model-specific references needed for component testing.
+
+        This hook is called after the adapter is created and has access to the HF model.
+        Subclasses can override this to configure bridges with model-specific components
+        (e.g., rotary embeddings, normalization parameters) needed for get_random_inputs().
+
+        Args:
+            hf_model: The HuggingFace model instance
+            bridge_model: Optional TransformerBridge model instance (for configuring actual bridges)
+
+        Note:
+            This is a no-op in the base class. Override in subclasses as needed.
+        """
+        pass
+
+    def enable_ht_computation_for_bridge(self, bridge_model):
+        """Enable HT-style computation for bridge components.
+
+        This extracts weights from HF components and sets them on bridge components
+        using set_processed_weights(), which triggers HT-style einsum computation.
+
+        Args:
+            bridge_model: The TransformerBridge model
+        """
+        for layer_idx, block in enumerate(bridge_model.blocks):
+            hf_block = block.original_component
+
+            # Enable HT computation for attention
+            if hasattr(block, "attn") and hasattr(hf_block, "attn"):
+                self._enable_ht_attention(block.attn, hf_block.attn)
+
+            # Enable HT computation for MLP
+            if hasattr(block, "mlp") and hasattr(hf_block, "mlp"):
+                self._enable_ht_mlp(block.mlp, hf_block.mlp)
+
+    def _enable_ht_attention(self, attn_bridge, hf_attn):
+        """Enable HT computation for attention (architecture-agnostic).
+
+        Detects the architecture by checking which weight attributes exist.
+        """
+        # Get n_heads from config (different architectures use different names)
+        n_heads = getattr(
+            self.cfg,
+            "n_heads",
+            getattr(self.cfg, "n_head", getattr(self.cfg, "num_attention_heads", None)),
+        )
+        # Get d_model from config
+        d_model = getattr(
+            self.cfg, "d_model", getattr(self.cfg, "n_embd", getattr(self.cfg, "hidden_size", None))
+        )
+
+        if n_heads is None or d_model is None:
+            raise RuntimeError(f"Could not determine n_heads or d_model from config: {self.cfg}")
+
+        d_head = d_model // n_heads
+
+        # Detect architecture and extract weights
+        if hasattr(hf_attn, "c_attn"):
+            # GPT-2 style: combined c_attn for Q, K, V
+            W_Q, W_K, W_V, b_Q, b_K, b_V = self._extract_qkv_gpt2_style(
+                hf_attn.c_attn, n_heads, d_model, d_head
+            )
+            W_O, b_O = self._extract_output_proj(hf_attn.c_proj, n_heads, d_head, d_model)
+
+        elif (
+            hasattr(hf_attn, "q_proj") and hasattr(hf_attn, "k_proj") and hasattr(hf_attn, "v_proj")
+        ):
+            # GPT-Neo/J, LLaMA style: separate q_proj, k_proj, v_proj
+            W_Q, b_Q = self._extract_linear_ht_format(hf_attn.q_proj, n_heads, d_head, d_model)
+            W_K, b_K = self._extract_linear_ht_format(hf_attn.k_proj, n_heads, d_head, d_model)
+            W_V, b_V = self._extract_linear_ht_format(hf_attn.v_proj, n_heads, d_head, d_model)
+
+            out_proj = hf_attn.out_proj if hasattr(hf_attn, "out_proj") else hf_attn.o_proj
+            W_O, b_O = self._extract_output_proj(out_proj, n_heads, d_head, d_model)
+
+        elif hasattr(hf_attn, "query_key_value"):
+            # Pythia/GPT-NeoX style: combined query_key_value
+            W_Q, W_K, W_V, b_Q, b_K, b_V = self._extract_qkv_neox_style(
+                hf_attn.query_key_value, n_heads, d_model, d_head
+            )
+            W_O, b_O = self._extract_output_proj(hf_attn.dense, n_heads, d_head, d_model)
+
+        else:
+            raise ValueError(
+                f"Unsupported attention architecture. Module has attributes: {dir(hf_attn)}"
+            )
+
+        # Use existing infrastructure
+        attn_bridge.set_processed_weights(W_Q, W_K, W_V, W_O, b_Q, b_K, b_V, b_O)
+
+        # Disable hook conversions since processed weights produce correct shapes
+        self._disable_hook_conversions(attn_bridge)
+
+    def _enable_ht_mlp(self, mlp_bridge, hf_mlp):
+        """Enable HT computation for MLP (architecture-agnostic)."""
+        # Detect architecture and extract weights
+        if hasattr(hf_mlp, "c_fc") and hasattr(hf_mlp, "c_proj"):
+            # GPT-2 style
+            W_in = hf_mlp.c_fc.weight.data
+            b_in = hf_mlp.c_fc.bias.data if hasattr(hf_mlp.c_fc, "bias") else None
+            W_out = hf_mlp.c_proj.weight.data
+            b_out = hf_mlp.c_proj.bias.data if hasattr(hf_mlp.c_proj, "bias") else None
+
+        elif hasattr(hf_mlp, "fc_in") and hasattr(hf_mlp, "fc_out"):
+            # GPT-Neo/J style
+            W_in = hf_mlp.fc_in.weight.data.T
+            b_in = hf_mlp.fc_in.bias.data if hasattr(hf_mlp.fc_in, "bias") else None
+            W_out = hf_mlp.fc_out.weight.data.T
+            b_out = hf_mlp.fc_out.bias.data if hasattr(hf_mlp.fc_out, "bias") else None
+
+        elif hasattr(hf_mlp, "dense_h_to_4h") and hasattr(hf_mlp, "dense_4h_to_h"):
+            # Pythia/GPT-NeoX style
+            W_in = hf_mlp.dense_h_to_4h.weight.data.T
+            b_in = hf_mlp.dense_h_to_4h.bias.data if hasattr(hf_mlp.dense_h_to_4h, "bias") else None
+            W_out = hf_mlp.dense_4h_to_h.weight.data.T
+            b_out = (
+                hf_mlp.dense_4h_to_h.bias.data if hasattr(hf_mlp.dense_4h_to_h, "bias") else None
+            )
+
+        elif (
+            hasattr(hf_mlp, "gate_proj")
+            and hasattr(hf_mlp, "up_proj")
+            and hasattr(hf_mlp, "down_proj")
+        ):
+            # LLaMA style
+            W_in = hf_mlp.up_proj.weight.data.T
+            b_in = hf_mlp.up_proj.bias.data if hasattr(hf_mlp.up_proj, "bias") else None
+            W_out = hf_mlp.down_proj.weight.data.T
+            b_out = hf_mlp.down_proj.bias.data if hasattr(hf_mlp.down_proj, "bias") else None
+
+        else:
+            raise ValueError(f"Unsupported MLP architecture. Module has attributes: {dir(hf_mlp)}")
+
+        mlp_bridge.set_processed_weights(W_in, W_out, b_in, b_out)
+
+    def _extract_qkv_gpt2_style(self, c_attn, n_heads, d_model, d_head):
+        """Extract Q, K, V weights from GPT-2 style combined c_attn.
+
+        GPT-2 uses Conv1D which stores weights as [in_features, out_features] = [d_model, 3*d_model].
+        We need to split and reshape to [n_heads, d_model, d_head] format for HookedTransformer.
+        """
+        import einops
+
+        # Conv1D weight is [d_model, 3*d_model]
+        W = c_attn.weight.data
+
+        # Split into Q, K, V along the output dimension
+        W_Q, W_K, W_V = torch.tensor_split(W, 3, dim=1)  # Each is [d_model, d_model]
+
+        # Reshape to [n_heads, d_model, d_head] using einops
+        # Input shape: [d_model, d_model] = [m, i*h]
+        # Output shape: [n_heads, d_model, d_head] = [i, m, h]
+        W_Q = einops.rearrange(W_Q, "m (i h)->i m h", i=n_heads)
+        W_K = einops.rearrange(W_K, "m (i h)->i m h", i=n_heads)
+        W_V = einops.rearrange(W_V, "m (i h)->i m h", i=n_heads)
+
+        # Handle bias
+        qkv_bias = c_attn.bias.data
+        qkv_bias = einops.rearrange(
+            qkv_bias,
+            "(qkv index head)->qkv index head",
+            qkv=3,
+            index=n_heads,
+            head=d_head,
+        )
+        b_Q = qkv_bias[0]
+        b_K = qkv_bias[1]
+        b_V = qkv_bias[2]
+
+        return W_Q, W_K, W_V, b_Q, b_K, b_V
+
+    def _extract_qkv_neox_style(self, query_key_value, n_heads, d_model, d_head):
+        """Extract Q, K, V weights from GPT-NeoX style combined query_key_value."""
+        qkv_weight = query_key_value.weight.data
+        qkv_bias = query_key_value.bias.data if hasattr(query_key_value, "bias") else None
+
+        qkv_weight = qkv_weight.view(3, d_model, d_model)
+
+        W_Q = qkv_weight[0].T.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
+        W_K = qkv_weight[1].T.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
+        W_V = qkv_weight[2].T.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
+
+        if qkv_bias is not None:
+            qkv_bias = qkv_bias.view(3, d_model)
+            b_Q = qkv_bias[0].view(n_heads, d_head).contiguous()
+            b_K = qkv_bias[1].view(n_heads, d_head).contiguous()
+            b_V = qkv_bias[2].view(n_heads, d_head).contiguous()
+        else:
+            b_Q = b_K = b_V = None
+
+        return W_Q, W_K, W_V, b_Q, b_K, b_V
+
+    def _extract_linear_ht_format(self, linear_module, n_heads, d_head, d_model):
+        """Extract weights from a linear module and convert to HT format."""
+        weight = linear_module.weight.data
+        bias = linear_module.bias.data if hasattr(linear_module, "bias") else None
+
+        W = weight.T.view(n_heads, d_head, d_model).transpose(1, 2).contiguous()
+        b = bias.view(n_heads, d_head).contiguous() if bias is not None else None
+
+        return W, b
+
+    def _extract_output_proj(self, out_proj, n_heads, d_head, d_model):
+        """Extract output projection weights in HT format.
+
+        Returns W_O in [n_heads, d_head, d_model] format for HookedTransformer compatibility.
+
+        For Conv1D (GPT-2), weight is stored as [d_model, d_model] = [nx, nf].
+        For Linear, weight is stored as [d_model, d_model] = [out_features, in_features].
+        """
+        weight = out_proj.weight.data
+        bias = out_proj.bias.data if hasattr(out_proj, "bias") else None
+
+        # W_O in [n_heads, d_head, d_model] format for HookedTransformer
+        W_O = weight.view(n_heads, d_head, d_model).contiguous()
+        b_O = bias.contiguous() if bias is not None else None
+
+        return W_O, b_O
+
+    def _disable_hook_conversions(self, attn_bridge):
+        """Disable hook conversions for attention submodules.
+
+        Note: In no_processing mode, we DON'T disable conversions because Q/K/V hooks need
+        to convert from 3D [batch, seq, d_model] to 4D [batch, seq, n_heads, d_head].
+        We also preserve o.hook_in.hook_conversion (hook_z).
+
+        This method is kept for potential future use but currently does nothing in no_processing mode.
+        """
+        # Don't disable any conversions in no_processing mode
+        # All hooks (q, k, v, o) need their conversions to work correctly
+        pass

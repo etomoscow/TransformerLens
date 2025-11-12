@@ -10,7 +10,9 @@ import os
 import torch
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
+    AutoModelForSeq2SeqLM,
     AutoTokenizer,
     PreTrainedTokenizerBase,
 )
@@ -51,6 +53,28 @@ def map_default_transformer_lens_config(hf_config):
     elif hasattr(hf_config, "num_heads"):  # T5-style
         tl_config.n_heads = hf_config.num_heads
 
+    # Map number of key-value heads for GQA models
+    if hasattr(hf_config, "num_key_value_heads") and hf_config.num_key_value_heads is not None:
+        # Only set if different from n_heads (i.e., actually using GQA)
+        # Convert to Python int/float to avoid Tensor boolean comparison issues
+        try:
+            # Handle both Tensor and numeric types
+            num_kv_heads = hf_config.num_key_value_heads
+            if hasattr(num_kv_heads, "item"):  # Tensor
+                num_kv_heads = num_kv_heads.item()
+            num_kv_heads = int(num_kv_heads)
+
+            num_heads = tl_config.n_heads
+            if hasattr(num_heads, "item"):  # Tensor
+                num_heads = num_heads.item()
+            num_heads = int(num_heads)
+
+            if num_kv_heads != num_heads:
+                tl_config.n_key_value_heads = num_kv_heads
+        except (TypeError, ValueError, AttributeError):
+            # If conversion fails, skip GQA mapping
+            pass
+
     # Map number of layers
     if hasattr(hf_config, "n_layer"):  # GPT2-style
         tl_config.n_layers = hf_config.n_layer
@@ -79,9 +103,14 @@ def map_default_transformer_lens_config(hf_config):
     elif hasattr(tl_config, "d_model"):  # Default to 4x for GPT2-style
         tl_config.d_mlp = getattr(hf_config, "n_inner", 4 * tl_config.d_model)
 
-    # Calculate d_head if we have both d_model and n_heads
+    # Map head dimension (prefer calculation from d_model // n_heads over explicit head_dim)
+    # This ensures correctness for models with incorrect head_dim in HF config (e.g., Gemma-3)
     if hasattr(tl_config, "d_model") and hasattr(tl_config, "n_heads"):
+        # Calculate d_head from d_model and n_heads
         tl_config.d_head = tl_config.d_model // tl_config.n_heads
+    elif hasattr(hf_config, "head_dim") and hf_config.head_dim is not None:
+        # Fallback to explicit head_dim from HF config if calculation not possible
+        tl_config.d_head = hf_config.head_dim
 
     # Set activation function
     if hasattr(hf_config, "activation_function"):
@@ -94,6 +123,10 @@ def map_default_transformer_lens_config(hf_config):
     # Set number of experts per token
     if hasattr(hf_config, "num_experts_per_tok"):
         tl_config.experts_per_token = hf_config.num_experts_per_tok
+
+    # Set sliding window size for models with local attention
+    if hasattr(hf_config, "sliding_window") and hf_config.sliding_window is not None:
+        tl_config.sliding_window = hf_config.sliding_window
 
     # Set common defaults for transformer models
     tl_config.default_prepend_bos = True
@@ -171,6 +204,51 @@ def determine_architecture_from_hf_config(hf_config):
     )
 
 
+def get_hf_model_class_for_architecture(architecture: str):
+    """Determine the correct HuggingFace AutoModel class to use for loading.
+
+    Args:
+        architecture: The architecture name (e.g., "GPT2LMHeadModel", "T5ForConditionalGeneration")
+
+    Returns:
+        The appropriate HuggingFace AutoModel class to use
+
+    Raises:
+        ValueError: If architecture is not recognized
+    """
+    # Encoder-decoder models (seq2seq)
+    seq2seq_architectures = {
+        "T5ForConditionalGeneration",
+        "BartForConditionalGeneration",
+        "MBartForConditionalGeneration",
+        "MarianMTModel",
+        "PegasusForConditionalGeneration",
+        "BlenderbotForConditionalGeneration",
+        "BlenderbotSmallForConditionalGeneration",
+    }
+
+    # Masked language models (BERT-style)
+    masked_lm_architectures = {
+        "BertForMaskedLM",
+        "RobertaForMaskedLM",
+        "DistilBertForMaskedLM",
+        "AlbertForMaskedLM",
+        "ElectraForMaskedLM",
+    }
+
+    # Causal language models (GPT-style) - this is the default
+    # Includes: GPT2, LLaMA, Mistral, Mixtral, Gemma, etc.
+
+    if architecture in seq2seq_architectures:
+        return AutoModelForSeq2SeqLM
+    elif architecture in masked_lm_architectures:
+        # For now, use AutoModel for masked LM since they may need special handling
+        return AutoModel
+    else:
+        # Default to causal LM for GPT-style models
+        return AutoModelForCausalLM
+
+
 def boot(
     model_name: str,
     hf_config_overrides: dict | None = None,
@@ -220,6 +298,7 @@ def boot(
     bridge_config = TransformerBridgeConfig.from_dict(tl_config.__dict__)
     bridge_config.architecture = architecture
     bridge_config.model_name = model_name  # Set the actual model name instead of default "custom"
+    bridge_config.dtype = dtype  # Set the dtype from the boot parameter
 
     adapter = ArchitectureAdapterFactory.select_architecture_adapter(bridge_config)
 
@@ -230,12 +309,23 @@ def boot(
     # Add device information to the config
     adapter.cfg.device = str(device)
 
-    # Load the model from HuggingFace using the original config
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        config=hf_config,
-        torch_dtype=dtype,
-    )
+    # Determine the correct HuggingFace model class based on architecture
+    model_class = get_hf_model_class_for_architecture(architecture)
+
+    # Prepare model loading kwargs
+    model_kwargs = {
+        "config": hf_config,
+        "torch_dtype": dtype,
+    }
+
+    # Add attn_implementation if specified in config
+    # This allows architectures to specify their preferred attention implementation
+    # (e.g., 'sdpa' for Scaled Dot Product Attention, 'eager' for basic implementation)
+    if hasattr(adapter.cfg, "attn_implementation") and adapter.cfg.attn_implementation is not None:
+        model_kwargs["attn_implementation"] = adapter.cfg.attn_implementation
+
+    # Load the model from HuggingFace using the appropriate model class
+    hf_model = model_class.from_pretrained(model_name, **model_kwargs)
 
     # Move model to device
     if device is not None:
