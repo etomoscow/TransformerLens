@@ -86,7 +86,9 @@ class NormalizationBridge(GeneralizedComponent):
             result = self._hf_autograd_forward_with_hooks(hidden_states)
         else:
             # Standard normalization behavior with learnable parameters
-            if not getattr(self.config, "uses_rms_norm", False):
+            # OPTIMIZATION: Cache config attributes to avoid repeated getattr calls
+            uses_rms_norm = getattr(self.config, "uses_rms_norm", False)
+            if not uses_rms_norm:
                 # Only center if not using RMSNorm
                 hidden_states = hidden_states - hidden_states.mean(-1, keepdim=True)
 
@@ -100,7 +102,7 @@ class NormalizationBridge(GeneralizedComponent):
             hidden_states = self.hook_normalized(hidden_states / scale).to(dtype)
 
             # Apply learnable parameters if not folding layer norms
-            if getattr(self.config, "uses_rms_norm", False):
+            if uses_rms_norm:
                 # No bias if using RMSNorm
                 hidden_states = hidden_states * self.weight
             else:

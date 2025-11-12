@@ -373,36 +373,39 @@ class GeneralizedComponent(nn.Module):
 
     def __getattr__(self, name: str) -> Any:
         # Only called if attribute not found through normal lookup
-        # First check if it's a module attribute (like hook_in, hook_out)
-        if hasattr(self, "_modules") and name in self._modules:
-            return self._modules[name]
+        # OPTIMIZATION: Check most common case first (module attributes)
+        # Avoid hasattr() which is expensive - use direct dict access
+        modules = object.__getattribute__(self, "__dict__").get("_modules")
+        if modules is not None and name in modules:
+            return modules[name]
 
         # Avoid recursion by checking if we're looking for original_component
         if name == "original_component":
             # This should not happen since original_component is a property
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-        # Check if this is a submodule that should be registered as a PyTorch module
-        # but hasn't been yet. This prevents PyTorch's add_module from failing.
-        if hasattr(self, "submodules") and name in self.submodules:
+        # OPTIMIZATION: Check submodules - use direct dict access instead of hasattr
+        submodules = object.__getattribute__(self, "__dict__").get("submodules")
+        if submodules is not None and name in submodules:
             # Don't delegate to original component for submodules
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
         # Try to get from original_component if it exists
-        original_component = self._modules.get("_original_component", None)
-        if original_component is not None:
-            try:
-                name_split = name.split(".")
-
-                if len(name_split) > 1:
-                    current = getattr(original_component, name_split[0])
-                    for part in name_split[1:]:
-                        current = getattr(current, part)
-                    return current
-                else:
-                    return getattr(original_component, name)
-            except AttributeError:
-                pass
+        if modules is not None:
+            original_component = modules.get("_original_component")
+            if original_component is not None:
+                try:
+                    # OPTIMIZATION: Check for dots first to avoid split if not needed
+                    if "." in name:
+                        name_split = name.split(".")
+                        current = getattr(original_component, name_split[0])
+                        for part in name_split[1:]:
+                            current = getattr(current, part)
+                        return current
+                    else:
+                        return getattr(original_component, name)
+                except AttributeError:
+                    pass
 
         # If we get here, the attribute wasn't found anywhere
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
