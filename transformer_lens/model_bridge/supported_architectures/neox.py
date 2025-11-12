@@ -34,8 +34,9 @@ class NeoxArchitectureAdapter(ArchitectureAdapter):
             cfg: The configuration object.
         """
         super().__init__(cfg)
-
-        self.cfg.default_prepend_bos = False
+        # Note: We DON'T set default_prepend_bos to match HookedTransformer's default behavior
+        # NeoX/Pythia models use rotary position embeddings
+        self.cfg.positional_embedding_type = "rotary"
 
         self.conversion_rules = HookConversionSet(
             {
@@ -146,6 +147,8 @@ class NeoxArchitectureAdapter(ArchitectureAdapter):
                         name="attention",
                         config=self.cfg,
                         split_qkv_matrix=self.split_qkv_matrix,
+                        requires_attention_mask=True,  # GPTNeoX/Pythia requires attention_mask
+                        requires_position_embeddings=True,  # GPTNeoX/Pythia requires position_embeddings (rotary)
                         submodules={
                             "qkv": LinearBridge(name="query_key_value"),
                             "o": LinearBridge(name="dense"),
