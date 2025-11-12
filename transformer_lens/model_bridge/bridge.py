@@ -4105,7 +4105,7 @@ class TransformerBridge(nn.Module):
                 # Navigate to the actual parameter in the model
                 try:
                     parts = key.split(".")
-                    obj = self.original_model
+                    obj: Any = self.original_model
                     for part in parts[:-1]:
                         if part.isdigit():
                             obj = obj[int(part)]
