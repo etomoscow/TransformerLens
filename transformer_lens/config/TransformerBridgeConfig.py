@@ -22,6 +22,7 @@ class TransformerBridgeConfig(TransformerLensConfig):
         d_head: int,
         n_layers: int,
         n_ctx: int,
+        d_vocab: int = -1,
         architecture: Optional[str] = None,
         tokenizer_prepends_bos: bool = True,
         default_padding_side: Optional[str] = None,
@@ -68,6 +69,7 @@ class TransformerBridgeConfig(TransformerLensConfig):
         load_in_4bit: bool = False,
         num_experts: Optional[int] = None,
         experts_per_token: Optional[int] = None,
+        n_key_value_heads: Optional[int] = None,
         relative_attention_max_distance: Optional[int] = None,
         relative_attention_num_buckets: Optional[int] = None,
         decoder_start_token_id: Optional[int] = None,
@@ -79,10 +81,19 @@ class TransformerBridgeConfig(TransformerLensConfig):
         NTK_by_parts_low_freq_factor: float = 1.0,
         NTK_by_parts_high_freq_factor: float = 4.0,
         NTK_by_parts_factor: float = 8.0,
+        eps_attr: str = "eps",
+        attn_implementation: Optional[str] = None,
         **kwargs,
     ):
         """Initialize TransformerBridgeConfig."""
-        super().__init__(d_model=d_model, d_head=d_head, n_layers=n_layers, n_ctx=n_ctx, **kwargs)
+        super().__init__(
+            d_model=d_model,
+            d_head=d_head,
+            n_layers=n_layers,
+            n_ctx=n_ctx,
+            d_vocab=d_vocab,
+            **kwargs,
+        )
 
         # Architecture information for adapter selection
         self.architecture = architecture
@@ -137,6 +148,7 @@ class TransformerBridgeConfig(TransformerLensConfig):
         self.load_in_4bit = load_in_4bit
         self.num_experts = num_experts
         self.experts_per_token = experts_per_token
+        self.n_key_value_heads = n_key_value_heads
         self.relative_attention_max_distance = relative_attention_max_distance
         self.relative_attention_num_buckets = relative_attention_num_buckets
         self.decoder_start_token_id = decoder_start_token_id
@@ -148,6 +160,8 @@ class TransformerBridgeConfig(TransformerLensConfig):
         self.NTK_by_parts_low_freq_factor = NTK_by_parts_low_freq_factor
         self.NTK_by_parts_high_freq_factor = NTK_by_parts_high_freq_factor
         self.NTK_by_parts_factor = NTK_by_parts_factor
+        self.eps_attr = eps_attr
+        self.attn_implementation = attn_implementation
 
         self.__post_init__()
 
