@@ -2161,7 +2161,7 @@ class TransformerBridge(nn.Module):
             )
 
     def _load_mlp_weights(self, mlp_component, layer_idx, processed_weights, verbose: bool = False):
-        """Load MLP weights into the MLPBridge or JointGateUpMLPBridge component.
+        """Load MLP weights into the MLPBridge or GatedMLPBridge component.
 
         Args:
             verbose: If True, print detailed progress messages. Default: False

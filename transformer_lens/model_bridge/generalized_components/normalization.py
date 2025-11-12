@@ -170,8 +170,19 @@ class NormalizationBridge(GeneralizedComponent):
                 x_centered = x
 
             # Compute scale for hook
-            eps = getattr(self.config, "eps", 1e-5)
-            scale = (x_centered.pow(2).mean(-1, keepdim=True) + eps).sqrt()
+            # Get eps from the original HF component if available, otherwise from config
+            eps_tensor = getattr(self.original_component, "eps", None)
+            if eps_tensor is None:
+                eps_tensor = getattr(self.original_component, "variance_epsilon", None)
+            if eps_tensor is None:
+                eps_value: float | torch.Tensor = getattr(self.config, "eps", 1e-5)
+            else:
+                eps_value = eps_tensor
+
+            if isinstance(eps_value, torch.Tensor):
+                scale = (x_centered.pow(2).mean(-1, keepdim=True) + eps_value).sqrt()
+            else:
+                scale = (x_centered.pow(2).mean(-1, keepdim=True) + float(eps_value)).sqrt()
 
             # Compute normalized value for hook
             x_normalized = x_centered / scale

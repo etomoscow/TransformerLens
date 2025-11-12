@@ -11,8 +11,8 @@ from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapt
 from transformer_lens.model_bridge.generalized_components import (
     BlockBridge,
     EmbeddingBridge,
+    GatedMLPBridge,
     LinearBridge,
-    MLPBridge,
     RMSNormalizationBridge,
     RotaryEmbeddingBridge,
     UnembeddingBridge,
@@ -36,10 +36,9 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
         # Gemma 3 uses rotary positional embeddings (dual RoPE)
         self.cfg.positional_embedding_type = "rotary"
 
-        # Use SDPA for numerical consistency with HuggingFace
-        # Only set if not already configured
-        if self.cfg.attn_implementation is None:
-            self.cfg.attn_implementation = "sdpa"
+        # Use eager attention to support output_attentions for hook_attn_scores and hook_pattern
+        # SDPA doesn't support output_attentions, which is required for HookedTransformer compatibility
+        self.cfg.attn_implementation = "eager"
 
         self.conversion_rules = HookConversionSet(
             {
@@ -83,9 +82,9 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
                     "model.layers.{i}.self_attn.o_proj.weight",
                     RearrangeHookConversion("m (n h) -> n h m", n=self.cfg.n_heads),
                 ),
-                "blocks.{i}.mlp.in": "model.layers.{i}.mlp.up_proj.weight.T",
-                "blocks.{i}.mlp.gate": "model.layers.{i}.mlp.gate_proj.weight.T",
-                "blocks.{i}.mlp.out": "model.layers.{i}.mlp.down_proj.weight.T",
+                "blocks.{i}.mlp.in": "model.layers.{i}.mlp.up_proj.weight",
+                "blocks.{i}.mlp.gate": "model.layers.{i}.mlp.gate_proj.weight",
+                "blocks.{i}.mlp.out": "model.layers.{i}.mlp.down_proj.weight",
                 "ln_final.w": "model.norm.weight",
                 "unembed.u": "lm_head.weight.T",  # Not shared with embedding
             }
@@ -124,8 +123,9 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
                             "k_norm": RMSNormalizationBridge(name="k_norm", config=self.cfg),
                         },
                     ),
-                    "mlp": MLPBridge(
+                    "mlp": GatedMLPBridge(
                         name="mlp",
+                        config=self.cfg,
                         submodules={
                             "gate": LinearBridge(name="gate_proj"),
                             "in": LinearBridge(name="up_proj"),
