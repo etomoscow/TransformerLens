@@ -563,7 +563,7 @@ def run_benchmark_suite(
                 # Reset hooks to prevent handle leaks
                 if hasattr(bridge_processed, "reset_hooks"):
                     bridge_processed.reset_hooks()
-                if hasattr(ht_model_processed, "reset_hooks"):
+                if ht_model_processed is not None and hasattr(ht_model_processed, "reset_hooks"):
                     ht_model_processed.reset_hooks()
                 gc.collect()  # Force cleanup after hook benchmarks
             except Exception as e:
@@ -612,7 +612,7 @@ def run_benchmark_suite(
                 # Reset hooks to prevent handle leaks
                 if hasattr(bridge_processed, "reset_hooks"):
                     bridge_processed.reset_hooks()
-                if hasattr(ht_model_processed, "reset_hooks"):
+                if ht_model_processed is not None and hasattr(ht_model_processed, "reset_hooks"):
                     ht_model_processed.reset_hooks()
                 gc.collect()  # Force cleanup after gradient benchmarks
             except Exception as e:
@@ -701,7 +701,7 @@ def run_benchmark_suite(
                 # Reset hooks to prevent handle leaks
                 if hasattr(bridge_processed, "reset_hooks"):
                     bridge_processed.reset_hooks()
-                if hasattr(ht_model_processed, "reset_hooks"):
+                if ht_model_processed is not None and hasattr(ht_model_processed, "reset_hooks"):
                     ht_model_processed.reset_hooks()
                 gc.collect()  # Force cleanup after cache benchmarks
             except Exception as e:
