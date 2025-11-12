@@ -152,23 +152,47 @@ def get_bridge_params(bridge) -> Dict[str, torch.Tensor]:
                 )
 
             if block.attn.k.bias is not None:
+                # For GQA models, use n_key_value_heads instead of n_heads
+                n_kv_heads = bridge.cfg.n_heads
+                if hasattr(bridge.cfg, "n_key_value_heads") and isinstance(
+                    bridge.cfg.n_key_value_heads, int
+                ):
+                    n_kv_heads = bridge.cfg.n_key_value_heads
                 params_dict[f"blocks.{layer_idx}.attn.b_K"] = block.attn.k.bias.reshape(
-                    bridge.cfg.n_heads, -1
+                    n_kv_heads, -1
                 )
             else:
                 device, dtype = _get_device_dtype()
+                # For GQA models, use n_key_value_heads instead of n_heads
+                n_kv_heads = bridge.cfg.n_heads
+                if hasattr(bridge.cfg, "n_key_value_heads") and isinstance(
+                    bridge.cfg.n_key_value_heads, int
+                ):
+                    n_kv_heads = bridge.cfg.n_key_value_heads
                 params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
-                    bridge.cfg.n_heads, bridge.cfg.d_head, device=device, dtype=dtype
+                    n_kv_heads, bridge.cfg.d_head, device=device, dtype=dtype
                 )
 
             if block.attn.v.bias is not None:
+                # For GQA models, use n_key_value_heads instead of n_heads
+                n_kv_heads = bridge.cfg.n_heads
+                if hasattr(bridge.cfg, "n_key_value_heads") and isinstance(
+                    bridge.cfg.n_key_value_heads, int
+                ):
+                    n_kv_heads = bridge.cfg.n_key_value_heads
                 params_dict[f"blocks.{layer_idx}.attn.b_V"] = block.attn.v.bias.reshape(
-                    bridge.cfg.n_heads, -1
+                    n_kv_heads, -1
                 )
             else:
                 device, dtype = _get_device_dtype()
+                # For GQA models, use n_key_value_heads instead of n_heads
+                n_kv_heads = bridge.cfg.n_heads
+                if hasattr(bridge.cfg, "n_key_value_heads") and isinstance(
+                    bridge.cfg.n_key_value_heads, int
+                ):
+                    n_kv_heads = bridge.cfg.n_key_value_heads
                 params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
-                    bridge.cfg.n_heads, bridge.cfg.d_head, device=device, dtype=dtype
+                    n_kv_heads, bridge.cfg.d_head, device=device, dtype=dtype
                 )
 
             if block.attn.o.bias is not None:
@@ -184,8 +208,15 @@ def get_bridge_params(bridge) -> Dict[str, torch.Tensor]:
             device, dtype = _get_device_dtype()
             expected_qkv_shape = (bridge.cfg.n_heads, bridge.cfg.d_model, bridge.cfg.d_head)
             expected_o_shape = (bridge.cfg.n_heads, bridge.cfg.d_head, bridge.cfg.d_model)
-            expected_qkv_bias_shape = (bridge.cfg.n_heads, bridge.cfg.d_head)
+            expected_q_bias_shape = (bridge.cfg.n_heads, bridge.cfg.d_head)
             expected_o_bias_shape = (bridge.cfg.d_model,)
+            # For GQA models, K and V biases use n_key_value_heads instead of n_heads
+            n_kv_heads = bridge.cfg.n_heads
+            if hasattr(bridge.cfg, "n_key_value_heads") and isinstance(
+                bridge.cfg.n_key_value_heads, int
+            ):
+                n_kv_heads = bridge.cfg.n_key_value_heads
+            expected_kv_bias_shape = (n_kv_heads, bridge.cfg.d_head)
 
             params_dict[f"blocks.{layer_idx}.attn.W_Q"] = torch.zeros(
                 *expected_qkv_shape, device=device, dtype=dtype
@@ -200,13 +231,13 @@ def get_bridge_params(bridge) -> Dict[str, torch.Tensor]:
                 *expected_o_shape, device=device, dtype=dtype
             )
             params_dict[f"blocks.{layer_idx}.attn.b_Q"] = torch.zeros(
-                *expected_qkv_bias_shape, device=device, dtype=dtype
+                *expected_q_bias_shape, device=device, dtype=dtype
             )
             params_dict[f"blocks.{layer_idx}.attn.b_K"] = torch.zeros(
-                *expected_qkv_bias_shape, device=device, dtype=dtype
+                *expected_kv_bias_shape, device=device, dtype=dtype
             )
             params_dict[f"blocks.{layer_idx}.attn.b_V"] = torch.zeros(
-                *expected_qkv_bias_shape, device=device, dtype=dtype
+                *expected_kv_bias_shape, device=device, dtype=dtype
             )
             params_dict[f"blocks.{layer_idx}.attn.b_O"] = torch.zeros(
                 *expected_o_bias_shape, device=device, dtype=dtype
