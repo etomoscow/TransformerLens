@@ -112,6 +112,10 @@ class ArchitectureAdapter:
         """
         current = model
         for part in path.split("."):
+            # If current is a GeneralizedComponent bridge, unwrap to get the original HF component
+            if isinstance(current, GeneralizedComponent) and hasattr(current, 'original_component') and current.original_component is not None:
+                current = current.original_component
+
             if part.isdigit():
                 current = current[int(part)]  # type: ignore[index]
             else:
@@ -147,7 +151,7 @@ class ArchitectureAdapter:
                     if subcomponent_bridge.name is None:
                         current = item
                     else:
-                        current = getattr(item, subcomponent_bridge.name)
+                        current = self.get_remote_component(item, subcomponent_bridge.name)
                     for i in range(3, len(parts)):
                         deeper_component_name = parts[i]
                         if deeper_component_name.isdigit() and current_bridge.is_list_item:
@@ -159,7 +163,7 @@ class ArchitectureAdapter:
                             if current_bridge.name is None:
                                 pass
                             else:
-                                current = getattr(current, current_bridge.name)
+                                current = self.get_remote_component(current, current_bridge.name)
                         else:
                             raise ValueError(
                                 f"Component {deeper_component_name} not found in {'.'.join(parts[:i])} components"
@@ -168,7 +172,7 @@ class ArchitectureAdapter:
                 elif subcomponent_bridge.name is None:
                     return item
                 else:
-                    return getattr(item, subcomponent_bridge.name)
+                    return self.get_remote_component(item, subcomponent_bridge.name)
             else:
                 raise ValueError(
                     f"Component {subcomponent_name} not found in {parts[0]} components"

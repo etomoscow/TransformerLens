@@ -314,7 +314,18 @@ class AttentionBridge(GeneralizedComponent):
             args = args[1:]
         output = self.original_component(*args, **kwargs)
         if isinstance(output, tuple) and len(output) >= 2:
-            output = (self.hook_out(output[0]), output[1])
+            # output[0] is attention output, output[1] is attention weights (pattern)
+            attn_output = self.hook_out(output[0])
+            attn_weights = output[1]
+
+            # Fire hook_pattern if attention weights are present
+            if isinstance(attn_weights, torch.Tensor):
+                attn_weights = self.hook_pattern(attn_weights)
+                # Also store for potential hook_attn_scores (before softmax)
+                # Note: Most HF implementations return post-softmax weights, so pattern == attn_scores for them
+                self.hook_attn_scores(attn_weights)
+
+            output = (attn_output, attn_weights)
         elif isinstance(output, tuple) and len(output) == 1:
             output = (self.hook_out(output[0]),)
         else:
