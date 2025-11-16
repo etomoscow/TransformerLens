@@ -1202,9 +1202,6 @@ class ProcessWeights:
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with LayerNorm folded into linear layers.
         """
-        # Make a copy to avoid modifying the original
-        state_dict = state_dict.copy()
-
         # Models that use Grouped Query Attention (Only Mistral at the time of writing) prefix their K/V weights and
         # biases with an underscore in order to distinguish them, but folding the LN into them still works the same,
         # so we just add the underscore if GQA is used (i.e. if `cfg.n_key_value_heads is specified`).
@@ -1243,9 +1240,6 @@ class ProcessWeights:
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with centered writing weights.
         """
-        # Make a copy to avoid modifying the original
-        state_dict = state_dict.copy()
-
         # Determine the actual format of the state_dict to avoid key mismatch
         layer = 0  # Use layer 0 for format detection
         uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(
@@ -1325,6 +1319,7 @@ class ProcessWeights:
                 except ValueError:
                     pos_embed_W_pos_key = None
 
+        print("embed_W_E_key", embed_W_E_key)
         # Validate that the embedding key exists before accessing it
         if embed_W_E_key not in state_dict:
             raise KeyError(
@@ -1509,9 +1504,6 @@ class ProcessWeights:
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with centered unembedding weights.
         """
-        # Make a copy to avoid modifying the original
-        state_dict = state_dict.copy()
-
         # Determine the actual format of the state_dict to avoid key mismatch
         uses_tl_format, uses_hf_format = ProcessWeights._detect_unembed_format(state_dict, adapter)
 
@@ -1607,9 +1599,6 @@ class ProcessWeights:
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with value biases folded into output bias.
         """
-        # Make a copy to avoid modifying the original
-        state_dict = state_dict.copy()
-
         # Determine the actual format of the state_dict to avoid key mismatch
         layer = 0  # Use layer 0 for format detection
         uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(
@@ -1853,9 +1842,6 @@ class ProcessWeights:
             getattr(cfg, "positional_embedding_type", "standard") != "rotary"
         ), "You can't refactor the QK circuit when using rotary embeddings (as the QK matrix depends on the position of the query and key)"
 
-        # Make a copy to avoid modifying the original
-        state_dict = state_dict.copy()
-
         # Determine the actual format of the state_dict to avoid key mismatch
         layer = 0  # Use layer 0 for format detection
         uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(
@@ -1990,34 +1976,32 @@ class ProcessWeights:
         Returns:
             Dict[str, torch.Tensor]: Fully processed state dict.
         """
-        processed_dict = state_dict.copy()
-
         if fold_ln:
             if getattr(cfg, "num_experts", None) and cfg.num_experts > 1:
                 # Skip for MoE models
                 pass
             elif getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"]:
-                processed_dict = ProcessWeights.fold_layer_norm(
-                    processed_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter
+                state_dict = ProcessWeights.fold_layer_norm(
+                    state_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter
                 )
             elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
-                processed_dict = ProcessWeights.fold_layer_norm(
-                    processed_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
+                state_dict = ProcessWeights.fold_layer_norm(
+                    state_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
                 )
 
         if center_writing_weights:
             if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and not getattr(
                 cfg, "final_rms", False
             ):
-                processed_dict = ProcessWeights.center_writing_weights(
-                    processed_dict, cfg, adapter=adapter
+                state_dict = ProcessWeights.center_writing_weights(
+                    state_dict, cfg, adapter=adapter
                 )
 
         if center_unembed:
-            processed_dict = ProcessWeights.center_unembed(processed_dict, adapter=adapter)
+            state_dict = ProcessWeights.center_unembed(state_dict, adapter=adapter)
 
         if fold_value_biases:
-            processed_dict = ProcessWeights.fold_value_biases(processed_dict, cfg, adapter=adapter)
+            state_dict = ProcessWeights.fold_value_biases(state_dict, cfg, adapter=adapter)
 
             # Re-center b_O after folding value biases
             # fold_value_biases adds to b_O (b_O_new = b_O + sum(b_V @ W_O)), which can make it non-centered
@@ -2028,7 +2012,7 @@ class ProcessWeights:
             ]:
                 # Determine format to find correct b_O keys
                 uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(
-                    processed_dict, 0, adapter
+                    state_dict, 0, adapter
                 )
 
                 for layer_idx in range(cfg.n_layers):
@@ -2044,16 +2028,16 @@ class ProcessWeights:
                         b_O_key = f"blocks.{layer_idx}.attn.b_O"
 
                     # Re-center b_O if it exists
-                    if b_O_key in processed_dict:
-                        b_O = processed_dict[b_O_key]
-                        processed_dict[b_O_key] = b_O - b_O.mean()
+                    if b_O_key in state_dict:
+                        b_O = state_dict[b_O_key]
+                        state_dict[b_O_key] = b_O - b_O.mean()
 
         if refactor_factored_attn_matrices:
-            processed_dict = ProcessWeights.refactor_factored_attn_matrices(
-                processed_dict, cfg, adapter=adapter
+            state_dict = ProcessWeights.refactor_factored_attn_matrices(
+                state_dict, cfg, adapter=adapter
             )
 
-        return processed_dict
+        return state_dict
 
     @staticmethod
     def extract_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
@@ -2085,7 +2069,7 @@ class ProcessWeights:
             clean_key = key
             while "._original_component" in clean_key:
                 clean_key = clean_key.replace("._original_component", "")
-            cleaned_state_dict[clean_key] = tensor.clone()
+            cleaned_state_dict[clean_key] = tensor
 
         return cleaned_state_dict
 
@@ -2317,7 +2301,7 @@ class ProcessWeights:
                 hf_key = hf_key.format(i=layer_idx)
 
             if hf_key in hf_state_dict:
-                tl_state_dict[tl_key] = hf_state_dict[hf_key].clone()
+                tl_state_dict[tl_key] = hf_state_dict[hf_key]
 
         elif isinstance(conversion_info, tuple) and len(conversion_info) == 2:
             # (hf_key, conversion_function) tuple

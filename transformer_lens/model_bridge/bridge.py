@@ -765,7 +765,7 @@ class TransformerBridge(nn.Module):
             self.clear_hook_registry()
             self._initialize_hook_registry()
         else:
-            self.process_compatibility_weights(
+            self.process_weights(
                 fold_ln=fold_ln,
                 center_writing_weights=center_writing_weights,
                 center_unembed=center_unembed,
@@ -786,10 +786,6 @@ class TransformerBridge(nn.Module):
 
         Note: This method is idempotent - can be called multiple times safely.
         """
-        if hasattr(self.adapter, "setup_hook_compatibility"):
-            self.adapter.setup_hook_compatibility(self)
-        elif hasattr(self.adapter, "setup_no_processing_hooks"):
-            self.adapter.setup_no_processing_hooks(self)
         blocks_to_process = []
         if hasattr(self, "blocks"):
             blocks_to_process.extend(self.blocks)
@@ -839,7 +835,7 @@ class TransformerBridge(nn.Module):
                         block.attn._ln1 = ln1
                         block.attn._expects_pre_ln1_input = True
 
-    def process_compatibility_weights(
+    def process_weights(
         self,
         verbose: bool = False,
         fold_ln: bool = True,
@@ -876,7 +872,7 @@ class TransformerBridge(nn.Module):
             clean_key = key
             while "._original_component" in clean_key:
                 clean_key = clean_key.replace("._original_component", "")
-            state_dict[clean_key] = value.clone()
+            state_dict[clean_key] = value
         adapter = self.adapter
         if adapter and hasattr(adapter, "preprocess_weights"):
             state_dict = adapter.preprocess_weights(state_dict)
@@ -892,40 +888,20 @@ class TransformerBridge(nn.Module):
                     )
             except (ValueError, KeyError):
                 pass
-        if fold_ln:
-            if verbose:
-                print("  Folding LayerNorm/RMSNorm...")
-            uses_rms_norm = (
-                getattr(self.cfg, "uses_rms_norm", False)
-                or getattr(self.cfg, "normalization_type", None) == "RMS"
-            )
-            state_dict = ProcessWeights.fold_layer_norm(
-                state_dict,
-                self.cfg,
-                fold_biases=not uses_rms_norm,
-                center_weights=center_writing_weights and (not uses_rms_norm),
-                adapter=adapter,
-            )
-        if center_writing_weights:
-            if verbose:
-                print("  Centering writing weights...")
-            state_dict = ProcessWeights.center_writing_weights(
-                state_dict, self.cfg, adapter=adapter
-            )
-        if center_unembed:
-            if verbose:
-                print("  Centering unembed...")
-            state_dict = ProcessWeights.center_unembed(state_dict, adapter=adapter)
-        if fold_value_biases:
-            if verbose:
-                print("  Folding value biases...")
-            state_dict = ProcessWeights.fold_value_biases(state_dict, self.cfg, adapter=adapter)
-        if refactor_factored_attn_matrices:
-            if verbose:
-                print("  Refactoring attention matrices...")
-            state_dict = ProcessWeights.refactor_factored_attn_matrices(
-                state_dict, self.cfg, adapter=adapter
-            )
+
+        # Use unified ProcessWeights.process_weights() like HookedTransformer does
+        if verbose:
+            print("  Processing weights (fold_ln, center_writing_weights, etc.)...")
+        state_dict = ProcessWeights.process_weights(
+            state_dict,
+            self.cfg,
+            fold_ln=fold_ln,
+            center_writing_weights=center_writing_weights,
+            center_unembed=center_unembed,
+            fold_value_biases=fold_value_biases,
+            refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+            adapter=adapter,
+        )
         if verbose:
             print("  Loading processed weights into components...")
         object.__setattr__(self, "_processed_tl_weights", state_dict)
@@ -1063,7 +1039,9 @@ class TransformerBridge(nn.Module):
                             print(f"      Q/K/V TL format: {q_weight_tl.shape}")
                             print(f"      Reconstructed joint QKV HF format: {qkv_weight.shape}")
         for tb_key, weight_tensor in state_dict.items():
-            if ".attn.q." in tb_key or ".attn.k." in tb_key or ".attn.v." in tb_key:
+            # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
+            if any(pattern in tb_key for pattern in [".attn.q.", ".attn.k.", ".attn.v.",
+                                                      ".q_proj.", ".k_proj.", ".v_proj.", ".out_proj."]):
                 continue
             try:
                 parts = tb_key.split(".")
@@ -1280,29 +1258,53 @@ class TransformerBridge(nn.Module):
 
         adapter = self.adapter
         cfg = self.cfg
-        base_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_Q", adapter)
-        parts = base_key.rsplit(".", 2)
-        if len(parts) == 3:
-            attn_prefix = parts[0]
-        else:
-            attn_prefix = base_key.rsplit(".", 1)[0]
-        w_q_key = f"blocks.{layer_idx}.attn.q.weight"
-        w_k_key = f"blocks.{layer_idx}.attn.k.weight"
-        w_v_key = f"blocks.{layer_idx}.attn.v.weight"
-        w_o_key = f"{attn_prefix}.c_proj.weight"
-        b_q_key = f"blocks.{layer_idx}.attn.q.bias"
-        b_k_key = f"blocks.{layer_idx}.attn.k.bias"
-        b_v_key = f"blocks.{layer_idx}.attn.v.bias"
-        b_o_key = f"{attn_prefix}.c_proj.bias"
+        # Get the original HF-format keys for this architecture
+        # The processed state dict keeps weights at their ORIGINAL HF keys
+        w_q_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_Q", adapter)
+        w_k_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_K", adapter)
+        w_v_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_V", adapter)
+        w_o_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_O", adapter)
+
+        # Try to get bias keys (may not exist)
+        try:
+            b_q_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.b_Q", adapter)
+        except (ValueError, KeyError):
+            b_q_key = None
+        try:
+            b_k_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.b_K", adapter)
+        except (ValueError, KeyError):
+            b_k_key = None
+        try:
+            b_v_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.b_V", adapter)
+        except (ValueError, KeyError):
+            b_v_key = None
+        try:
+            b_o_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.b_O", adapter)
+        except (ValueError, KeyError):
+            b_o_key = None
+
         W_Q = processed_weights.get(w_q_key)
         W_K = processed_weights.get(w_k_key)
         W_V = processed_weights.get(w_v_key)
         W_O = processed_weights.get(w_o_key)
-        b_Q = processed_weights.get(b_q_key)
-        b_K = processed_weights.get(b_k_key)
-        b_V = processed_weights.get(b_v_key)
-        b_O = processed_weights.get(b_o_key)
+
+        if verbose and layer_idx == 0:
+            print(f"    [DEBUG] Looking for attention weights with keys:")
+            print(f"      Q: {w_q_key} -> {'FOUND' if W_Q is not None else 'NOT FOUND'}")
+            print(f"      K: {w_k_key} -> {'FOUND' if W_K is not None else 'NOT FOUND'}")
+            print(f"      V: {w_v_key} -> {'FOUND' if W_V is not None else 'NOT FOUND'}")
+            print(f"      O: {w_o_key} -> {'FOUND' if W_O is not None else 'NOT FOUND'}")
+        b_Q = processed_weights.get(b_q_key) if b_q_key else None
+        b_K = processed_weights.get(b_k_key) if b_k_key else None
+        b_V = processed_weights.get(b_v_key) if b_v_key else None
+        b_O = processed_weights.get(b_o_key) if b_o_key else None
         if W_Q is not None and W_K is not None and (W_V is not None) and (W_O is not None):
+            if verbose and layer_idx == 0:
+                print(f"    [DEBUG] Loading attention weights for layer {layer_idx}:")
+                print(f"      W_Q shape: {W_Q.shape if W_Q is not None else None}")
+                print(f"      W_K shape: {W_K.shape if W_K is not None else None}")
+                print(f"      W_V shape: {W_V.shape if W_V is not None else None}")
+                print(f"      W_O shape: {W_O.shape if W_O is not None else None}")
             attn_component.set_processed_weights(
                 {
                     "W_Q": W_Q,
@@ -2652,34 +2654,6 @@ class TransformerBridge(nn.Module):
                         hook_point.remove_hooks()
 
         return _hooks_context()
-
-    def process_weights(
-        self,
-        fold_ln: bool = True,
-        center_writing_weights: bool = True,
-        center_unembed: bool = True,
-        fold_value_biases: bool = True,
-        refactor_factored_attn_matrices: bool = False,
-    ):
-        """Process weights to match TransformerLens processing exactly.
-
-        When called from enable_compatibility_mode(), the bridge components already
-        work correctly, so this method primarily just marks weights as processed.
-        """
-        print("Processing weights to match TransformerLens exactly...")
-
-        # Check if we've already processed weights to avoid infinite loops
-        if getattr(self, "_weights_processed", False):
-            print("Weights already processed, skipping...")
-            return
-
-        # Mark as processed first to prevent re-processing
-        object.__setattr__(self, "_weights_processed", True)
-
-        # When called from enable_compatibility_mode(), the bridge is already working correctly
-        # The adapter has already processed weights and created proper components
-        print("Bridge components should already match HookedTransformer from adapter processing")
-        print("✅ Process weights complete - bridge ready for use")
 
     def get_processed_hf_weights(self) -> Dict[str, torch.Tensor]:
         """Get the processed HuggingFace format weights.

@@ -101,25 +101,33 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
         }
 
     def preprocess_weights(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Transpose GPT-Neo Linear MLP weights to Conv1D format for weight processing.
+        """Transpose GPT-Neo Linear weights to Conv1D format for weight processing.
 
         GPT-Neo uses standard PyTorch Linear layers with weights shaped [out_features, in_features].
         However, the weight processing code (fold_layer_norm, etc.) expects Conv1D format
         with weights shaped [in_features, out_features].
 
-        This method transposes MLP weights to match the expected format:
-        - c_fc.weight: [3072, 768] -> [768, 3072]  (d_mlp, d_model) -> (d_model, d_mlp)
-        - c_proj.weight: [768, 3072] -> [3072, 768]  (d_model, d_mlp) -> (d_mlp, d_model)
+        This method transposes both attention and MLP weights to match the expected format:
+        - Attention Q/K/V: [768, 768] -> [768, 768] (d_model, d_model) -> (d_model, d_model)
+        - Attention O: [768, 768] -> [768, 768] (d_model, d_model) -> (d_model, d_model)
+        - MLP c_fc: [3072, 768] -> [768, 3072]  (d_mlp, d_model) -> (d_model, d_mlp)
+        - MLP c_proj: [768, 3072] -> [3072, 768]  (d_model, d_mlp) -> (d_mlp, d_model)
 
         Args:
             state_dict: The state dictionary with HuggingFace format keys and Linear weights
 
         Returns:
-            The modified state dictionary with transposed MLP weights in Conv1D format
+            The modified state dictionary with transposed weights in Conv1D format
         """
         n_layers = self.cfg.n_layers if hasattr(self.cfg, "n_layers") else self.cfg.num_layers
 
         for layer_idx in range(n_layers):
+            # Transpose attention Q/K/V weights from Linear [d_model, d_model] to Conv1D [d_model, d_model]
+            for proj_name in ["q_proj", "k_proj", "v_proj", "out_proj"]:
+                key = f"transformer.h.{layer_idx}.attn.attention.{proj_name}.weight"
+                if key in state_dict:
+                    state_dict[key] = state_dict[key].T
+
             # Transpose MLP input weight from Linear [d_mlp, d_model] to Conv1D [d_model, d_mlp]
             c_fc_key = f"transformer.h.{layer_idx}.mlp.c_fc.weight"
             if c_fc_key in state_dict:

@@ -92,6 +92,7 @@ class LinearBridge(GeneralizedComponent):
         if weight is None:
             raise ValueError("Processed weights for LinearBridge must include 'weight'.")
         bias = weights.get("bias")
+
         if weight.ndim == 3:
             n_heads, dim1, dim2 = weight.shape
             if dim1 > dim2:
@@ -104,6 +105,7 @@ class LinearBridge(GeneralizedComponent):
                 )
         if bias is not None and bias.ndim == 2:
             bias = einops.rearrange(bias, "n_heads d_head -> (n_heads d_head)")
+
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
                 try:
@@ -112,9 +114,10 @@ class LinearBridge(GeneralizedComponent):
                     is_conv1d = isinstance(self.original_component, Conv1D)
                 except ImportError:
                     is_conv1d = False
+
                 if is_conv1d:
-                    param.data = weight.contiguous()
+                    param.data.copy_(weight.contiguous())
                 else:
-                    param.data = weight.T.contiguous()
+                    param.data.copy_(weight.T.contiguous())
             elif "bias" in name.lower() and bias is not None:
                 param.data = bias.contiguous()
