@@ -1106,3 +1106,75 @@ class ProcessWeights:
                 return tensor
         else:
             return tensor
+
+    @staticmethod
+    def distribute_weights_to_components(
+        state_dict: Dict[str, torch.Tensor],
+        component_mapping: Dict[str, Any],
+    ) -> None:
+        """Distribute processed weights from state_dict to generalized components.
+
+        This function loops through the component_mapping and extracts relevant weights
+        for each component using filter_dict_by_prefix, then calls set_processed_weights
+        on each component. For list components (like blocks), it determines the number
+        of items and distributes weights to each indexed component.
+
+        Args:
+            state_dict: Dictionary of processed weights in TransformerLens format
+            component_mapping: Dictionary mapping component names to GeneralizedComponent instances
+
+        Example:
+            For a component_mapping like:
+            {
+                "embed": EmbeddingBridge(name="transformer.wte"),
+                "blocks": BlockBridge(name="transformer.h", is_list_item=True, ...),
+                "unembed": UnembeddingBridge(name="lm_head")
+            }
+
+            This function will:
+            1. Extract weights starting with "transformer.wte" and pass to embed component
+            2. For blocks, extract all "transformer.h.*" weights, determine the number of blocks,
+               then for each block index, extract weights for that specific block
+            3. Extract "lm_head" weights and pass to unembed component
+        """
+        from transformer_lens.utilities import filter_dict_by_prefix
+
+        for component_name, component in component_mapping.items():
+            # Skip if component has no remote name
+            if component.name is None:
+                continue
+
+            # Get the remote key (HuggingFace format path)
+            remote_key = component.name
+
+            if hasattr(component, 'is_list_item') and component.is_list_item:
+                # This is a list component like "blocks"
+                # Extract all weights that start with this prefix
+                all_list_weights = filter_dict_by_prefix(state_dict, remote_key)
+
+                # Determine the number of items in the list by finding the highest index
+                max_index = -1
+                for key in all_list_weights.keys():
+                    # Keys should start with a number like "0.attn.W_Q", "1.mlp.W_in", etc.
+                    parts = key.split('.')
+                    if parts and parts[0].isdigit():
+                        index = int(parts[0])
+                        max_index = max(max_index, index)
+
+                # Now distribute weights to each indexed component
+                num_items = max_index + 1
+                for i in range(num_items):
+                    # Extract weights for this specific index
+                    # This will get keys like "0.attn.W_Q" and strip the "0." to get "attn.W_Q"
+                    indexed_weights = filter_dict_by_prefix(all_list_weights, str(i))
+
+                    # Get the actual component instance (e.g., bridge.blocks[i])
+                    if hasattr(component, '__getitem__'):
+                        indexed_component = component[i]
+                        if hasattr(indexed_component, 'set_processed_weights'):
+                            indexed_component.set_processed_weights(indexed_weights)
+            else:
+                # This is a single component (not a list)
+                component_weights = filter_dict_by_prefix(state_dict, remote_key)
+                if hasattr(component, 'set_processed_weights'):
+                    component.set_processed_weights(component_weights)

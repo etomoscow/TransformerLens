@@ -905,7 +905,15 @@ class TransformerBridge(nn.Module):
         if verbose:
             print("  Loading processed weights into components...")
         object.__setattr__(self, "_processed_tl_weights", state_dict)
-        self._configure_components_for_processing(verbose=verbose)
+
+        # Distribute weights to components using the new unified approach
+        if verbose:
+            print("  Distributing weights to generalized components...")
+        ProcessWeights.distribute_weights_to_components(
+            state_dict=state_dict,
+            component_mapping=adapter.component_mapping,
+        )
+
         self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
         if verbose:
             print("  Loading processed weights into Bridge components...")
@@ -1129,39 +1137,12 @@ class TransformerBridge(nn.Module):
 
         if verbose:
             print("  Setting 3D processed weight attributes...")
-        self._set_processed_weight_attributes()
         if verbose:
             print("  Extracting HookedTransformer-compatible weights...")
-        if hasattr(self, "blocks"):
-            for block in self.blocks:
-                if hasattr(block, "attn") and hasattr(
-                    block.attn, "_extract_hooked_transformer_weights"
-                ):
-                    block.attn._hooked_weights_extracted = False
-                    block.attn._extract_hooked_transformer_weights()
-        # object.__setattr__(self, "_weights_processed", True)
         if fold_ln:
             object.__setattr__(self.cfg, "layer_norm_folding", True)
         if verbose:
             print("✓ Weight processing complete!")
-
-    def _configure_components_for_processing(self, verbose: bool = False):
-        """Configure all components for processed weight loading (Phase 1).
-
-        Args:
-            verbose: If True, print detailed progress messages. Default: False
-        """
-        if hasattr(self, "cfg") and hasattr(self.cfg, "layer_norm_folding"):
-            self.cfg.layer_norm_folding = True
-        for layer_idx in range(self.cfg.n_layers):
-            if hasattr(self, "blocks") and layer_idx < len(self.blocks):
-                block = self.blocks[layer_idx]
-                if hasattr(block, "ln1") and hasattr(block.ln1, "config"):
-                    block.ln1.config.layer_norm_folding = True
-                if hasattr(block, "ln2") and hasattr(block.ln2, "config"):
-                    block.ln2.config.layer_norm_folding = True
-        if hasattr(self, "ln_final") and hasattr(self.ln_final, "config"):
-            self.ln_final.config.layer_norm_folding = True
 
     def _load_all_processed_weights(
         self, verbose: bool = False, processed_state_dict: Optional[Dict[str, torch.Tensor]] = None
@@ -1174,38 +1155,8 @@ class TransformerBridge(nn.Module):
         """
         if processed_state_dict is not None:
             object.__setattr__(self, "_processed_tl_weights", processed_state_dict)
-        self._load_embedding_weights(verbose=verbose)
         self._load_transformer_block_weights(verbose=verbose)
         self._load_unembed_weights(verbose=verbose)  # type: ignore[arg-type]
-
-    def _load_embedding_weights(self, verbose: bool = False):  # type: ignore[arg-type]
-        """Load embedding and positional embedding weights into components.
-        # type: ignore[arg-type]
-               Args:
-                   verbose: If True, print detailed progress messages. Default: False
-        """
-        from transformer_lens.weight_processing import ProcessWeights
-
-        processed_weights = self._processed_tl_weights
-        adapter = self.adapter
-        if hasattr(self, "embed"):
-            try:
-                embed_key = ProcessWeights._get_param_key("embed.W_E", adapter)
-                print("embed_key", embed_key)
-                if embed_key in processed_weights:
-                    embed_weight = processed_weights[embed_key]
-                    print("embed_weight" ,  embed_weight)
-                    self.embed.set_processed_weights({"weight": embed_weight})
-            except (ValueError, KeyError):
-                pass
-        if hasattr(self, "pos_embed"):
-            try:
-                pos_embed_key = ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
-                if pos_embed_key in processed_weights:
-                    pos_embed_weight = processed_weights[pos_embed_key]
-                    self.pos_embed.set_processed_weights({"weight": pos_embed_weight})
-            except (ValueError, KeyError):
-                pass
 
     def _load_transformer_block_weights(self, verbose: bool = False) -> None:
         """Load transformer block weights into attention and MLP components.
