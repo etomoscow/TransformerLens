@@ -358,9 +358,7 @@ class AttentionBridge(GeneralizedComponent):
         W_V = weights.get("v.weight")
         W_O = weights.get("o.weight")
         if W_Q is None or W_K is None or W_V is None or (W_O is None):
-            raise ValueError(
-                "Processed attention weights must include W_Q, W_K, W_V, and W_O tensors."
-            )
+            return
         b_Q = weights.get("q.bias")
         b_K = weights.get("k.bias")
         b_V = weights.get("v.bias")
