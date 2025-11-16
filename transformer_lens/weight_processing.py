@@ -1245,79 +1245,89 @@ class ProcessWeights:
         uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(
             state_dict, layer, adapter
         )
+        
+        embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
+        try:
+            pos_embed_W_pos_key = (
+                ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
+                if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+                else None
+            )
+        except ValueError:
+            pos_embed_W_pos_key = None
 
-        # Get parameter keys based on format detection
-        pos_embed_W_pos_key: str | None
-        if uses_tl_format and not uses_hf_format:
-            # State dict is in TransformerLens format - check which variant
-            if "embed.W_E" in state_dict:
-                # Standard TL format
-                embed_W_E_key = "embed.W_E"
-                pos_embed_W_pos_key = (
-                    "pos_embed.W_pos"
-                    if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
-                    else None
-                )
-            else:
-                # Alternative TL format (embed.weight instead of embed.W_E)
-                embed_W_E_key = "embed.weight"
-                pos_embed_W_pos_key = (
-                    "pos_embed.weight"
-                    if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
-                    else None
-                )
-            embed_W_E_key = ProcessWeights._resolve_tl_key(state_dict, embed_W_E_key)
-            if pos_embed_W_pos_key is not None:
-                pos_embed_W_pos_key = ProcessWeights._resolve_tl_key(
-                    state_dict, pos_embed_W_pos_key
-                )
-        elif adapter and uses_hf_format and not uses_tl_format:
-            # State dict is in HuggingFace format - use adapter translation
-            embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
-            # Only try to get positional embedding key if not using rotary embeddings
-            try:
-                pos_embed_W_pos_key = (
-                    ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
-                    if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
-                    else None
-                )
-            except ValueError:
-                # Model doesn't have positional embeddings (e.g., uses RoPE)
-                pos_embed_W_pos_key = None
-        else:
-            # Fallback: prefer TL format if possible, otherwise use adapter translation
-            if uses_tl_format:
-                if "embed.W_E" in state_dict:
-                    # Standard TL format
-                    embed_W_E_key = "embed.W_E"
-                    pos_embed_W_pos_key = (
-                        "pos_embed.W_pos"
-                        if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
-                        else None
-                    )
-                else:
-                    # Alternative TL format (embed.weight instead of embed.W_E)
-                    embed_W_E_key = "embed.weight"
-                    pos_embed_W_pos_key = (
-                        "pos_embed.weight"
-                        if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
-                        else None
-                    )
-                embed_W_E_key = ProcessWeights._resolve_tl_key(state_dict, embed_W_E_key)
-                if pos_embed_W_pos_key is not None:
-                    pos_embed_W_pos_key = ProcessWeights._resolve_tl_key(
-                        state_dict, pos_embed_W_pos_key
-                    )
-            else:
-                embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
-                try:
-                    pos_embed_W_pos_key = (
-                        ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
-                        if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
-                        else None
-                    )
-                except ValueError:
-                    pos_embed_W_pos_key = None
+        # # Get parameter keys based on format detection
+        # pos_embed_W_pos_key: str | None
+        # if uses_tl_format and not uses_hf_format:
+        #     # State dict is in TransformerLens format - check which variant
+        #     if "embed.W_E" in state_dict:
+        #         # Standard TL format
+        #         embed_W_E_key = "embed.W_E"
+        #         pos_embed_W_pos_key = (
+        #             "pos_embed.W_pos"
+        #             if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+        #             else None
+        #         )
+        #     else:
+        #         # Alternative TL format (embed.weight instead of embed.W_E)
+        #         embed_W_E_key = "embed.weight"
+        #         pos_embed_W_pos_key = (
+        #             "pos_embed.weight"
+        #             if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+        #             else None
+        #         )
+        #     embed_W_E_key = ProcessWeights._resolve_tl_key(state_dict, embed_W_E_key)
+        #     if pos_embed_W_pos_key is not None:
+        #         pos_embed_W_pos_key = ProcessWeights._resolve_tl_key(
+        #             state_dict, pos_embed_W_pos_key
+        #         )
+        # elif adapter and uses_hf_format and not uses_tl_format:
+        #     # State dict is in HuggingFace format - use adapter translation
+        #     embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
+        #     # Only try to get positional embedding key if not using rotary embeddings
+        #     try:
+        #         pos_embed_W_pos_key = (
+        #             ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
+        #             if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+        #             else None
+        #         )
+        #     except ValueError:
+        #         # Model doesn't have positional embeddings (e.g., uses RoPE)
+        #         pos_embed_W_pos_key = None
+        # else:
+        #     # Fallback: prefer TL format if possible, otherwise use adapter translation
+        #     if uses_tl_format:
+        #         if "embed.W_E" in state_dict:
+        #             # Standard TL format
+        #             embed_W_E_key = "embed.W_E"
+        #             pos_embed_W_pos_key = (
+        #                 "pos_embed.W_pos"
+        #                 if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+        #                 else None
+        #             )
+        #         else:
+        #             # Alternative TL format (embed.weight instead of embed.W_E)
+        #             embed_W_E_key = "embed.weight"
+        #             pos_embed_W_pos_key = (
+        #                 "pos_embed.weight"
+        #                 if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+        #                 else None
+        #             )
+        #         embed_W_E_key = ProcessWeights._resolve_tl_key(state_dict, embed_W_E_key)
+        #         if pos_embed_W_pos_key is not None:
+        #             pos_embed_W_pos_key = ProcessWeights._resolve_tl_key(
+        #                 state_dict, pos_embed_W_pos_key
+        #             )
+        #     else:
+        #         embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
+        #         try:
+        #             pos_embed_W_pos_key = (
+        #                 ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
+        #                 if getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+        #                 else None
+        #             )
+        #         except ValueError:
+        #             pos_embed_W_pos_key = None
 
         print("embed_W_E_key", embed_W_E_key)
         # Validate that the embedding key exists before accessing it
