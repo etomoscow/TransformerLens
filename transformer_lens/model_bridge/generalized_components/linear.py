@@ -116,8 +116,8 @@ class LinearBridge(GeneralizedComponent):
                     is_conv1d = False
 
                 if is_conv1d:
-                    param.data.copy_(weight.contiguous())
+                    param.data = weight.contiguous()
                 else:
-                    param.data.copy_(weight.T.contiguous())
+                    param.data = weight.contiguous()
             elif "bias" in name.lower() and bias is not None:
                 param.data = bias.contiguous()

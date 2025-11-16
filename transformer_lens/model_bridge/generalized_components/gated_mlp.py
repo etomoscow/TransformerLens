@@ -136,10 +136,10 @@ class GatedMLPBridge(MLPBridge):
             b_out: The processed MLP output bias tensor (optional)
         """
         super().set_processed_weights(weights)
-        W_gate = weights.get("W_gate")
+        W_gate = weights.get("gate.weight")
         if W_gate is None:
-            raise ValueError("Processed gated MLP weights must include 'W_gate'.")
-        b_gate = weights.get("b_gate")
+            return
+        b_gate = weights.get("gate.bias")
         gate_module = getattr(self, "gate", None)
         self._use_processed_weights = True
         self._processed_W_gate = W_gate
