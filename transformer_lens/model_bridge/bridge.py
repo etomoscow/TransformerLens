@@ -6082,7 +6082,11 @@ class TransformerBridge(nn.Module):
         Returns:
             Self for chaining
         """
-        self.original_model = self.original_model.to(*args, **kwargs)
+        # Use the shared utility which also updates `cfg` on device/dtype changes
+        from transformer_lens.utilities.devices import move_to_and_update_config
+
+        # Move underlying model (and update config) instead of directly calling nn.Module.to
+        move_to_and_update_config(self, *args, **kwargs)
         return self
 
     def cuda(self, device: Optional[Union[int, torch.device]] = None) -> "TransformerBridge":
