@@ -669,13 +669,36 @@ class ProcessWeights:
 
         # Check if MLP LayerNorm parameters exist (they might not for already processed models)
         if ln2_b_key in state_dict and ln2_w_key in state_dict:
+            # Determine the format of the weight tensor to handle broadcasting correctly
+            # HuggingFace format: W_in is (d_mlp, d_model), so ln2 broadcasts as [None, :]
+            # TransformerLens format: W_in is (d_model, d_mlp), so ln2 broadcasts as [:, None]
+            mlp_W_in = state_dict[mlp_W_in_key]
+            ln2_w = state_dict[ln2_w_key]
+            ln2_b = state_dict[ln2_b_key]
+
+            # Detect format based on which dimension matches d_model
+            if mlp_W_in.shape[1] == ln2_w.shape[0]:
+                # HuggingFace format: (d_mlp, d_model)
+                ln2_w_broadcast = ln2_w[None, :]
+                ln2_b_broadcast = ln2_b[None, :]
+                sum_dim = -1  # Sum over d_model dimension
+            elif mlp_W_in.shape[0] == ln2_w.shape[0]:
+                # TransformerLens format: (d_model, d_mlp)
+                ln2_w_broadcast = ln2_w[:, None]
+                ln2_b_broadcast = ln2_b[:, None]
+                sum_dim = -2  # Sum over d_model dimension
+            else:
+                raise ValueError(
+                    f"Cannot broadcast MLP weight {mlp_W_in.shape} with layer norm weight {ln2_w.shape}"
+                )
+
             if fold_biases:
-                # TODO this is causing slight divergence - FIXED
+                # Fold ln2 bias into MLP bias
                 state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
-                    state_dict[mlp_W_in_key] * state_dict[ln2_b_key][:, None]
-                ).sum(-2)
+                    mlp_W_in * ln2_b_broadcast
+                ).sum(sum_dim)
                 # Replace ln2 bias with zeros (identity for bias) instead of deleting
-                state_dict[ln2_b_key] = torch.zeros_like(state_dict[ln2_b_key])
+                state_dict[ln2_b_key] = torch.zeros_like(ln2_b)
                 # ALSO set alternate naming if it exists (ln2 vs ln_2)
                 alternate_ln2_b_key = (
                     ln2_b_key.replace("ln_2", "ln2")
@@ -683,15 +706,15 @@ class ProcessWeights:
                     else ln2_b_key.replace("ln2", "ln_2")
                 )
                 if alternate_ln2_b_key != ln2_b_key and alternate_ln2_b_key in state_dict:
-                    state_dict[alternate_ln2_b_key] = torch.zeros_like(state_dict[ln2_b_key])
+                    state_dict[alternate_ln2_b_key] = torch.zeros_like(ln2_b)
 
-            # TODO this is causing slight divergence
-            state_dict[mlp_W_in_key] = state_dict[mlp_W_in_key] * state_dict[ln2_w_key][:, None]
+            # Fold ln2 weight into MLP weight
+            state_dict[mlp_W_in_key] = mlp_W_in * ln2_w_broadcast
 
             if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
-                state_dict[mlp_W_gate_key] = (
-                    state_dict[mlp_W_gate_key] * state_dict[ln2_w_key][:, None]
-                )
+                # Apply the same format detection for gated MLP
+                mlp_W_gate = state_dict[mlp_W_gate_key]
+                state_dict[mlp_W_gate_key] = mlp_W_gate * ln2_w_broadcast
 
             # Replace ln2 weight with ones (identity for weight) instead of deleting
             state_dict[ln2_w_key] = torch.ones_like(state_dict[ln2_w_key])

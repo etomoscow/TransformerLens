@@ -2,7 +2,7 @@
 
 This module contains the bridge component for unembedding layers.
 """
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterator, Mapping, Optional, Tuple
 
 import torch
 
@@ -37,11 +37,10 @@ class UnembeddingBridge(GeneralizedComponent):
     @property
     def W_U(self) -> torch.Tensor:
         """Return the unembedding weight matrix."""
-        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
-            if "_processed_W_U" in self._parameters:
-                processed_W_U = self._parameters["_processed_W_U"]
-                if processed_W_U is not None:
-                    return processed_W_U
+        if "_processed_W_U" in self._parameters:
+            processed_W_U = self._parameters["_processed_W_U"]
+            if processed_W_U is not None:
+                return processed_W_U
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
         assert hasattr(
@@ -61,18 +60,6 @@ class UnembeddingBridge(GeneralizedComponent):
         Returns:
             Unembedded output (logits)
         """
-        if hasattr(self, "_use_processed_weights") and self._use_processed_weights:
-            hidden_states = self.hook_in(hidden_states)
-            if "_processed_W_U" in self._parameters:
-                processed_W_U = self._parameters["_processed_W_U"]
-                if processed_W_U is not None:
-                    output = torch.nn.functional.linear(hidden_states, processed_W_U.T, self.b_U)
-                else:
-                    output = torch.nn.functional.linear(hidden_states, self.W_U.T, self.b_U)
-            else:
-                output = torch.nn.functional.linear(hidden_states, self.W_U.T, self.b_U)
-            output = self.hook_out(output)
-            return output
         if self.original_component is None:
             raise RuntimeError(
                 f"Original component not set for {self.name}. Call set_original_component() first."
@@ -100,8 +87,6 @@ class UnembeddingBridge(GeneralizedComponent):
             param = self._parameters["_b_U"]
             if param is not None:
                 return param
-        if hasattr(self, "_processed_b_U") and self._processed_b_U is not None:
-            return self._processed_b_U
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
         if hasattr(self.original_component, "bias") and self.original_component.bias is not None:
@@ -119,23 +104,40 @@ class UnembeddingBridge(GeneralizedComponent):
             vocab_size: int = int(weight.shape[0])
             return torch.zeros(vocab_size, device=device, dtype=dtype)
 
-    def set_processed_weight(self, W_U: torch.Tensor, b_U: torch.Tensor | None = None) -> None:
-        """Set the processed weights to use when layer norm is folded.
+    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
+        """Set the processed weights by loading them into the original component.
+
+        This loads the processed weights directly into the original_component's parameters,
+        so when forward() delegates to original_component, it uses the processed weights.
+
+        Note: W_U is expected in TL format [d_model, d_vocab] and will be transposed
+        to HF format [d_vocab, d_model] before being stored in the original component.
 
         Args:
-            W_U: The processed unembedding weight tensor
-            b_U: The processed unembedding bias tensor (optional)
+            weights: Dictionary containing:
+                - "weight": The processed W_U tensor in TL format [d_model, d_vocab]
+                - "bias": The processed b_U tensor (optional) [d_vocab]
         """
-        self.register_parameter("_processed_W_U", torch.nn.Parameter(W_U))
-        if b_U is not None:
-            self.register_parameter("_b_U", torch.nn.Parameter(b_U))
+        if self.original_component is None:
+            raise RuntimeError(f"Original component not set for {self.name}")
+
+        weight = weights.get("weight")
+        if weight is None:
+            raise ValueError("Processed weights for UnembeddingBridge must include 'weight'.")
+
+        bias = weights.get("bias")
+
+        # Register processed weights as parameters (for backward compatibility)
+        self.register_parameter("_processed_W_U", torch.nn.Parameter(weight))
+        if bias is not None:
+            self.register_parameter("_b_U", torch.nn.Parameter(bias))
         else:
-            vocab_size = W_U.shape[1]
+            vocab_size = weight.shape[1]
             self.register_parameter(
                 "_b_U",
-                torch.nn.Parameter(torch.zeros(vocab_size, device=W_U.device, dtype=W_U.dtype)),
+                torch.nn.Parameter(torch.zeros(vocab_size, device=weight.device, dtype=weight.dtype)),
             )
-        self._use_processed_weights = True
+
 
     def named_parameters(
         self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True

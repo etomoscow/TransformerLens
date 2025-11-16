@@ -2,6 +2,8 @@
 
 from typing import Any
 
+import torch
+
 from transformer_lens.conversion_utils.conversion_steps import (
     HookConversionSet,
     RearrangeHookConversion,
@@ -16,6 +18,9 @@ from transformer_lens.model_bridge.generalized_components import (
     NormalizationBridge,
     PosEmbedBridge,
     UnembeddingBridge,
+)
+from transformer_lens.model_bridge.generalized_components.gpt_neo_block import (
+    GPTNeoBlockBridge,
 )
 
 
@@ -66,8 +71,9 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
         self.component_mapping = {
             "embed": EmbeddingBridge(name="transformer.wte"),
             "pos_embed": PosEmbedBridge(name="transformer.wpe"),
-            "blocks": BlockBridge(
+            "blocks": GPTNeoBlockBridge(
                 name="transformer.h",
+                config=self.cfg,
                 submodules={
                     "ln1": NormalizationBridge(name="ln_1", config=self.cfg),
                     "attn": AttentionBridge(
@@ -93,3 +99,35 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
             "ln_final": NormalizationBridge(name="transformer.ln_f", config=self.cfg),
             "unembed": UnembeddingBridge(name="lm_head"),
         }
+
+    def preprocess_weights(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Transpose GPT-Neo Linear MLP weights to Conv1D format for weight processing.
+
+        GPT-Neo uses standard PyTorch Linear layers with weights shaped [out_features, in_features].
+        However, the weight processing code (fold_layer_norm, etc.) expects Conv1D format
+        with weights shaped [in_features, out_features].
+
+        This method transposes MLP weights to match the expected format:
+        - c_fc.weight: [3072, 768] -> [768, 3072]  (d_mlp, d_model) -> (d_model, d_mlp)
+        - c_proj.weight: [768, 3072] -> [3072, 768]  (d_model, d_mlp) -> (d_mlp, d_model)
+
+        Args:
+            state_dict: The state dictionary with HuggingFace format keys and Linear weights
+
+        Returns:
+            The modified state dictionary with transposed MLP weights in Conv1D format
+        """
+        n_layers = self.cfg.n_layers if hasattr(self.cfg, "n_layers") else self.cfg.num_layers
+
+        for layer_idx in range(n_layers):
+            # Transpose MLP input weight from Linear [d_mlp, d_model] to Conv1D [d_model, d_mlp]
+            c_fc_key = f"transformer.h.{layer_idx}.mlp.c_fc.weight"
+            if c_fc_key in state_dict:
+                state_dict[c_fc_key] = state_dict[c_fc_key].T
+
+            # Transpose MLP output weight from Linear [d_model, d_mlp] to Conv1D [d_mlp, d_model]
+            c_proj_key = f"transformer.h.{layer_idx}.mlp.c_proj.weight"
+            if c_proj_key in state_dict:
+                state_dict[c_proj_key] = state_dict[c_proj_key].T
+
+        return state_dict

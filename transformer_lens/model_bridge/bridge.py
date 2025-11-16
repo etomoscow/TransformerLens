@@ -668,6 +668,11 @@ class TransformerBridge(nn.Module):
                 if output_hidden_states:
                     all_hidden_states = all_hidden_states + (residual,)  # type: ignore[operator]
                 layer_past = past_key_values if use_cache_object else past_key_values[i]
+
+                # Remove explicitly-passed kwargs to avoid "multiple values for argument" errors
+                filtered_kwargs = {k: v for k, v in kwargs.items()
+                                 if k not in ('encoder_attention_mask', 'use_cache', 'output_attentions')}
+
                 block_outputs = block_bridge(
                     residual,
                     layer_past,
@@ -678,7 +683,7 @@ class TransformerBridge(nn.Module):
                     encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    **kwargs,
+                    **filtered_kwargs,
                 )
                 if isinstance(block_outputs, tuple):
                     residual = block_outputs[0]
@@ -1226,7 +1231,7 @@ class TransformerBridge(nn.Module):
                 embed_key = ProcessWeights._get_param_key("embed.W_E", adapter)
                 if embed_key in processed_weights:
                     embed_weight = processed_weights[embed_key]
-                    self.embed.set_processed_weight(embed_weight)
+                    self.embed.set_processed_weights({"weight": embed_weight})
             except (ValueError, KeyError):
                 pass
         if hasattr(self, "pos_embed"):
@@ -1234,7 +1239,7 @@ class TransformerBridge(nn.Module):
                 pos_embed_key = ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
                 if pos_embed_key in processed_weights:
                     pos_embed_weight = processed_weights[pos_embed_key]
-                    self.pos_embed.set_processed_weight(pos_embed_weight)
+                    self.pos_embed.set_processed_weights({"weight": pos_embed_weight})
             except (ValueError, KeyError):
                 pass
 
@@ -1367,7 +1372,7 @@ class TransformerBridge(nn.Module):
                         b_U = processed_weights.get(b_U_key)
                     except (ValueError, KeyError):
                         b_U = None
-                    self.unembed.set_processed_weight(W_U, b_U)
+                    self.unembed.set_processed_weights({"weight": W_U, "bias": b_U})
             except (ValueError, KeyError):
                 pass
 
