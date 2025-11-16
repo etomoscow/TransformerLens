@@ -335,44 +335,19 @@ class AttentionBridge(GeneralizedComponent):
     def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
         """Set the processed weights by delegating to LinearBridge submodules.
 
-        This uses LinearBridge's set_processed_weights method for Q/K/V/O submodules,
-        so when forward() delegates to original_component, it uses the processed weights.
-
-        The weights should already be in the correct 2D format from weight processing.
+        This method uses the base class's recursive distribution mechanism to
+        distribute weights to q/k/v/o LinearBridge subcomponents via real_components.
 
         Args:
-            weights: Dictionary containing processed weight tensors with keys:
-                - "W_Q": Query weight tensor (already in 2D format)
-                - "W_K": Key weight tensor (already in 2D format)
-                - "W_V": Value weight tensor (already in 2D format)
-                - "W_O": Output projection weight tensor (already in 2D format)
-                - "b_Q": Query bias tensor (optional)
-                - "b_K": Key bias tensor (optional)
-                - "b_V": Value bias tensor (optional)
-                - "b_O": Output bias tensor (optional)
+            weights: Dictionary containing processed weight tensors. The base class
+                     will filter by the remote component names (e.g., "q_proj") and
+                     distribute to the corresponding subcomponents.
         """
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
-        W_Q = weights.get("q.weight")
-        W_K = weights.get("k.weight")
-        W_V = weights.get("v.weight")
-        W_O = weights.get("o.weight")
-        if W_Q is None or W_K is None or W_V is None or (W_O is None):
+
+        if "W_Q" in weights.keys():
+            #legacy call that will go away
             return
-        b_Q = weights.get("q.bias")
-        b_K = weights.get("k.bias")
-        b_V = weights.get("v.bias")
-        b_O = weights.get("o.bias")
-        q_module = getattr(self, "q", None)
-        k_module = getattr(self, "k", None)
-        v_module = getattr(self, "v", None)
-        o_module = getattr(self, "o", None)
-        if q_module and hasattr(q_module, "set_processed_weights"):
-            q_module.set_processed_weights({"weight": W_Q, "bias": b_Q})
-        if k_module and hasattr(k_module, "set_processed_weights"):
-            k_module.set_processed_weights({"weight": W_K, "bias": b_K})
-        if v_module and hasattr(v_module, "set_processed_weights"):
-            v_module.set_processed_weights({"weight": W_V, "bias": b_V})
-        if o_module and hasattr(o_module, "set_processed_weights"):
-            o_module.set_processed_weights({"weight": W_O, "bias": b_O})
+        super().set_processed_weights(weights)
 

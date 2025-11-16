@@ -387,7 +387,7 @@ def test_weight_processing_results_loaded_into_model():
     # Test key conversion functionality
     test_key = "transformer.h.0.attn.c_attn.weight"
     if test_key in processed_state_dict:
-        bridge_key = bridge.adapter.convert_hf_key_to_bridge_key(test_key)
+        bridge_key = bridge.adapter.convert_hf_key_to_tl_key(test_key)
         assert (
             bridge_key in bridge.original_model.state_dict()
         ), f"Bridge key {bridge_key} should exist in model"
@@ -410,7 +410,7 @@ def test_weight_processing_results_loaded_into_model():
 
     for processed_key, processed_value in processed_state_dict.items():
         # Convert to bridge key
-        bridge_key = bridge.adapter.convert_hf_key_to_bridge_key(processed_key)
+        bridge_key = bridge.adapter.convert_hf_key_to_tl_key(processed_key)
 
         # Check if bridge key exists in the final state dict
         if bridge_key in final_state_dict:
@@ -490,7 +490,7 @@ def test_weight_processing_results_loaded_into_model():
     # 4. Test that key conversion works for all processed keys
     conversion_success = 0
     for processed_key in processed_state_dict.keys():
-        bridge_key = bridge.adapter.convert_hf_key_to_bridge_key(processed_key)
+        bridge_key = bridge.adapter.convert_hf_key_to_tl_key(processed_key)
         if bridge_key != processed_key:  # Key was converted
             conversion_success += 1
 
@@ -507,7 +507,7 @@ def test_weight_processing_results_loaded_into_model():
     critical_loaded = 0
     for critical_key in critical_keys:
         if critical_key in processed_state_dict:
-            bridge_key = bridge.adapter.convert_hf_key_to_bridge_key(critical_key)
+            bridge_key = bridge.adapter.convert_hf_key_to_tl_key(critical_key)
             if bridge_key in final_state_dict:
                 processed_value = processed_state_dict[critical_key]
                 final_value = final_state_dict[bridge_key]

@@ -714,7 +714,7 @@ def test_hf_key_filled_into_original_components():
 
     for hf_key, expected_bridge_key in test_cases:
         # Convert the HF key to bridge key using the adapter
-        converted_key = bridge.adapter.convert_hf_key_to_bridge_key(hf_key)
+        converted_key = bridge.adapter.convert_hf_key_to_tl_key(hf_key)
 
         # Assert the conversion is correct
         assert (
@@ -784,7 +784,7 @@ def test_correct_key_mapping():
     layer = 0
     hf_key = f"transformer.h.{layer}.attn.c_attn.weight"
     tl_key = bridge.adapter.convert_hf_key_to_tl_key(hf_key)
-    bridge_key = bridge.adapter.convert_hf_key_to_bridge_key(hf_key)
+    bridge_key = bridge.adapter.convert_hf_key_to_tl_key(hf_key)
 
     assert (
         tl_key in processed_state_dict
@@ -854,7 +854,7 @@ def test_adapter_key_mapping_comprehensive():
         total_conversions += 1
 
         # Convert HuggingFace key to bridge key using adapter
-        bridge_key = bridge.adapter.convert_hf_key_to_bridge_key(hf_key)
+        bridge_key = bridge.adapter.convert_hf_key_to_tl_key(hf_key)
 
         if bridge_key in bridge_keys:
             successful_conversions += 1

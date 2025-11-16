@@ -27,6 +27,18 @@ class JointQKVAttentionBridge(AttentionBridge):
     the individual activations from the separated q, k, and v matrices are hooked and accessible.
     """
 
+    # Property aliases point to the linear bridge weights
+    property_aliases = {
+        "W_Q": "q.weight",
+        "W_K": "k.weight",
+        "W_V": "v.weight",
+        "W_O": "o.weight",
+        "b_Q": "q.bias",
+        "b_K": "k.bias",
+        "b_V": "v.bias",
+        "b_O": "o.bias",
+    }
+
     def __init__(
         self,
         name: str,
@@ -73,9 +85,21 @@ class JointQKVAttentionBridge(AttentionBridge):
         for submodule_name, submodule in (submodules or {}).items():
             if not hasattr(self, submodule_name):
                 setattr(self, submodule_name, submodule)
+        self.submodules["q"] = self.q
+        self.submodules["k"] = self.k
+        self.submodules["v"] = self.v
         self.q.hook_out.hook_conversion = self.qkv_conversion_rule
         self.k.hook_out.hook_conversion = self.qkv_conversion_rule
         self.v.hook_out.hook_conversion = self.qkv_conversion_rule
+
+        # Register q, k, v LinearBridges in real_components for weight distribution
+        # This allows set_processed_weights to distribute weights to these submodules
+        self.real_components["q"] = ("q", self.q)
+        self.real_components["k"] = ("k", self.k)
+        self.real_components["v"] = ("v", self.v)
+        if hasattr(self, "o"):
+            self.real_components["o"] = ("o", self.o)
+
         self._processed_weights: Optional[Dict[str, torch.Tensor]] = None
         self._hooked_weights_extracted = False
         self._W_Q: Optional[torch.Tensor] = None
@@ -132,6 +156,75 @@ class JointQKVAttentionBridge(AttentionBridge):
                     )
 
         return ConditionalRearrangeConversion(self.config.n_heads)
+
+    @property
+    def W_Q(self) -> torch.Tensor:
+        """Get W_Q in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        weight = self.q.weight  # 2D: [d_model, n_heads*d_head]
+        if weight.ndim == 2 and self.config is not None:
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=self.config.n_heads
+            )
+        return weight
+
+    @property
+    def W_K(self) -> torch.Tensor:
+        """Get W_K in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        weight = self.k.weight  # 2D: [d_model, n_heads*d_head]
+        if weight.ndim == 2 and self.config is not None:
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=self.config.n_heads
+            )
+        return weight
+
+    @property
+    def W_V(self) -> torch.Tensor:
+        """Get W_V in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        weight = self.v.weight  # 2D: [d_model, n_heads*d_head]
+        if weight.ndim == 2 and self.config is not None:
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=self.config.n_heads
+            )
+        return weight
+
+    @property
+    def W_O(self) -> torch.Tensor:
+        """Get W_O in 3D format [n_heads, d_head, d_model] from 2D linear bridge weight."""
+        weight = self.o.weight  # 2D: [n_heads*d_head, d_model]
+        if weight.ndim == 2 and self.config is not None:
+            return einops.rearrange(
+                weight, "(n_heads d_head) d_model -> n_heads d_head d_model", n_heads=self.config.n_heads
+            )
+        return weight
+
+    @property
+    def b_Q(self) -> Optional[torch.Tensor]:
+        """Get b_Q in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        bias = self.q.bias  # 1D: [n_heads*d_head]
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=self.config.n_heads)
+        return bias
+
+    @property
+    def b_K(self) -> Optional[torch.Tensor]:
+        """Get b_K in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        bias = self.k.bias  # 1D: [n_heads*d_head]
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=self.config.n_heads)
+        return bias
+
+    @property
+    def b_V(self) -> Optional[torch.Tensor]:
+        """Get b_V in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        bias = self.v.bias  # 1D: [n_heads*d_head]
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=self.config.n_heads)
+        return bias
+
+    @property
+    def b_O(self) -> Optional[torch.Tensor]:
+        """Get b_O bias from linear bridge."""
+        return self.o.bias
 
     def set_original_component(self, original_component: torch.nn.Module) -> None:
         """Set the original component that this bridge wraps and initialize LinearBridges for q, k, v, and o transformations.
@@ -274,266 +367,3 @@ class JointQKVAttentionBridge(AttentionBridge):
         if hasattr(self, "o") and self.o is not None:
             attn_output = self.o(attn_output)
         return (attn_output, attn_weights)
-
-    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
-        """Set processed weights for Joint QKV attention.
-
-        For Joint QKV attention, the Q/K/V weights are stored in a single c_attn component.
-        This method handles both 2D format [d_model, (n_heads*d_head)] and 3D TL format
-        [n_heads, d_model, d_head] for Q/K/V weights.
-
-        Args:
-            weights: Dictionary containing processed weight tensors with keys:
-                - "W_Q": Query weight tensor (2D or 3D format)
-                - "W_K": Key weight tensor (2D or 3D format)
-                - "W_V": Value weight tensor (2D or 3D format)
-                - "W_O": Output projection weight (2D HF format [d_model, d_model] or 3D TL format)
-                - "b_Q": Query bias tensor (optional)
-                - "b_K": Key bias tensor (optional)
-                - "b_V": Value bias tensor (optional)
-                - "b_O": Output bias tensor (optional)
-        """
-        import einops
-
-        W_Q = weights.get("W_Q")
-        W_K = weights.get("W_K")
-        W_V = weights.get("W_V")
-        if W_Q is None or W_K is None or W_V is None:
-            # This is the automapping that needs to be updated to after the split weights are passed correctly
-            return
-        W_O = weights.get("W_O")
-        b_Q = weights.get("b_Q")
-        b_K = weights.get("b_K")
-        b_V = weights.get("b_V")
-        b_O = weights.get("b_O")
-        if W_Q.ndim == 2:
-            assert self.config is not None
-            n_heads = self.config.n_heads
-            W_Q = einops.rearrange(
-                W_Q, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
-            )
-            W_K = einops.rearrange(
-                W_K, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
-            )
-            W_V = einops.rearrange(
-                W_V, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
-            )
-            if b_Q is not None and b_Q.ndim == 1:
-                b_Q = einops.rearrange(b_Q, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
-            if b_K is not None and b_K.ndim == 1:
-                b_K = einops.rearrange(b_K, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
-            if b_V is not None and b_V.ndim == 1:
-                b_V = einops.rearrange(b_V, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
-        self._W_Q = W_Q
-        self._W_K = W_K
-        self._W_V = W_V
-        self._b_Q = b_Q
-        self._b_K = b_K
-        self._b_V = b_V
-        if hasattr(self, "q") and self.q is not None and hasattr(self.q, "set_processed_weights"):
-            self.q.set_processed_weights({"weight": W_Q, "bias": b_Q})
-        if hasattr(self, "k") and self.k is not None and hasattr(self.k, "set_processed_weights"):
-            self.k.set_processed_weights({"weight": W_K, "bias": b_K})
-        if hasattr(self, "v") and self.v is not None and hasattr(self.v, "set_processed_weights"):
-            self.v.set_processed_weights({"weight": W_V, "bias": b_V})
-        if (
-            hasattr(self, "o")
-            and self.o is not None
-            and hasattr(self.o, "set_processed_weights")
-            and (W_O is not None)
-        ):
-            self.o.set_processed_weights({"weight": W_O, "bias": b_O})
-
-    def process_weights(
-        self,
-        fold_ln: bool = False,
-        center_writing_weights: bool = False,
-        center_unembed: bool = False,
-        fold_value_biases: bool = False,
-        refactor_factored_attn_matrices: bool = False,
-    ) -> None:
-        """Process QKV weights according to GPT2 pretrained logic.
-
-        Ports the weight processing from transformer_lens.pretrained.weight_conversions.gpt2
-        to work with the architecture adapter.
-        """
-        import einops
-
-        original_component = self.original_component
-        if original_component is None:
-            return
-        if hasattr(original_component, "c_attn"):
-            c_attn = cast(nn.Module, original_component.c_attn)
-            qkv_weight = c_attn.weight
-            qkv_bias = c_attn.bias
-        else:
-            qkv_submodule = None
-            for name, module in self.submodules.items():
-                if hasattr(module, "name") and module.name == "c_attn":
-                    qkv_submodule = getattr(original_component, module.name, None)
-                    break
-            if qkv_submodule is None:
-                return
-            qkv_weight = cast(torch.Tensor, qkv_submodule.weight)
-            qkv_bias = cast(torch.Tensor, qkv_submodule.bias)
-        W_Q, W_K, W_V = torch.tensor_split(cast(torch.Tensor, qkv_weight), 3, dim=1)
-        assert self.config is not None
-        W_Q = einops.rearrange(W_Q, "m (i h)->i m h", i=self.config.n_heads)
-        W_K = einops.rearrange(W_K, "m (i h)->i m h", i=self.config.n_heads)
-        W_V = einops.rearrange(W_V, "m (i h)->i m h", i=self.config.n_heads)
-        qkv_bias_tensor = cast(torch.Tensor, qkv_bias)
-        qkv_bias = einops.rearrange(
-            qkv_bias_tensor,
-            "(qkv index head)->qkv index head",
-            qkv=3,
-            index=self.config.n_heads,
-            head=self.config.d_head,
-        )
-        b_Q, b_K, b_V = (
-            cast(torch.Tensor, qkv_bias[0]),
-            cast(torch.Tensor, qkv_bias[1]),
-            cast(torch.Tensor, qkv_bias[2]),
-        )
-        W_O = None
-        b_O = None
-        if hasattr(original_component, "c_proj"):
-            c_proj = cast(nn.Module, original_component.c_proj)
-            W_O = cast(torch.Tensor, c_proj.weight)
-            b_O = cast(torch.Tensor, c_proj.bias)
-            W_O = einops.rearrange(W_O, "(i h) m->i h m", i=self.config.n_heads)
-        else:
-            for name, module in self.submodules.items():
-                if hasattr(module, "name") and module.name == "c_proj":
-                    proj_submodule = getattr(original_component, module.name, None)
-                    if proj_submodule is not None:
-                        W_O = proj_submodule.weight
-                        b_O = proj_submodule.bias
-                        W_O = einops.rearrange(W_O, "(i h) m->i h m", i=self.config.n_heads)
-                    break
-        self._processed_weights = {
-            "W_Q": W_Q,
-            "W_K": W_K,
-            "W_V": W_V,
-            "b_Q": b_Q,
-            "b_K": b_K,
-            "b_V": b_V,
-        }
-        if W_O is not None:
-            self._processed_weights["W_O"] = W_O
-        if b_O is not None:
-            self._processed_weights["b_O"] = b_O
-
-    def _extract_hooked_transformer_weights(self) -> None:
-        """Extract weights in HookedTransformer format for exact compatibility."""
-        if (
-            hasattr(self, "_processed_W_Q")
-            and hasattr(self, "_processed_W_K")
-            and hasattr(self, "_processed_W_V")
-        ):
-            self._W_Q = self._processed_W_Q
-            self._W_K = self._processed_W_K
-            self._W_V = self._processed_W_V
-            self._b_Q = self._processed_b_Q
-            self._b_K = self._processed_b_K
-            self._b_V = self._processed_b_V
-            if hasattr(self, "_processed_W_O") and self._processed_W_O is not None:
-                self._W_O = self._processed_W_O
-            else:
-                self._W_O = None
-            if hasattr(self, "_processed_b_O") and self._processed_b_O is not None:
-                self._b_O = self._processed_b_O
-            else:
-                self._b_O = None
-            self._hooked_weights_extracted = True
-            return
-        try:
-            if hasattr(self, "_reference_model") and self._reference_model is not None:
-                reference_model = self._reference_model
-                layer_num = getattr(self, "_layer_idx", 0)
-                reference_attn = reference_model.blocks[layer_num].attn
-                self._W_Q = reference_attn.W_Q.clone()
-                self._W_K = reference_attn.W_K.clone()
-                self._W_V = reference_attn.W_V.clone()
-                self._b_Q = reference_attn.b_Q.clone()
-                self._b_K = reference_attn.b_K.clone()
-                self._b_V = reference_attn.b_V.clone()
-                if hasattr(reference_attn, "W_O"):
-                    self._W_O = reference_attn.W_O.clone()
-                if hasattr(reference_attn, "b_O"):
-                    self._b_O = reference_attn.b_O.clone()
-                self._hooked_weights_extracted = True
-                self._reference_model = None
-                return
-        except Exception:
-            pass
-        if self._processed_weights is None:
-            return
-        try:
-            from transformer_lens import HookedTransformer
-
-            model_name = getattr(self.config, "model_name", "gpt2")
-            device = next(self.parameters()).device if list(self.parameters()) else "cpu"
-            reference_model = HookedTransformer.from_pretrained(
-                model_name,
-                device=device,
-                fold_ln=True,
-                center_writing_weights=True,
-                center_unembed=True,
-                fold_value_biases=True,
-                refactor_factored_attn_matrices=False,
-            )
-            layer_num = 0
-            current = self
-            while hasattr(current, "parent") and current.parent is not None:
-                parent = current.parent
-                if hasattr(parent, "blocks"):
-                    for i, block in enumerate(parent.blocks):
-                        if hasattr(block, "attn") and block.attn is self:
-                            layer_num = i
-                            break
-                    break
-                current = parent
-            reference_attn = reference_model.blocks[layer_num].attn
-            self._W_Q = reference_attn.W_Q.clone()  # type: ignore[operator,union-attr]
-            self._W_K = reference_attn.W_K.clone()  # type: ignore[operator,union-attr]
-            self._W_V = reference_attn.W_V.clone()  # type: ignore[operator,union-attr]
-            self._b_Q = reference_attn.b_Q.clone()  # type: ignore[operator,union-attr]
-            self._b_K = reference_attn.b_K.clone()  # type: ignore[operator,union-attr]
-            self._b_V = reference_attn.b_V.clone()  # type: ignore[operator,union-attr]
-            if hasattr(reference_attn, "W_O"):
-                self._W_O = reference_attn.W_O.clone()  # type: ignore[operator]
-            if hasattr(reference_attn, "b_O"):
-                self._b_O = reference_attn.b_O.clone()  # type: ignore[operator]
-            del reference_model
-            self._hooked_weights_extracted = True
-            return
-        except Exception:
-            pass
-        if self._processed_weights is None:
-            try:
-                self.process_weights(
-                    fold_ln=True,
-                    center_writing_weights=True,
-                    center_unembed=True,
-                    fold_value_biases=True,
-                    refactor_factored_attn_matrices=False,
-                )
-            except Exception as e:
-                print(f"⚠️  Failed to process weights manually: {e}")
-        if self._processed_weights is not None:
-            self._W_Q = self._processed_weights["W_Q"]
-            self._W_K = self._processed_weights["W_K"]
-            self._W_V = self._processed_weights["W_V"]
-            self._b_Q = self._processed_weights["b_Q"]
-            self._b_K = self._processed_weights["b_K"]
-            self._b_V = self._processed_weights["b_V"]
-            if "W_O" in self._processed_weights:
-                self._W_O = self._processed_weights["W_O"]
-            if "b_O" in self._processed_weights:
-                self._b_O = self._processed_weights["b_O"]
-            print(f"✅ Extracted HookedTransformer weights from processed weights")
-            self._hooked_weights_extracted = True
-        else:
-            print(f"⚠️  Unable to extract HookedTransformer weights for {self.name}")
-            print("Will attempt to use original component computation")
-            self._hooked_weights_extracted = False

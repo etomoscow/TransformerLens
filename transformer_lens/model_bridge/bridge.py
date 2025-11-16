@@ -908,9 +908,10 @@ class TransformerBridge(nn.Module):
             refactor_factored_attn_matrices=refactor_factored_attn_matrices,
             adapter=adapter,
         )
-        if verbose:
-            print("  Loading processed weights into components...")
-        object.__setattr__(self, "_processed_tl_weights", state_dict)
+        print("done folding")
+        # if verbose:
+        #     print("  Loading processed weights into components...")
+        # object.__setattr__(self, "_processed_tl_weights", state_dict)
 
         # Distribute weights to components using the new unified approach
         if verbose:
@@ -931,127 +932,127 @@ class TransformerBridge(nn.Module):
             JointQKVAttentionBridge,
         )
 
-        for layer_idx in range(self.cfg.n_layers):
-            if hasattr(self, "blocks") and layer_idx < len(self.blocks):
-                attn_component = self.blocks[layer_idx].attn
-                if isinstance(attn_component, JointQKVAttentionBridge):
-                    q_weight_key = f"blocks.{layer_idx}.attn.q.weight"
-                    k_weight_key = f"blocks.{layer_idx}.attn.k.weight"
-                    v_weight_key = f"blocks.{layer_idx}.attn.v.weight"
-                    q_bias_key = f"blocks.{layer_idx}.attn.q.bias"
-                    k_bias_key = f"blocks.{layer_idx}.attn.k.bias"
-                    v_bias_key = f"blocks.{layer_idx}.attn.v.bias"
-                    if (
-                        q_weight_key in state_dict
-                        and k_weight_key in state_dict
-                        and (v_weight_key in state_dict)
-                    ):
-                        q_weight_hf = state_dict[q_weight_key]
-                        k_weight_hf = state_dict[k_weight_key]
-                        v_weight_hf = state_dict[v_weight_key]
-                        q_weight_tl = einops.rearrange(
-                            q_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
-                        )
-                        k_weight_tl = einops.rearrange(
-                            k_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
-                        )
-                        v_weight_tl = einops.rearrange(
-                            v_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
-                        )
-                        qkv_weight = torch.cat([q_weight_hf, k_weight_hf, v_weight_hf], dim=1)
-                        if hasattr(attn_component, "qkv") and hasattr(
-                            attn_component.qkv, "_original_component"
-                        ):
-                            qkv_component = attn_component.qkv._original_component
-                            if hasattr(qkv_component, "weight"):
-                                qkv_component.weight.data = qkv_weight.T
-                                loaded_count += 1
-                        attn_component._W_Q = q_weight_tl
-                        attn_component._W_K = k_weight_tl
-                        attn_component._W_V = v_weight_tl
-                        o_weight_key_tl = f"blocks.{layer_idx}.attn.W_O"
-                        if o_weight_key_tl in state_dict:
-                            o_weight_key = o_weight_key_tl
-                        else:
-                            o_weight_key = self.adapter.translate_transformer_lens_path(
-                                f"blocks.{layer_idx}.attn.W_O"
-                            )
-                        if o_weight_key in state_dict:
-                            o_weight_tl = state_dict[o_weight_key]
-                            if hasattr(attn_component._original_component, "c_proj") and hasattr(
-                                attn_component._original_component.c_proj, "bias"
-                            ):
-                                o_bias = attn_component._original_component.c_proj.bias.data.clone()
-                            else:
-                                o_bias_key_tl = f"blocks.{layer_idx}.attn.b_O"
-                                if o_bias_key_tl in state_dict:
-                                    o_bias_key = o_bias_key_tl
-                                else:
-                                    o_bias_key = self.adapter.translate_transformer_lens_path(
-                                        f"blocks.{layer_idx}.attn.b_O"
-                                    )
-                                o_bias = state_dict.get(o_bias_key, None)
-                            if o_weight_tl.ndim == 3:
-                                o_weight_hf = einops.rearrange(o_weight_tl, "n h m -> (n h) m")
-                            else:
-                                o_weight_hf = o_weight_tl
-                            b_Q_tl = None
-                            b_K_tl = None
-                            b_V_tl = None
-                            if q_bias_key in state_dict:
-                                b_Q_tl = einops.rearrange(
-                                    state_dict[q_bias_key], "(n h) -> n h", n=self.cfg.n_heads
-                                )
-                                b_K_tl = einops.rearrange(
-                                    state_dict[k_bias_key], "(n h) -> n h", n=self.cfg.n_heads
-                                )
-                                b_V_tl = einops.rearrange(
-                                    state_dict[v_bias_key], "(n h) -> n h", n=self.cfg.n_heads
-                                )
-                            attn_component.set_processed_weights(
-                                {
-                                    "W_Q": q_weight_tl,
-                                    "W_K": k_weight_tl,
-                                    "W_V": v_weight_tl,
-                                    "W_O": o_weight_hf,
-                                    "b_Q": b_Q_tl,
-                                    "b_K": b_K_tl,
-                                    "b_V": b_V_tl,
-                                    "b_O": o_bias,
-                                }
-                            )
-                        if q_bias_key in state_dict:
-                            q_bias_hf = state_dict[q_bias_key]
-                            k_bias_hf = state_dict[k_bias_key]
-                            v_bias_hf = state_dict[v_bias_key]
-                            q_bias_tl = einops.rearrange(
-                                q_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
-                            )
-                            k_bias_tl = einops.rearrange(
-                                k_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
-                            )
-                            v_bias_tl = einops.rearrange(
-                                v_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
-                            )
-                            qkv_bias = torch.cat([q_bias_hf, k_bias_hf, v_bias_hf], dim=0)
-                            if hasattr(attn_component, "qkv") and hasattr(
-                                attn_component.qkv, "_original_component"
-                            ):
-                                qkv_component = attn_component.qkv._original_component
-                                if hasattr(qkv_component, "bias"):
-                                    qkv_component.bias.data = qkv_bias
-                                    loaded_count += 1
-                            attn_component._b_Q = q_bias_tl
-                            attn_component._b_K = k_bias_tl
-                            attn_component._b_V = v_bias_tl
-                        attn_component._hooked_weights_extracted = True
-                        if verbose:
-                            print(
-                                f"    Loaded processed QKV weights for layer {layer_idx} (JointQKVAttention)"
-                            )
-                            print(f"      Q/K/V HF format: {q_weight_hf.shape}")
-                            print(f"      Q/K/V TL format: {q_weight_tl.shape}")
-                            print(f"      Reconstructed joint QKV HF format: {qkv_weight.shape}")
+        # for layer_idx in range(self.cfg.n_layers):
+        #     if hasattr(self, "blocks") and layer_idx < len(self.blocks):
+        #         attn_component = self.blocks[layer_idx].attn
+        #         if isinstance(attn_component, JointQKVAttentionBridge):
+        #             q_weight_key = f"blocks.{layer_idx}.attn.q.weight"
+        #             k_weight_key = f"blocks.{layer_idx}.attn.k.weight"
+        #             v_weight_key = f"blocks.{layer_idx}.attn.v.weight"
+        #             q_bias_key = f"blocks.{layer_idx}.attn.q.bias"
+        #             k_bias_key = f"blocks.{layer_idx}.attn.k.bias"
+        #             v_bias_key = f"blocks.{layer_idx}.attn.v.bias"
+        #             if (
+        #                 q_weight_key in state_dict
+        #                 and k_weight_key in state_dict
+        #                 and (v_weight_key in state_dict)
+        #             ):
+        #                 q_weight_hf = state_dict[q_weight_key]
+        #                 k_weight_hf = state_dict[k_weight_key]
+        #                 v_weight_hf = state_dict[v_weight_key]
+        #                 q_weight_tl = einops.rearrange(
+        #                     q_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
+        #                 )
+        #                 k_weight_tl = einops.rearrange(
+        #                     k_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
+        #                 )
+        #                 v_weight_tl = einops.rearrange(
+        #                     v_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
+        #                 )
+        #                 qkv_weight = torch.cat([q_weight_hf, k_weight_hf, v_weight_hf], dim=1)
+        #                 if hasattr(attn_component, "qkv") and hasattr(
+        #                     attn_component.qkv, "_original_component"
+        #                 ):
+        #                     qkv_component = attn_component.qkv._original_component
+        #                     if hasattr(qkv_component, "weight"):
+        #                         qkv_component.weight.data = qkv_weight.T
+        #                         loaded_count += 1
+        #                 attn_component._W_Q = q_weight_tl
+        #                 attn_component._W_K = k_weight_tl
+        #                 attn_component._W_V = v_weight_tl
+        #                 o_weight_key_tl = f"blocks.{layer_idx}.attn.W_O"
+        #                 if o_weight_key_tl in state_dict:
+        #                     o_weight_key = o_weight_key_tl
+        #                 else:
+        #                     o_weight_key = self.adapter.translate_transformer_lens_path(
+        #                         f"blocks.{layer_idx}.attn.W_O"
+        #                     )
+        #                 if o_weight_key in state_dict:
+        #                     o_weight_tl = state_dict[o_weight_key]
+        #                     if hasattr(attn_component._original_component, "c_proj") and hasattr(
+        #                         attn_component._original_component.c_proj, "bias"
+        #                     ):
+        #                         o_bias = attn_component._original_component.c_proj.bias.data.clone()
+        #                     else:
+        #                         o_bias_key_tl = f"blocks.{layer_idx}.attn.b_O"
+        #                         if o_bias_key_tl in state_dict:
+        #                             o_bias_key = o_bias_key_tl
+        #                         else:
+        #                             o_bias_key = self.adapter.translate_transformer_lens_path(
+        #                                 f"blocks.{layer_idx}.attn.b_O"
+        #                             )
+        #                         o_bias = state_dict.get(o_bias_key, None)
+        #                     if o_weight_tl.ndim == 3:
+        #                         o_weight_hf = einops.rearrange(o_weight_tl, "n h m -> (n h) m")
+        #                     else:
+        #                         o_weight_hf = o_weight_tl
+        #                     b_Q_tl = None
+        #                     b_K_tl = None
+        #                     b_V_tl = None
+        #                     if q_bias_key in state_dict:
+        #                         b_Q_tl = einops.rearrange(
+        #                             state_dict[q_bias_key], "(n h) -> n h", n=self.cfg.n_heads
+        #                         )
+        #                         b_K_tl = einops.rearrange(
+        #                             state_dict[k_bias_key], "(n h) -> n h", n=self.cfg.n_heads
+        #                         )
+        #                         b_V_tl = einops.rearrange(
+        #                             state_dict[v_bias_key], "(n h) -> n h", n=self.cfg.n_heads
+        #                         )
+        #                     attn_component.set_processed_weights(
+        #                         {
+        #                             "q.weight": q_weight_tl,
+        #                             "k.weight": k_weight_tl,
+        #                             "v.weight": v_weight_tl,
+        #                             "o.weight": o_weight_hf,
+        #                             "q.bias": b_Q_tl,
+        #                             "k.bias": b_K_tl,
+        #                             "v.bias": b_V_tl,
+        #                             "o.bias": o_bias,
+        #                         }
+        #                     )
+        #                 if q_bias_key in state_dict:
+        #                     q_bias_hf = state_dict[q_bias_key]
+        #                     k_bias_hf = state_dict[k_bias_key]
+        #                     v_bias_hf = state_dict[v_bias_key]
+        #                     q_bias_tl = einops.rearrange(
+        #                         q_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
+        #                     )
+        #                     k_bias_tl = einops.rearrange(
+        #                         k_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
+        #                     )
+        #                     v_bias_tl = einops.rearrange(
+        #                         v_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
+        #                     )
+        #                     qkv_bias = torch.cat([q_bias_hf, k_bias_hf, v_bias_hf], dim=0)
+        #                     if hasattr(attn_component, "qkv") and hasattr(
+        #                         attn_component.qkv, "_original_component"
+        #                     ):
+        #                         qkv_component = attn_component.qkv._original_component
+        #                         if hasattr(qkv_component, "bias"):
+        #                             qkv_component.bias.data = qkv_bias
+        #                             loaded_count += 1
+        #                     attn_component._b_Q = q_bias_tl
+        #                     attn_component._b_K = k_bias_tl
+        #                     attn_component._b_V = v_bias_tl
+        #                 attn_component._hooked_weights_extracted = True
+        #                 if verbose:
+        #                     print(
+        #                         f"    Loaded processed QKV weights for layer {layer_idx} (JointQKVAttention)"
+        #                     )
+        #                     print(f"      Q/K/V HF format: {q_weight_hf.shape}")
+        #                     print(f"      Q/K/V TL format: {q_weight_tl.shape}")
+        #                     print(f"      Reconstructed joint QKV HF format: {qkv_weight.shape}")
         for tb_key, weight_tensor in state_dict.items():
             # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
             if any(
@@ -1155,6 +1156,7 @@ class TransformerBridge(nn.Module):
             print("  Setting 3D processed weight attributes...")
         if verbose:
             print("  Extracting HookedTransformer-compatible weights...")
+
         if fold_ln:
             object.__setattr__(self.cfg, "layer_norm_folding", True)
         if verbose:
@@ -2663,10 +2665,7 @@ class TransformerBridge(nn.Module):
             if input_key in current_state_dict:
                 mapped_state_dict[input_key] = value
             else:
-                bridge_key = self.adapter.convert_hf_key_to_bridge_key(input_key)
-                if bridge_key in current_state_dict:
-                    mapped_state_dict[bridge_key] = value
-                elif input_key in clean_to_actual:
+                if input_key in clean_to_actual:
                     actual_key = clean_to_actual[input_key]
                     mapped_state_dict[actual_key] = value
                 else:

@@ -497,35 +497,16 @@ class ArchitectureAdapter:
                                 current_mapping = current_mapping[part]  # type: ignore[assignment]
                         if hasattr(current_mapping, "submodules"):
                             attn_components = list(current_mapping.submodules.keys())
-                            if "qkv" in attn_components:
-                                path = path.replace(".W_Q", ".qkv")
-                                path = path.replace(".W_K", ".qkv")
-                                path = path.replace(".W_V", ".qkv")
-                                path = path.replace(".b_Q", ".qkv")
-                                path = path.replace(".b_K", ".qkv")
-                                path = path.replace(".b_V", ".qkv")
-                                path = path.replace("._W_K", ".qkv")
-                                path = path.replace("._W_V", ".qkv")
-                                path = path.replace("._b_K", ".qkv")
-                                path = path.replace("._b_V", ".qkv")
-                            elif all((comp in attn_components for comp in ["q", "k", "v"])):
-                                path = path.replace(".W_Q", ".q")
-                                path = path.replace(".W_K", ".k")
-                                path = path.replace(".W_V", ".v")
-                                path = path.replace(".b_Q", ".q")
-                                path = path.replace(".b_K", ".k")
-                                path = path.replace(".b_V", ".v")
-                                path = path.replace("._W_K", ".k")
-                                path = path.replace("._W_V", ".v")
-                                path = path.replace("._b_K", ".k")
-                                path = path.replace("._b_V", ".v")
-                            elif "qkv_proj" in attn_components:
-                                path = path.replace(".W_Q", ".qkv_proj")
-                                path = path.replace(".W_K", ".qkv_proj")
-                                path = path.replace(".W_V", ".qkv_proj")
-                                path = path.replace(".b_Q", ".qkv_proj")
-                                path = path.replace(".b_K", ".qkv_proj")
-                                path = path.replace(".b_V", ".qkv_proj")
+                            path = path.replace(".W_Q", ".q")
+                            path = path.replace(".W_K", ".k")
+                            path = path.replace(".W_V", ".v")
+                            path = path.replace(".b_Q", ".q")
+                            path = path.replace(".b_K", ".k")
+                            path = path.replace(".b_V", ".v")
+                            path = path.replace("._W_K", ".k")
+                            path = path.replace("._W_V", ".v")
+                            path = path.replace("._b_K", ".k")
+                            path = path.replace("._b_V", ".v")
                 except Exception:
                     pass
         if any(
@@ -598,61 +579,6 @@ class ArchitectureAdapter:
             path = path.replace(".w", "")
             path = path.replace(".b", "")
         return (path, param_suffix)
-
-    def convert_hf_key_to_bridge_key(self, hf_key: str) -> str:
-        """Convert a HuggingFace-style key to a bridge key with _original_component references.
-
-        Args:
-            hf_key: The HuggingFace-style key (e.g., "transformer.h.0.attn.c_attn.weight" or "transformer.h.0.mlp.c_fc.weight")
-
-        Returns:
-            The bridge key with _original_component references. Note that attention and MLP components
-            follow different patterns:
-            - Attention: "transformer.h.0._original_component.attn._original_component.c_attn.weight"
-            - MLP: "transformer.h.0._original_component.mlp._original_component.c_fc._original_component.weight"
-        """
-        if "transformer.h." in hf_key:
-            parts = hf_key.split(".")
-            if len(parts) >= 4 and parts[2].isdigit():
-                layer = parts[2]
-                if "attn.c_attn" in hf_key:
-                    return f"transformer.h.{layer}._original_component.attn._original_component.c_attn.{parts[-1]}"
-                elif "attn.c_proj" in hf_key:
-                    return f"transformer.h.{layer}._original_component.attn._original_component.c_proj.{parts[-1]}"
-                elif "mlp.c_fc" in hf_key:  # type: ignore[attr-defined]
-                    return f"transformer.h.{layer}._original_component.mlp._original_component.c_fc._original_component.{parts[-1]}"  # type: ignore[attr-defined]
-                elif "mlp.c_proj" in hf_key:  # type: ignore[attr-defined]
-                    return f"transformer.h.{layer}._original_component.mlp._original_component.c_proj._original_component.{parts[-1]}"
-                elif "attn.qkv" in hf_key:
-                    return f"transformer.h.{layer}._original_component.attn.qkv._original_component.{parts[-1]}"
-                elif "attn.o" in hf_key:  # type: ignore[attr-defined]
-                    return f"transformer.h.{layer}._original_component.attn.o._original_component.{parts[-1]}"
-                elif "mlp.input" in hf_key:
-                    return f"transformer.h.{layer}._original_component.mlp.input._original_component.{parts[-1]}"
-                elif "mlp.in" in hf_key:
-                    return f"transformer.h.{layer}._original_component.mlp.in._original_component.{parts[-1]}"
-                elif "mlp.out" in hf_key:
-                    return f"transformer.h.{layer}._original_component.mlp.out._original_component.{parts[-1]}"
-                elif "ln_1" in hf_key:
-                    return f"transformer.h.{layer}._original_component.ln_1._original_component.{parts[-1]}"
-                elif "ln_2" in hf_key:
-                    return f"transformer.h.{layer}._original_component.ln_2._original_component.{parts[-1]}"
-                elif "ln1" in hf_key:
-                    return f"transformer.h.{layer}._original_component.ln_1._original_component.{parts[-1]}"
-                elif "ln2" in hf_key:
-                    return f"transformer.h.{layer}._original_component.ln_2._original_component.{parts[-1]}"
-        elif hf_key == "transformer.wte.weight":
-            return "transformer.wte._original_component.weight"
-        elif hf_key == "transformer.wpe.weight":
-            return "transformer.wpe._original_component.weight"
-        elif hf_key == "lm_head.weight":
-            return "lm_head._original_component.weight"
-        elif "transformer.ln_f" in hf_key:
-            if "weight" in hf_key:
-                return "transformer.ln_f._original_component.weight"
-            elif "bias" in hf_key:
-                return "transformer.ln_f._original_component.bias"
-        return hf_key
 
     def convert_hf_key_to_tl_key(self, hf_key: str) -> str:
         """Convert a HuggingFace-style key to TransformerLens format key using component mapping.

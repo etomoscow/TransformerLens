@@ -136,42 +136,33 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                 "embed.e": "transformer.wte.weight",
                 "blocks.{i}.ln1.weight": "transformer.h.{i}.ln_1.weight",
                 "blocks.{i}.ln1.bias": "transformer.h.{i}.ln_1.bias",
-                "blocks.{i}.attn.q.weight": (
+                "blocks.{i}.attn.W_Q": (
                     "transformer.h.{i}.attn.c_attn.weight",
-                    RearrangeHookConversion(
-                        "(n h) m-> n m h",
-                        n=self.cfg.n_heads,
-                    ),
+                    QKVSplitRearrangeConversion(0, "d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
-                "blocks.{i}.attn.k.weight": (
+                "blocks.{i}.attn.W_K": (
                     "transformer.h.{i}.attn.c_attn.weight",
-                    RearrangeHookConversion(
-                        "(n h) m-> n m h",
-                        n=self.cfg.n_heads,
-                    ),
+                    QKVSplitRearrangeConversion(1, "d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
-                "blocks.{i}.attn.v.weight": (
+                "blocks.{i}.attn.W_V": (
                     "transformer.h.{i}.attn.c_attn.weight",
-                    RearrangeHookConversion(
-                        "(n h) m-> n m h",
-                        n=self.cfg.n_heads,
-                    ),
+                    QKVSplitRearrangeConversion(2, "d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
                 "blocks.{i}.attn.o.weight": (
                     "transformer.h.{i}.attn.c_proj.weight",
                     RearrangeHookConversion("(n h) m -> n h m", n=self.cfg.n_heads),
                 ),
-                "blocks.{i}.attn.q.bias": (
+                "blocks.{i}.attn.b_Q": (
                     "transformer.h.{i}.attn.c_attn.bias",
-                    RearrangeHookConversion("(n d_head) -> n d_head", n=self.cfg.n_heads),
+                    QKVBiasConversion(0, self.cfg.n_heads, self.cfg.d_head),
                 ),
-                "blocks.{i}.attn.k.bias": (
+                "blocks.{i}.attn.b_K": (
                     "transformer.h.{i}.attn.c_attn.bias",
-                    RearrangeHookConversion("(n d_head) -> n d_head", n=self.cfg.n_heads),
+                    QKVBiasConversion(1, self.cfg.n_heads, self.cfg.d_head),
                 ),
-                "blocks.{i}.attn.v.bias": (
+                "blocks.{i}.attn.b_V": (
                     "transformer.h.{i}.attn.c_attn.bias",
-                    RearrangeHookConversion("(n d_head) -> n d_head", n=self.cfg.n_heads),
+                    QKVBiasConversion(2, self.cfg.n_heads, self.cfg.d_head),
                 ),
                 "blocks.{i}.attn.o.bias": "transformer.h.{i}.attn.c_proj.bias",
                 "blocks.{i}.ln2.weight": "transformer.h.{i}.ln_2.weight",
@@ -190,59 +181,6 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                 # TransformerLens parameter names (for weight processing functions)
                 "embed.W_E": "transformer.wte.weight",
                 "pos_embed.W_pos": "transformer.wpe.weight",
-                "blocks.{i}.attn.W_Q": (
-                    "transformer.h.{i}.attn.c_attn.weight",
-                    QKVSplitRearrangeConversion(
-                        qkv_index=0,  # Q is the first part
-                        rearrange_pattern="m (i h) -> i m h",
-                        i=self.cfg.n_heads,
-                    ),
-                ),
-                "blocks.{i}.attn.W_K": (
-                    "transformer.h.{i}.attn.c_attn.weight",
-                    QKVSplitRearrangeConversion(
-                        qkv_index=1,  # K is the second part
-                        rearrange_pattern="m (i h) -> i m h",
-                        i=self.cfg.n_heads,
-                    ),
-                ),
-                "blocks.{i}.attn.W_V": (
-                    "transformer.h.{i}.attn.c_attn.weight",
-                    QKVSplitRearrangeConversion(
-                        qkv_index=2,  # V is the third part
-                        rearrange_pattern="m (i h) -> i m h",
-                        i=self.cfg.n_heads,
-                    ),
-                ),
-                "blocks.{i}.attn.W_O": (
-                    "transformer.h.{i}.attn.c_proj.weight",
-                    RearrangeHookConversion("(i h) m -> i h m", i=self.cfg.n_heads),
-                ),
-                "blocks.{i}.attn.b_Q": (
-                    "transformer.h.{i}.attn.c_attn.bias",
-                    QKVBiasConversion(
-                        qkv_index=0,  # Q bias is the first part
-                        n_heads=self.cfg.n_heads,
-                        d_head=self.cfg.d_head,
-                    ),
-                ),
-                "blocks.{i}.attn.b_K": (
-                    "transformer.h.{i}.attn.c_attn.bias",
-                    QKVBiasConversion(
-                        qkv_index=1,  # K bias is the second part
-                        n_heads=self.cfg.n_heads,
-                        d_head=self.cfg.d_head,
-                    ),
-                ),
-                "blocks.{i}.attn.b_V": (
-                    "transformer.h.{i}.attn.c_attn.bias",
-                    QKVBiasConversion(
-                        qkv_index=2,  # V bias is the third part
-                        n_heads=self.cfg.n_heads,
-                        d_head=self.cfg.d_head,
-                    ),
-                ),
-                "blocks.{i}.attn.b_O": "transformer.h.{i}.attn.c_proj.bias",
                 "blocks.{i}.ln1.w": "transformer.h.{i}.ln_1.weight",
                 "blocks.{i}.ln1.b": "transformer.h.{i}.ln_1.bias",
                 "blocks.{i}.ln2.w": "transformer.h.{i}.ln_2.weight",

@@ -324,62 +324,31 @@ class ProcessWeights:
         uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(
             state_dict, layer, adapter
         )
+        wq_tensor = state_dict[W_Q_key]
+        wk_tensor = state_dict[W_K_key]
+        wv_tensor = state_dict[W_V_key]
+        bq_tensor = None
+        bk_tensor = None
+        bv_tensor = None
         if adapter and uses_hf_format and (not uses_tl_format):
-            split_q_key = f"blocks.{layer}.attn.q.weight"
-            split_k_key = f"blocks.{layer}.attn.k.weight"
-            split_v_key = f"blocks.{layer}.attn.v.weight"
-            if (
-                split_q_key in state_dict
-                and split_k_key in state_dict
-                and (split_v_key in state_dict)
-            ):
-                import einops
-
-                wq_hf = state_dict[split_q_key]
-                wk_hf = state_dict[split_k_key]
-                wv_hf = state_dict[split_v_key]
-                wq_tensor = einops.rearrange(wq_hf, "m (n h) -> n m h", n=cfg.n_heads)
-                wk_tensor = einops.rearrange(wk_hf, "m (n h) -> n m h", n=cfg.n_heads)
-                wv_tensor = einops.rearrange(wv_hf, "m (n h) -> n m h", n=cfg.n_heads)
-                split_bq_key = f"blocks.{layer}.attn.q.bias"
-                split_bk_key = f"blocks.{layer}.attn.k.bias"
-                split_bv_key = f"blocks.{layer}.attn.v.bias"
-                bq_tensor = None
-                bk_tensor = None
-                bv_tensor = None
-                if split_bq_key in state_dict:
-                    bq_hf = state_dict[split_bq_key]
-                    bq_tensor = einops.rearrange(bq_hf, "(n h) -> n h", n=cfg.n_heads)
-                if split_bk_key in state_dict:
-                    bk_hf = state_dict[split_bk_key]
-                    bk_tensor = einops.rearrange(bk_hf, "(n h) -> n h", n=cfg.n_heads)
-                if split_bv_key in state_dict:
-                    bv_hf = state_dict[split_bv_key]
-                    bv_tensor = einops.rearrange(bv_hf, "(n h) -> n h", n=cfg.n_heads)
-            else:
-                wq_converted = ProcessWeights.convert_tensor_to_tl_format(
-                    f"blocks.{layer}.attn.W_Q", adapter, state_dict, cfg, layer
-                )
-                wk_converted = ProcessWeights.convert_tensor_to_tl_format(
-                    f"blocks.{layer}.attn.W_K", adapter, state_dict, cfg, layer
-                )
-                wv_converted = ProcessWeights.convert_tensor_to_tl_format(
-                    f"blocks.{layer}.attn.W_V", adapter, state_dict, cfg, layer
-                )
-                if wq_converted is None or wk_converted is None or wv_converted is None:
-                    raise ValueError(f"Failed to convert Q/K/V weights for layer {layer}")
-                wq_tensor = wq_converted
-                wk_tensor = wk_converted
-                wv_tensor = wv_converted
-                bq_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                    f"blocks.{layer}.attn.b_Q", adapter, state_dict, cfg, layer
-                )
-                bk_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                    f"blocks.{layer}.attn.b_K", adapter, state_dict, cfg, layer
-                )
-                bv_tensor = ProcessWeights.convert_tensor_to_tl_format(
-                    f"blocks.{layer}.attn.b_V", adapter, state_dict, cfg, layer
-                )
+            wq_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                f"blocks.{layer}.attn.W_Q", adapter, state_dict, cfg, layer
+            )
+            wk_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                f"blocks.{layer}.attn.W_K", adapter, state_dict, cfg, layer
+            )
+            wv_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                f"blocks.{layer}.attn.W_V", adapter, state_dict, cfg, layer
+            )
+            bq_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                f"blocks.{layer}.attn.b_Q", adapter, state_dict, cfg, layer
+            )
+            bk_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                f"blocks.{layer}.attn.b_K", adapter, state_dict, cfg, layer
+            )
+            bv_tensor = ProcessWeights.convert_tensor_to_tl_format(
+                f"blocks.{layer}.attn.b_V", adapter, state_dict, cfg, layer
+            )
         else:
             wq_tensor = ProcessWeights._safe_get_tensor(
                 state_dict, f"blocks.{layer}.attn.W_Q", adapter=None
@@ -674,108 +643,53 @@ class ProcessWeights:
         """
         if wq_tensor is None:
             return
+        wq_key = keys["W_Q"]
+        wk_key = keys["W_K"]
+        wv_key = keys["W_V"]
+        bq_key = keys["b_Q"]
+        bk_key = keys["b_K"]
+        bv_key = keys["b_V"]
         if adapter:
-            hf_w_q_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_Q")
-            hf_w_k_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_K")
-            hf_w_v_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_V")
-            if hf_w_q_key == hf_w_k_key == hf_w_v_key:
-                if (
-                    wk_tensor is None
-                    or wv_tensor is None
-                    or bq_tensor is None
-                    or (bk_tensor is None)
-                    or (bv_tensor is None)
-                ):
-                    return
-                import einops
-
-                n_heads = cfg.n_heads
-                d_head = cfg.d_head
-                d_model = cfg.d_model
-                W_Q_hf = einops.rearrange(wq_tensor, "i m h -> m (i h)")
-                W_K_hf = einops.rearrange(wk_tensor, "i m h -> m (i h)")
-                W_V_hf = einops.rearrange(wv_tensor, "i m h -> m (i h)")
-                b_Q_hf = einops.rearrange(bq_tensor, "i h -> (i h)")
-                b_K_hf = einops.rearrange(bk_tensor, "i h -> (i h)")
-                b_V_hf = einops.rearrange(bv_tensor, "i h -> (i h)")
-                new_qkv_weight = torch.cat([W_Q_hf, W_K_hf, W_V_hf], dim=1)
-                new_qkv_bias = torch.cat([b_Q_hf, b_K_hf, b_V_hf])
-                tb_w_q_key = f"blocks.{layer}.attn.q.weight"
-                tb_w_k_key = f"blocks.{layer}.attn.k.weight"
-                tb_w_v_key = f"blocks.{layer}.attn.v.weight"
-                tb_b_q_key = f"blocks.{layer}.attn.q.bias"
-                tb_b_k_key = f"blocks.{layer}.attn.k.bias"
-                tb_b_v_key = f"blocks.{layer}.attn.v.bias"
-                state_dict[tb_w_q_key] = einops.rearrange(wq_tensor, "i m h -> m (i h)")
-                state_dict[tb_w_k_key] = einops.rearrange(wk_tensor, "i m h -> m (i h)")
-                state_dict[tb_w_v_key] = einops.rearrange(wv_tensor, "i m h -> m (i h)")
-                if bq_tensor is not None:
-                    state_dict[tb_b_q_key] = einops.rearrange(bq_tensor, "i h -> (i h)")
-                    state_dict[tb_b_k_key] = einops.rearrange(bk_tensor, "i h -> (i h)")
-                    state_dict[tb_b_v_key] = einops.rearrange(bv_tensor, "i h -> (i h)")
-                hf_layer_prefix = adapter.translate_transformer_lens_path(f"blocks.{layer}").rstrip(
-                    "."
+            # Pass TL-format keys to convert_tensor_to_hf_format, not HF-format keys
+            converted_wq = ProcessWeights.convert_tensor_to_hf_format(
+                wq_tensor, f"blocks.{layer}.attn.W_Q", adapter, cfg, layer
+            )
+            converted_wk = ProcessWeights.convert_tensor_to_hf_format(
+                wk_tensor, f"blocks.{layer}.attn.W_K", adapter, cfg, layer
+            )
+            converted_wv = ProcessWeights.convert_tensor_to_hf_format(
+                wv_tensor, f"blocks.{layer}.attn.W_V", adapter, cfg, layer
                 )
-                keys_to_delete = [
-                    k
-                    for k in list(state_dict.keys())
-                    if k.startswith(hf_layer_prefix + ".")
-                    and ".attn." in k
-                    and any(
-                        (
-                            qkv_marker in k
-                            for qkv_marker in [".q.", ".k.", ".v.", ".qkv.", ".c_attn."]
-                        )
-                    )
-                ]
-                for key_to_remove in keys_to_delete:
-                    del state_dict[key_to_remove]
-            else:
-                hf_w_q_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_Q")
-                hf_w_k_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_K")
-                hf_w_v_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.W_V")
-                hf_b_q_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_Q")
-                hf_b_k_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_K")
-                hf_b_v_key = adapter.translate_transformer_lens_path(f"blocks.{layer}.attn.b_V")
-                converted_wq = ProcessWeights.convert_tensor_to_hf_format(
-                    wq_tensor, f"blocks.{layer}.attn.W_Q", adapter, cfg, layer
-                )
-                converted_wk = ProcessWeights.convert_tensor_to_hf_format(
-                    wk_tensor, f"blocks.{layer}.attn.W_K", adapter, cfg, layer
-                )
-                converted_wv = ProcessWeights.convert_tensor_to_hf_format(
-                    wv_tensor, f"blocks.{layer}.attn.W_V", adapter, cfg, layer
-                )
-                if converted_wq is None or converted_wk is None or converted_wv is None:
-                    raise ValueError(f"Required attention weights missing for layer {layer}")
-                state_dict[hf_w_q_key] = converted_wq
-                state_dict[hf_w_k_key] = converted_wk
-                state_dict[hf_w_v_key] = converted_wv
-                converted_bq = ProcessWeights.convert_tensor_to_hf_format(
-                    bq_tensor, f"blocks.{layer}.attn.b_Q", adapter, cfg, layer
-                )
-                if converted_bq is not None:
-                    state_dict[hf_b_q_key] = converted_bq
-                converted_bk = ProcessWeights.convert_tensor_to_hf_format(
-                    bk_tensor, f"blocks.{layer}.attn.b_K", adapter, cfg, layer
-                )
-                if converted_bk is not None:
-                    state_dict[hf_b_k_key] = converted_bk
-                converted_bv = ProcessWeights.convert_tensor_to_hf_format(
-                    bv_tensor, f"blocks.{layer}.attn.b_V", adapter, cfg, layer
-                )
-                if converted_bv is not None:
-                    state_dict[hf_b_v_key] = converted_bv
+            if converted_wq is None or converted_wk is None or converted_wv is None:
+                raise ValueError(f"Required attention weights missing for layer {layer}")
+            state_dict[wq_key] = converted_wq
+            state_dict[wk_key] = converted_wk
+            state_dict[wv_key] = converted_wv
+            converted_bq = ProcessWeights.convert_tensor_to_hf_format(
+                bq_tensor, f"blocks.{layer}.attn.b_Q", adapter, cfg, layer
+            )
+            if converted_bq is not None:
+                state_dict[bq_key] = converted_bq
+            converted_bk = ProcessWeights.convert_tensor_to_hf_format(
+                bk_tensor, f"blocks.{layer}.attn.b_K", adapter, cfg, layer
+            )
+            if converted_bk is not None:
+                state_dict[bk_key] = converted_bk
+            converted_bv = ProcessWeights.convert_tensor_to_hf_format(
+                bv_tensor, f"blocks.{layer}.attn.b_V", adapter, cfg, layer
+            )
+            if converted_bv is not None:
+                state_dict[bv_key] = converted_bv
         else:
-            state_dict[keys["W_Q"]] = wq_tensor
-            state_dict[keys["W_K"]] = wk_tensor
-            state_dict[keys["W_V"]] = wv_tensor
+            state_dict[wq_key] = wq_tensor
+            state_dict[wk_key] = wk_tensor
+            state_dict[wv_key] = wv_tensor
             if bq_tensor is not None:
-                state_dict[keys["b_Q"]] = bq_tensor
+                state_dict[bq_key] = bq_tensor
             if bk_tensor is not None:
-                state_dict[keys["b_K"]] = bk_tensor
+                state_dict[bk_key] = bk_tensor
             if bv_tensor is not None:
-                state_dict[keys["b_V"]] = bv_tensor
+                state_dict[bv_key] = bv_tensor
 
     @staticmethod
     def _detect_unembed_format(state_dict: Dict[str, torch.Tensor], adapter) -> tuple[bool, bool]:
@@ -1182,10 +1096,22 @@ class ProcessWeights:
                     d_head = cfg.d_head
                     d_model = cfg.d_model
                     b_V_original_shape = b_V.shape
+
+                    # Handle split QKV format where bias might be [1, d_model] or [n_heads, d_head]
+                    is_split_format = ".attn.v.bias" in b_V_key or ".attn.k.bias" in b_V_key
+                    if is_split_format and b_V.shape[0] == 1 and b_V.shape[1] == n_heads * d_head:
+                        # Reshape [1, n_heads * d_head] to [n_heads, d_head]
+                        b_V = b_V.reshape(n_heads, d_head)
+                    elif b_V.shape != (n_heads, d_head):
+                        # If not already [n_heads, d_head], try to reshape
+                        if b_V.numel() == n_heads * d_head:
+                            b_V = b_V.reshape(n_heads, d_head)
+
                     if getattr(cfg, "n_key_value_heads", None) is not None:
                         b_V = torch.repeat_interleave(
                             b_V, dim=0, repeats=cfg.n_heads // cfg.n_key_value_heads
                         )
+
                     W_O_reshaped = einops.rearrange(W_O, "(i h) m -> i h m", i=n_heads)
                     folded_b_O = b_O_original + (b_V[:, :, None] * W_O_reshaped).sum([0, 1])
                     state_dict[b_V_key] = torch.zeros(
@@ -1419,23 +1345,50 @@ class ProcessWeights:
         """
         if adapter is None:
             raise ValueError("Adapter must be provided for tensor conversion")
-        hf_key = adapter.translate_transformer_lens_path(param_name)
-        if hf_key not in model_state_dict:
-            return None
-        tensor = model_state_dict[hf_key]
+
+        # First check if there's a conversion rule that specifies the HF key
+        hf_key = None
         if hasattr(adapter, "conversion_rules") and adapter.conversion_rules is not None:
             placeholder_param_name = param_name
             if "blocks." in param_name and ".attn." in param_name:
                 import re
-
                 placeholder_param_name = re.sub("blocks\\.\\d+\\.", "blocks.{i}.", param_name)
             elif "blocks." in param_name and ".mlp." in param_name:
                 import re
-
                 placeholder_param_name = re.sub("blocks\\.\\d+\\.", "blocks.{i}.", param_name)
             elif "blocks." in param_name and ".ln" in param_name:
                 import re
+                placeholder_param_name = re.sub("blocks\\.\\d+\\.", "blocks.{i}.", param_name)
 
+            if placeholder_param_name in adapter.conversion_rules.fields:
+                field_info = adapter.conversion_rules.fields[placeholder_param_name]
+                if isinstance(field_info, tuple):
+                    # Extract the HF key from the conversion rule
+                    hf_key_template = field_info[0]
+                    # Replace placeholders with actual layer index
+                    if layer_idx is not None and "{i}" in hf_key_template:
+                        hf_key = hf_key_template.replace("{i}", str(layer_idx))
+                    else:
+                        hf_key = hf_key_template
+
+        # Fall back to translate_transformer_lens_path if no conversion rule found
+        if hf_key is None:
+            hf_key = adapter.translate_transformer_lens_path(param_name)
+
+        if hf_key not in model_state_dict:
+            return None
+        tensor = model_state_dict[hf_key]
+
+        if hasattr(adapter, "conversion_rules") and adapter.conversion_rules is not None:
+            placeholder_param_name = param_name
+            if "blocks." in param_name and ".attn." in param_name:
+                import re
+                placeholder_param_name = re.sub("blocks\\.\\d+\\.", "blocks.{i}.", param_name)
+            elif "blocks." in param_name and ".mlp." in param_name:
+                import re
+                placeholder_param_name = re.sub("blocks\\.\\d+\\.", "blocks.{i}.", param_name)
+            elif "blocks." in param_name and ".ln" in param_name:
+                import re
                 placeholder_param_name = re.sub("blocks\\.\\d+\\.", "blocks.{i}.", param_name)
             if placeholder_param_name in adapter.conversion_rules.fields:
                 conversion_action = adapter.conversion_rules.get_conversion_action(
