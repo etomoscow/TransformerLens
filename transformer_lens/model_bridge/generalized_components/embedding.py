@@ -123,5 +123,4 @@ class EmbeddingBridge(GeneralizedComponent):
         # Set the weight directly into the original component's parameters
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
-                print("Set embedding")
                 param.data = weight.contiguous()

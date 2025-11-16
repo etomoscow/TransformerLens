@@ -665,14 +665,11 @@ class ProcessWeights:
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with centered writing weights.
         """
-        layer = 0
-        uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(state_dict, layer, adapter)
         embed_W_E_key = ProcessWeights._get_param_key('embed.W_E', adapter)
         try:
             pos_embed_W_pos_key = ProcessWeights._get_param_key('pos_embed.W_pos', adapter) if getattr(cfg, 'positional_embedding_type', 'standard') != 'rotary' else None
         except ValueError:
             pos_embed_W_pos_key = None
-        print('embed_W_E_key', embed_W_E_key)
         if embed_W_E_key not in state_dict:
             raise KeyError(f"Expected embedding key '{embed_W_E_key}' not found in state_dict. Available keys: {list(state_dict.keys())[:10]}...")
         state_dict[embed_W_E_key] = state_dict[embed_W_E_key] - state_dict[embed_W_E_key].mean(-1, keepdim=True)
@@ -905,6 +902,132 @@ class ProcessWeights:
             state_dict = ProcessWeights.refactor_factored_attn_matrices(state_dict, cfg, adapter=adapter)
         return state_dict
 
+
+    @staticmethod
+    def refactor_factored_attn_matrices(
+        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
+    ) -> Dict[str, torch.Tensor]:
+        """Experimental method for managing queries, keys and values.
+
+        As argued in [A Mathematical Framework for Transformer
+        Circuits](https://transformer-circuits.pub/2021/framework/index.html), queries, keys and
+        values are somewhat arbitrary intermediate terms when computing with the low rank factored
+        matrices W_QK = W_Q @ W_K.T and W_OV = W_V @ W_O, and these matrices are the only thing
+        determining head behaviour. But there are many ways to find a low rank factorization to a
+        given matrix, and hopefully some of these are more interpretable than others! This method is
+        one attempt, which makes all of the matrices have orthogonal rows or columns, W_O into a
+        rotation and W_Q and W_K having the nth column in each having the same norm. The formula is
+        $W_V = U @ S,W_O=Vh.T,W_Q=U@S.sqrt(),W_K=Vh@S.sqrt()$.
+
+        More details:
+
+        If W_OV = U @ S @ Vh.T in its singular value decomposition, (where S is in R^d_head not
+        R^d_model, as W_OV is low rank), W_OV = (U @ S) @ (Vh.T) is an equivalent low rank
+        factorisation, where rows/columns of each matrix are orthogonal! So setting $W_V=US$ and
+        $W_O=Vh.T$ works just as well. I *think* this is a more interpretable setup, because now
+        $W_O$ is just a rotation, and doesn't change the norm, so $z$ has the same norm as the
+        result of the head.
+
+        For $W_QK = W_Q @ W_K.T$ we use the refactor $W_Q = U @ S.sqrt()$ and $W_K = Vh @ S.sqrt()$,
+        which is also equivalent ($S==S.sqrt() @ S.sqrt()$ as $S$ is diagonal). Here we keep the
+        matrices as having the same norm, since there's not an obvious asymmetry between the keys
+        and queries.
+
+        Biases are more fiddly to deal with. For OV it's pretty easy - we just need (x @ W_V + b_V)
+        @ W_O + b_O to be preserved, so we can set b_V' = 0. and b_O' = b_V @ W_O + b_O (note that
+        b_V in R^{head_index x d_head} while b_O in R^{d_model}, so we need to sum b_V @ W_O along
+        the head_index dimension too).
+
+        For QK it's messy - we need to preserve the bilinear form of (x @ W_Q + b_Q) * (y @ W_K +
+        b_K), which is fairly messy. To deal with the biases, we concatenate them to W_Q and W_K to
+        simulate a d_model+1 dimensional input (whose final coordinate is always 1), do the SVD
+        factorization on this effective matrix, then separate out into final weights and biases.
+
+        Args:
+            state_dict (Dict[str, torch.Tensor]): State dict of the model.
+            cfg: Model configuration object.
+            adapter: Optional architecture adapter for parameter key translation.
+
+        Returns:
+            Dict[str, torch.Tensor]: Modified state dict with refactored attention matrices.
+        """
+        assert (
+            getattr(cfg, "positional_embedding_type", "standard") != "rotary"
+        ), "You can't refactor the QK circuit when using rotary embeddings (as the QK matrix depends on the position of the query and key)"
+
+        # Determine the actual format of the state_dict to avoid key mismatch
+        layer = 0  # Use layer 0 for format detection
+        uses_tl_format, uses_hf_format = ProcessWeights._detect_state_dict_format(
+            state_dict, layer, adapter
+        )
+
+        for l in range(cfg.n_layers):
+            W_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_Q", adapter)
+            b_Q_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_Q", adapter)
+            W_K_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_K", adapter)
+            b_K_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_K", adapter)
+            W_V_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_V", adapter)
+            W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
+            b_V_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_V", adapter)
+            b_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_O", adapter)
+
+            # W_QK = W_Q @ W_K.T
+            # Concatenate biases to make a d_model+1 input dimension
+            W_Q_eff = torch.cat(
+                [
+                    state_dict[W_Q_key],
+                    state_dict[b_Q_key][:, None, :],
+                ],
+                dim=1,
+            )
+            W_K_eff = torch.cat(
+                [
+                    state_dict[W_K_key],
+                    state_dict[b_K_key][:, None, :],
+                ],
+                dim=1,
+            )
+
+            W_Q_eff_even, W_K_eff_even_T = (
+                FactoredMatrix(W_Q_eff, W_K_eff.transpose(-1, -2)).make_even().pair
+            )
+            W_K_eff_even = W_K_eff_even_T.transpose(-1, -2)
+
+            state_dict[W_Q_key] = W_Q_eff_even[:, :-1, :]
+            state_dict[b_Q_key] = W_Q_eff_even[:, -1, :]
+            state_dict[W_K_key] = W_K_eff_even[:, :-1, :]
+            state_dict[b_K_key] = W_K_eff_even[:, -1, :]
+
+            # W_OV = W_V @ W_O
+            W_V = state_dict[W_V_key]
+            W_O = state_dict[W_O_key]
+
+            # Factors the bias to be consistent.
+            b_V = state_dict[b_V_key]
+            b_O = state_dict[b_O_key]
+
+            # Add singleton dimension for broadcasting
+            b_V_expanded = einops.rearrange(b_V, "head_index d_head -> head_index d_head 1")
+
+            # Element-wise multiplication of b_V and W_O
+            b_V_times_W_O = b_V_expanded * W_O
+
+            # Sum over d_head and head_index dimensions
+            b_V_contribution = b_V_times_W_O.sum(1).sum(0)
+
+            effective_bias = b_O + b_V_contribution
+            state_dict[b_V_key] = torch.zeros_like(b_V)
+            state_dict[b_O_key] = effective_bias
+
+            # Helper class to efficiently deal with low rank factored matrices.
+            W_OV = FactoredMatrix(W_V, W_O)
+            U, S, Vh = W_OV.svd()
+            state_dict[W_V_key] = U @ S.diag_embed()
+            state_dict[W_O_key] = utils.transpose(Vh)
+
+        return state_dict
+
+    @staticmethod
     @staticmethod
     def convert_tensor_to_tl_format(param_name: str, adapter: Any, model_state_dict: Dict[str, torch.Tensor], cfg: Any, layer_idx: Optional[int]=None) -> Optional[torch.Tensor]:
         """Convert a tensor from its original format to TransformerLens format.

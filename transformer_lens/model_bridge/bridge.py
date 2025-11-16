@@ -1127,22 +1127,6 @@ class TransformerBridge(nn.Module):
         if verbose:
             print("  Enabling processed weights mode on components...")
 
-        def enable_processed_weights(component):
-            """Enable processed weights mode on a component and all subcomponents."""
-            component._use_processed_weights = True
-            if hasattr(component, "submodules"):
-                for subcomp in component.submodules.values():
-                    enable_processed_weights(subcomp)
-
-        if hasattr(self, "blocks"):
-            for block in self.blocks:
-                enable_processed_weights(block)
-        if hasattr(self, "embed"):
-            enable_processed_weights(self.embed)
-        if hasattr(self, "pos_embed"):
-            enable_processed_weights(self.pos_embed)
-        if hasattr(self, "unembed"):
-            enable_processed_weights(self.unembed)
         if verbose:
             print("  Setting 3D processed weight attributes...")
         self._set_processed_weight_attributes()
@@ -1155,7 +1139,7 @@ class TransformerBridge(nn.Module):
                 ):
                     block.attn._hooked_weights_extracted = False
                     block.attn._extract_hooked_transformer_weights()
-        object.__setattr__(self, "_weights_processed", True)
+        # object.__setattr__(self, "_weights_processed", True)
         if fold_ln:
             object.__setattr__(self.cfg, "layer_norm_folding", True)
         if verbose:
@@ -1207,8 +1191,10 @@ class TransformerBridge(nn.Module):
         if hasattr(self, "embed"):
             try:
                 embed_key = ProcessWeights._get_param_key("embed.W_E", adapter)
+                print("embed_key", embed_key)
                 if embed_key in processed_weights:
                     embed_weight = processed_weights[embed_key]
+                    print("embed_weight" ,  embed_weight)
                     self.embed.set_processed_weights({"weight": embed_weight})
             except (ValueError, KeyError):
                 pass
