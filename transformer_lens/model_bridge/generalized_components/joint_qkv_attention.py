@@ -299,7 +299,8 @@ class JointQKVAttentionBridge(AttentionBridge):
         W_K = weights.get("W_K")
         W_V = weights.get("W_V")
         if W_Q is None or W_K is None or W_V is None:
-            raise ValueError("Processed joint QKV weights must include W_Q, W_K, and W_V tensors.")
+            # This is the automapping that needs to be updated to after the split weights are passed correctly
+            return
         W_O = weights.get("W_O")
         b_Q = weights.get("b_Q")
         b_K = weights.get("b_K")

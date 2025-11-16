@@ -1121,14 +1121,16 @@ class ProcessWeights:
 
         Args:
             state_dict: Dictionary of processed weights in TransformerLens format
-            component_mapping: Dictionary mapping component names to GeneralizedComponent instances
+            component_mapping: Dictionary (real_components) mapping TL keys to tuples of
+                (remote_path, component_instance), where component_instance can be either
+                a single component or a list of components
 
         Example:
-            For a component_mapping like:
+            For a real_components mapping like:
             {
-                "embed": EmbeddingBridge(name="transformer.wte"),
-                "blocks": BlockBridge(name="transformer.h", is_list_item=True, ...),
-                "unembed": UnembeddingBridge(name="lm_head")
+                "embed": ("transformer.wte", <EmbeddingBridge instance>),
+                "blocks": ("transformer.h", [<BlockBridge 0>, <BlockBridge 1>, ...]),
+                "unembed": ("lm_head", <UnembeddingBridge instance>)
             }
 
             This function will:
@@ -1139,42 +1141,30 @@ class ProcessWeights:
         """
         from transformer_lens.utilities import filter_dict_by_prefix
 
-        for component_name, component in component_mapping.items():
-            # Skip if component has no remote name
-            if component.name is None:
-                continue
+        for component_name, component_tuple in component_mapping.items():
+            # component_mapping is real_components format: (remote_path, instance)
+            # instance can be either a single component or a list of components
+            if not isinstance(component_tuple, tuple):
+                raise ValueError(
+                    f"Expected tuple for component '{component_name}' in real_components, "
+                    f"but got {type(component_tuple).__name__}: {component_tuple}"
+                )
+            remote_key, component = component_tuple
+            is_list = isinstance(component, list)
+            
 
-            # Get the remote key (HuggingFace format path)
-            remote_key = component.name
-
-            if hasattr(component, 'is_list_item') and component.is_list_item:
+            if is_list:
                 # This is a list component like "blocks"
                 # Extract all weights that start with this prefix
                 all_list_weights = filter_dict_by_prefix(state_dict, remote_key)
 
-                # Determine the number of items in the list by finding the highest index
-                max_index = -1
-                for key in all_list_weights.keys():
-                    # Keys should start with a number like "0.attn.W_Q", "1.mlp.W_in", etc.
-                    parts = key.split('.')
-                    if parts and parts[0].isdigit():
-                        index = int(parts[0])
-                        max_index = max(max_index, index)
-
-                # Now distribute weights to each indexed component
-                num_items = max_index + 1
-                for i in range(num_items):
+                # Component is a list of actual instances
+                for i, instance in enumerate(component):
                     # Extract weights for this specific index
                     # This will get keys like "0.attn.W_Q" and strip the "0." to get "attn.W_Q"
                     indexed_weights = filter_dict_by_prefix(all_list_weights, str(i))
-
-                    # Get the actual component instance (e.g., bridge.blocks[i])
-                    if hasattr(component, '__getitem__'):
-                        indexed_component = component[i]
-                        if hasattr(indexed_component, 'set_processed_weights'):
-                            indexed_component.set_processed_weights(indexed_weights)
+                    instance.set_processed_weights(indexed_weights)
             else:
                 # This is a single component (not a list)
                 component_weights = filter_dict_by_prefix(state_dict, remote_key)
-                if hasattr(component, 'set_processed_weights'):
-                    component.set_processed_weights(component_weights)
+                component.set_processed_weights(component_weights)

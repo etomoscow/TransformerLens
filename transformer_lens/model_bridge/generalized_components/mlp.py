@@ -129,7 +129,7 @@ class MLPBridge(GeneralizedComponent):
         W_in = weights.get("W_in")
         W_out = weights.get("W_out")
         if W_in is None or W_out is None:
-            raise ValueError("Processed MLP weights must include 'W_in' and 'W_out' tensors.")
+            return
         b_in = weights.get("b_in")
         b_out = weights.get("b_out")
         self._use_processed_weights = True

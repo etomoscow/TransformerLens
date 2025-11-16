@@ -126,6 +126,9 @@ class TransformerBridge(nn.Module):
         self._hook_registry_initialized = False
         self._hook_alias_registry: Dict[str, Union[str, List[str]]] = {}
         self._property_alias_registry: Dict[str, str] = {}
+        # real_components maps TL keys to (remote_path, actual_instance) tuples
+        # For list components, actual_instance will be a list of component instances
+        self.real_components: Dict[str, tuple] = {}
         if not hasattr(self.cfg, "device") or self.cfg.device is None:
             try:
                 self.cfg.device = str(next(self.original_model.parameters()).device)
@@ -911,7 +914,7 @@ class TransformerBridge(nn.Module):
             print("  Distributing weights to generalized components...")
         ProcessWeights.distribute_weights_to_components(
             state_dict=state_dict,
-            component_mapping=adapter.component_mapping,
+            component_mapping=self.real_components,
         )
 
         self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
@@ -1156,7 +1159,6 @@ class TransformerBridge(nn.Module):
         if processed_state_dict is not None:
             object.__setattr__(self, "_processed_tl_weights", processed_state_dict)
         self._load_transformer_block_weights(verbose=verbose)
-        self._load_unembed_weights(verbose=verbose)  # type: ignore[arg-type]
 
     def _load_transformer_block_weights(self, verbose: bool = False) -> None:
         """Load transformer block weights into attention and MLP components.
@@ -1289,31 +1291,6 @@ class TransformerBridge(nn.Module):
                 "b_gate": b_gate,
             }
         )
-
-    def _load_unembed_weights(self, verbose: bool = False):
-        """Load unembedding weights into the UnembeddingBridge component.
-
-        Args:
-            verbose: If True, print detailed progress messages. Default: False
-        """
-        from transformer_lens.weight_processing import ProcessWeights
-
-        processed_weights = self._processed_tl_weights
-        adapter = self.adapter
-        if hasattr(self, "unembed"):
-            try:
-                W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
-                if W_U_key in processed_weights:
-                    W_U_hf = processed_weights[W_U_key]
-                    W_U = W_U_hf.T
-                    try:
-                        b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
-                        b_U = processed_weights.get(b_U_key)
-                    except (ValueError, KeyError):
-                        b_U = None
-                    self.unembed.set_processed_weights({"weight": W_U, "bias": b_U})
-            except (ValueError, KeyError):
-                pass
 
     def _ported_forward_pass(
         self,

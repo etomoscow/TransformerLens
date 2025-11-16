@@ -353,18 +353,18 @@ class AttentionBridge(GeneralizedComponent):
         """
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
-        W_Q = weights.get("W_Q")
-        W_K = weights.get("W_K")
-        W_V = weights.get("W_V")
-        W_O = weights.get("W_O")
+        W_Q = weights.get("q.weight")
+        W_K = weights.get("k.weight")
+        W_V = weights.get("v.weight")
+        W_O = weights.get("o.weight")
         if W_Q is None or W_K is None or W_V is None or (W_O is None):
             raise ValueError(
                 "Processed attention weights must include W_Q, W_K, W_V, and W_O tensors."
             )
-        b_Q = weights.get("b_Q")
-        b_K = weights.get("b_K")
-        b_V = weights.get("b_V")
-        b_O = weights.get("b_O")
+        b_Q = weights.get("q.bias")
+        b_K = weights.get("k.bias")
+        b_V = weights.get("v.bias")
+        b_O = weights.get("o.bias")
         q_module = getattr(self, "q", None)
         k_module = getattr(self, "k", None)
         v_module = getattr(self, "v", None)
