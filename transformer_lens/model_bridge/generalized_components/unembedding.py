@@ -135,9 +135,10 @@ class UnembeddingBridge(GeneralizedComponent):
             vocab_size = weight.shape[1]
             self.register_parameter(
                 "_b_U",
-                torch.nn.Parameter(torch.zeros(vocab_size, device=weight.device, dtype=weight.dtype)),
+                torch.nn.Parameter(
+                    torch.zeros(vocab_size, device=weight.device, dtype=weight.dtype)
+                ),
             )
-
 
     def named_parameters(
         self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True

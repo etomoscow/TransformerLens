@@ -91,7 +91,9 @@ class BlockBridge(GeneralizedComponent):
             output = self.hook_out(output)
         return output
 
-    def _filter_kwargs_for_forward(self, kwargs: Dict[str, Any], num_positional_args: int = 0) -> Dict[str, Any]:
+    def _filter_kwargs_for_forward(
+        self, kwargs: Dict[str, Any], num_positional_args: int = 0
+    ) -> Dict[str, Any]:
         """Filter kwargs to only include parameters accepted by original_component.forward().
 
         This prevents TypeErrors when the bridge passes parameters (like encoder_attention_mask)
@@ -116,8 +118,7 @@ class BlockBridge(GeneralizedComponent):
 
             # Check if the signature accepts **kwargs (VAR_KEYWORD)
             accepts_var_keyword = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD
-                for p in sig.parameters.values()
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             )
 
             # If it accepts **kwargs, pass everything through
@@ -130,7 +131,8 @@ class BlockBridge(GeneralizedComponent):
 
             # Filter kwargs: include only if in signature AND not already provided positionally
             filtered = {
-                k: v for k, v in kwargs.items()
+                k: v
+                for k, v in kwargs.items()
                 if k in valid_params and k not in positional_param_names
             }
             return filtered

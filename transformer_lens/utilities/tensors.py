@@ -172,10 +172,8 @@ def filter_dict_by_prefix(dictionary: dict, prefix: str) -> dict:
         {"attn.W_Q": tensor1, "mlp.W_in": tensor2}
     """
     # Ensure prefix ends with a dot for proper stripping
-    search_prefix = prefix if prefix.endswith('.') else prefix + '.'
+    search_prefix = prefix if prefix.endswith(".") else prefix + "."
 
     return {
-        k[len(search_prefix):]: v
-        for k, v in dictionary.items()
-        if k.startswith(search_prefix)
+        k[len(search_prefix) :]: v for k, v in dictionary.items() if k.startswith(search_prefix)
     }

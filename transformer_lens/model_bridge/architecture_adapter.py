@@ -113,7 +113,11 @@ class ArchitectureAdapter:
         current = model
         for part in path.split("."):
             # If current is a GeneralizedComponent bridge, unwrap to get the original HF component
-            if isinstance(current, GeneralizedComponent) and hasattr(current, 'original_component') and current.original_component is not None:
+            if (
+                isinstance(current, GeneralizedComponent)
+                and hasattr(current, "original_component")
+                and current.original_component is not None
+            ):
                 current = current.original_component
 
             if part.isdigit():

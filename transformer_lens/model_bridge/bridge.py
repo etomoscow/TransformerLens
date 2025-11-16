@@ -673,8 +673,11 @@ class TransformerBridge(nn.Module):
                 layer_past = past_key_values if use_cache_object else past_key_values[i]
 
                 # Remove explicitly-passed kwargs to avoid "multiple values for argument" errors
-                filtered_kwargs = {k: v for k, v in kwargs.items()
-                                 if k not in ('encoder_attention_mask', 'use_cache', 'output_attentions')}
+                filtered_kwargs = {
+                    k: v
+                    for k, v in kwargs.items()
+                    if k not in ("encoder_attention_mask", "use_cache", "output_attentions")
+                }
 
                 block_outputs = block_bridge(
                     residual,
@@ -1051,8 +1054,18 @@ class TransformerBridge(nn.Module):
                             print(f"      Reconstructed joint QKV HF format: {qkv_weight.shape}")
         for tb_key, weight_tensor in state_dict.items():
             # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
-            if any(pattern in tb_key for pattern in [".attn.q.", ".attn.k.", ".attn.v.",
-                                                      ".q_proj.", ".k_proj.", ".v_proj.", ".out_proj."]):
+            if any(
+                pattern in tb_key
+                for pattern in [
+                    ".attn.q.",
+                    ".attn.k.",
+                    ".attn.v.",
+                    ".q_proj.",
+                    ".k_proj.",
+                    ".v_proj.",
+                    ".out_proj.",
+                ]
+            ):
                 continue
             try:
                 parts = tb_key.split(".")

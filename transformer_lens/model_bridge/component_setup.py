@@ -113,7 +113,7 @@ def setup_components(
             bridge_module.add_module(tl_path, bridged_list)
             replace_remote_component(bridged_list, remote_path, original_model)
             # Add to bridge module's real_components if it has the attribute
-            if hasattr(bridge_module, 'real_components'):
+            if hasattr(bridge_module, "real_components"):
                 bridge_module.real_components[tl_path] = (remote_path, list(bridged_list))
         else:
             original_component = architecture_adapter.get_remote_component(
@@ -124,7 +124,7 @@ def setup_components(
             bridge_module.add_module(tl_path, bridge_component)
             replace_remote_component(bridge_component, remote_path, original_model)
             # Add to bridge module's real_components if it has the attribute
-            if hasattr(bridge_module, 'real_components'):
+            if hasattr(bridge_module, "real_components"):
                 bridge_module.real_components[tl_path] = (remote_path, bridge_component)
 
 
