@@ -19,23 +19,6 @@ class LinearBridge(GeneralizedComponent):
     for intercepting the input and output activations.
     """
 
-    def __init__(
-        self,
-        name: str,
-        config: Optional[Any] = None,
-        submodules: Optional[Dict[str, GeneralizedComponent]] = None,
-        conversion_rule: Optional[BaseHookConversion] = None,
-    ) -> None:
-        """Initialize the LinearBridge.
-
-        Args:
-            name: The name of this component
-            config: Optional configuration (unused for LinearBridge)
-            submodules: Dictionary of GeneralizedComponent submodules to register
-            conversion_rule: Optional conversion rule for this component's hooks
-        """
-        super().__init__(name, config, submodules=submodules, conversion_rule=conversion_rule)
-
     def forward(self, input: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         """Forward pass through the linear layer with hooks.
 
@@ -63,7 +46,7 @@ class LinearBridge(GeneralizedComponent):
                 in_features = self.original_component.in_features
                 out_features = self.original_component.out_features
                 bias = self.original_component.bias is not None
-                return f"LinearBridge({in_features} -> {out_features}, bias={bias})"
+                return f"LinearBridge({in_features} -> {out_features}, bias={bias}, original_component={type(self.original_component).__name__})"
             except AttributeError:
                 return f"LinearBridge(name={self.name}, original_component={type(self.original_component).__name__})"
         else:

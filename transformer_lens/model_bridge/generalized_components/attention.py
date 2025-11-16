@@ -376,6 +376,3 @@ class AttentionBridge(GeneralizedComponent):
         if o_module and hasattr(o_module, "set_processed_weights"):
             o_module.set_processed_weights({"weight": W_O, "bias": b_O})
 
-    def __repr__(self) -> str:
-        """String representation of the AttentionBridge."""
-        return f"AttentionBridge(name={self.name})"

@@ -9,6 +9,7 @@ from transformer_lens.conversion_utils.conversion_steps import (
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
     AttentionBridge,
+    BlockBridge,
     EmbeddingBridge,
     LinearBridge,
     MLPBridge,
@@ -68,7 +69,7 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
         self.component_mapping = {
             "embed": EmbeddingBridge(name="transformer.wte"),
             "pos_embed": PosEmbedBridge(name="transformer.wpe"),
-            "blocks": GPTNeoBlockBridge(
+            "blocks": BlockBridge(
                 name="transformer.h",
                 config=self.cfg,
                 submodules={
