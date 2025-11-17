@@ -881,8 +881,8 @@ class TransformerBridge(nn.Module):
                 clean_key = clean_key.replace("._original_component", "")
             state_dict[clean_key] = value
         adapter = self.adapter
-        # if adapter and hasattr(adapter, "preprocess_weights"):
-        #     state_dict = adapter.preprocess_weights(state_dict)
+        if adapter and hasattr(adapter, "preprocess_weights"):
+            state_dict = adapter.preprocess_weights(state_dict)
         if adapter:
             try:
                 unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
@@ -925,59 +925,122 @@ class TransformerBridge(nn.Module):
         self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
         if verbose:
             print("  Loading processed weights into Bridge components...")
-        # is_gemma_model = getattr(self.cfg, "architecture", None) in [
-        #     "GemmaForCausalLM",
-        #     "Gemma2ForCausalLM",
-        # ] or getattr(self.cfg, "original_architecture", None) in [
-        #     "GemmaForCausalLM",
-        #     "Gemma2ForCausalLM",
-        # ]
-        # if fold_ln and (not is_gemma_model):
-        #     for layer_idx in range(self.cfg.n_layers):
-        #         for ln_name in ["ln1", "ln2"]:
-        #             try:
-        #                 block = self.blocks[layer_idx]
-        #                 ln_component = getattr(block, ln_name, None)
-        #                 if ln_component is not None:
-        #                     if hasattr(ln_component, "_original_component"):
-        #                         norm_module = ln_component._original_component
-        #                     else:
-        #                         norm_module = ln_component
-        #                     if hasattr(norm_module, "weight") and norm_module.weight is not None:
-        #                         with torch.no_grad():
-        #                             norm_module.weight.fill_(1.0)
-        #                     if hasattr(norm_module, "bias") and norm_module.bias is not None:
-        #                         with torch.no_grad():
-        #                             norm_module.bias.zero_()
-        #             except (AttributeError, IndexError):
-        #                 pass
-        #     try:
-        #         if hasattr(self, "ln_final"):
-        #             ln_final = self.ln_final
-        #             if hasattr(ln_final, "_original_component"):
-        #                 norm_module = ln_final._original_component
-        #             else:
-        #                 norm_module = ln_final
-        #             if hasattr(norm_module, "weight") and norm_module.weight is not None:
-        #                 with torch.no_grad():
-        #                     norm_module.weight.fill_(1.0)
-        #             if hasattr(norm_module, "bias") and norm_module.bias is not None:
-        #                 with torch.no_grad():
-        #                     norm_module.bias.zero_()
-        #     except (AttributeError, IndexError):
-        #         pass
-        # if verbose:
-        #     print("  Enabling processed weights mode on components...")
+        loaded_count = 0
+        missing_count = 0
+        import einops
 
-        # if verbose:
-        #     print("  Setting 3D processed weight attributes...")
-        # if verbose:
-        #     print("  Extracting HookedTransformer-compatible weights...")
+        from transformer_lens.model_bridge.generalized_components.joint_qkv_attention import (
+            JointQKVAttentionBridge,
+        )
 
-        # if fold_ln:
-        #     object.__setattr__(self.cfg, "layer_norm_folding", True)
-        # if verbose:
-        #     print("✓ Weight processing complete!")
+        for tb_key, weight_tensor in state_dict.items():
+            # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
+            if any(
+                pattern in tb_key
+                for pattern in [
+                    ".attn.q.",
+                    ".attn.k.",
+                    ".attn.v.",
+                    ".q_proj.",
+                    ".k_proj.",
+                    ".v_proj.",
+                    ".out_proj.",
+                ]
+            ):
+                continue
+            try:
+                parts = tb_key.split(".")
+                component: Any = self
+                for i, part in enumerate(parts[:-1]):
+                    if part.isdigit():
+                        if hasattr(component, "__getitem__"):
+                            component = component[int(part)]
+                        else:
+                            raise TypeError(f"Component {component} is not indexable")
+                    elif hasattr(component, part):
+                        component = getattr(component, part)
+                    elif hasattr(component, "_modules") and part in component._modules:
+                        component = component._modules[part]
+                    else:
+                        raise AttributeError(f"Component {part} not found")
+                param_name = parts[-1]
+                if hasattr(component, "_original_component"):
+                    target_component = component._original_component
+                else:
+                    target_component = component
+                if hasattr(target_component, param_name):
+                    param = getattr(target_component, param_name)
+                    if param is not None and isinstance(param, torch.nn.Parameter):
+                        param.data = weight_tensor
+                        loaded_count += 1
+                    elif param is None:
+                        setattr(target_component, param_name, torch.nn.Parameter(weight_tensor))
+                        loaded_count += 1
+                else:
+                    if verbose:
+                        print(f"    Warning: Parameter {param_name} not found in {tb_key}")
+                    missing_count += 1
+            except (AttributeError, IndexError, KeyError, TypeError) as e:
+                if verbose:
+                    print(f"    Warning: Could not load {tb_key}: {e}")
+                missing_count += 1
+        if verbose:
+            print(f"    Loaded {loaded_count} weights into Bridge components")
+            print(f"    Skipped {missing_count} keys")
+            print(f"    Processed state_dict has {len(state_dict)} keys")
+        is_gemma_model = getattr(self.cfg, "architecture", None) in [
+            "GemmaForCausalLM",
+            "Gemma2ForCausalLM",
+        ] or getattr(self.cfg, "original_architecture", None) in [
+            "GemmaForCausalLM",
+            "Gemma2ForCausalLM",
+        ]
+        if fold_ln and (not is_gemma_model):
+            for layer_idx in range(self.cfg.n_layers):
+                for ln_name in ["ln1", "ln2"]:
+                    try:
+                        block = self.blocks[layer_idx]
+                        ln_component = getattr(block, ln_name, None)
+                        if ln_component is not None:
+                            if hasattr(ln_component, "_original_component"):
+                                norm_module = ln_component._original_component
+                            else:
+                                norm_module = ln_component
+                            if hasattr(norm_module, "weight") and norm_module.weight is not None:
+                                with torch.no_grad():
+                                    norm_module.weight.fill_(1.0)
+                            if hasattr(norm_module, "bias") and norm_module.bias is not None:
+                                with torch.no_grad():
+                                    norm_module.bias.zero_()
+                    except (AttributeError, IndexError):
+                        pass
+            try:
+                if hasattr(self, "ln_final"):
+                    ln_final = self.ln_final
+                    if hasattr(ln_final, "_original_component"):
+                        norm_module = ln_final._original_component
+                    else:
+                        norm_module = ln_final
+                    if hasattr(norm_module, "weight") and norm_module.weight is not None:
+                        with torch.no_grad():
+                            norm_module.weight.fill_(1.0)
+                    if hasattr(norm_module, "bias") and norm_module.bias is not None:
+                        with torch.no_grad():
+                            norm_module.bias.zero_()
+            except (AttributeError, IndexError):
+                pass
+        if verbose:
+            print("  Enabling processed weights mode on components...")
+
+        if verbose:
+            print("  Setting 3D processed weight attributes...")
+        if verbose:
+            print("  Extracting HookedTransformer-compatible weights...")
+
+        if fold_ln:
+            object.__setattr__(self.cfg, "layer_norm_folding", True)
+        if verbose:
+            print("✓ Weight processing complete!")
 
     def _load_all_processed_weights(
         self, verbose: bool = False, processed_state_dict: Optional[Dict[str, torch.Tensor]] = None
@@ -1003,91 +1066,8 @@ class TransformerBridge(nn.Module):
             if not hasattr(self, "blocks") or layer_idx >= len(self.blocks):
                 continue
             block = self.blocks[layer_idx]
-            if hasattr(block, "attn"):
-                self._load_attention_weights(
-                    block.attn, layer_idx, processed_weights, verbose=verbose
-                )
             if hasattr(block, "mlp"):
                 self._load_mlp_weights(block.mlp, layer_idx, processed_weights, verbose=verbose)
-
-    def _load_attention_weights(
-        self,
-        attn_component: Any,
-        layer_idx: int,
-        processed_weights: Dict[str, torch.Tensor],
-        verbose: bool = False,
-    ) -> None:
-        """Load attention weights into the AttentionBridge component.
-
-        Args:
-            attn_component: The attention component to load weights into
-            layer_idx: The layer index
-            processed_weights: Dictionary of processed weights (in HF format with processed values)
-            verbose: If True, print detailed progress messages
-        """
-        from transformer_lens.weight_processing import ProcessWeights
-
-        adapter = self.adapter
-        cfg = self.cfg
-        # Get the original HF-format keys for this architecture
-        # The processed state dict keeps weights at their ORIGINAL HF keys
-        w_q_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_Q", adapter)
-        w_k_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_K", adapter)
-        w_v_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_V", adapter)
-        w_o_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_O", adapter)
-
-        # Try to get bias keys (may not exist)
-        try:
-            b_q_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.b_Q", adapter)
-        except (ValueError, KeyError):
-            b_q_key = None
-        try:
-            b_k_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.b_K", adapter)
-        except (ValueError, KeyError):
-            b_k_key = None
-        try:
-            b_v_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.b_V", adapter)
-        except (ValueError, KeyError):
-            b_v_key = None
-        try:
-            b_o_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.b_O", adapter)
-        except (ValueError, KeyError):
-            b_o_key = None
-
-        W_Q = processed_weights.get(w_q_key)
-        W_K = processed_weights.get(w_k_key)
-        W_V = processed_weights.get(w_v_key)
-        W_O = processed_weights.get(w_o_key)
-
-        if verbose and layer_idx == 0:
-            print(f"    [DEBUG] Looking for attention weights with keys:")
-            print(f"      Q: {w_q_key} -> {'FOUND' if W_Q is not None else 'NOT FOUND'}")
-            print(f"      K: {w_k_key} -> {'FOUND' if W_K is not None else 'NOT FOUND'}")
-            print(f"      V: {w_v_key} -> {'FOUND' if W_V is not None else 'NOT FOUND'}")
-            print(f"      O: {w_o_key} -> {'FOUND' if W_O is not None else 'NOT FOUND'}")
-        b_Q = processed_weights.get(b_q_key) if b_q_key else None
-        b_K = processed_weights.get(b_k_key) if b_k_key else None
-        b_V = processed_weights.get(b_v_key) if b_v_key else None
-        b_O = processed_weights.get(b_o_key) if b_o_key else None
-        if W_Q is not None and W_K is not None and (W_V is not None) and (W_O is not None):
-            if verbose and layer_idx == 0:
-                print(f"    [DEBUG] Loading attention weights for layer {layer_idx}:")
-                print(f"      W_Q shape: {W_Q.shape if W_Q is not None else None}")
-                print(f"      W_K shape: {W_K.shape if W_K is not None else None}")
-                print(f"      W_V shape: {W_V.shape if W_V is not None else None}")
-                print(f"      W_O shape: {W_O.shape if W_O is not None else None}")
-            attn_component.set_processed_weights(
-                {
-                    "W_Q": W_Q,
-                    "W_K": W_K,
-                    "W_V": W_V,
-                    "W_O": W_O,
-                    "b_Q": b_Q,
-                    "b_K": b_K,
-                    "b_V": b_V,
-                    "b_O": b_O,
-                }
-            )
 
     def _load_mlp_weights(self, mlp_component, layer_idx, processed_weights, verbose: bool = False):
         """Load MLP weights into the MLPBridge or GatedMLPBridge component.
@@ -1115,12 +1095,12 @@ class TransformerBridge(nn.Module):
             return
         mlp_component.set_processed_weights(
             {
-                "W_in": W_in,
-                "W_out": W_out,
-                "b_in": b_in,
-                "b_out": b_out,
-                "W_gate": W_gate,
-                "b_gate": b_gate,
+                "in.weight": W_in,
+                "out.weight": W_out,
+                "in.bias": b_in,
+                "out.bias": b_out,
+                "gate.weight": W_gate,
+                "gate.bias": b_gate,
             }
         )
 

@@ -126,12 +126,12 @@ class MLPBridge(GeneralizedComponent):
         """
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
-        W_in = weights.get("W_in")
-        W_out = weights.get("W_out")
+        W_in = weights.get("in.weight")
+        W_out = weights.get("out.weight")
         if W_in is None or W_out is None:
             return
-        b_in = weights.get("b_in")
-        b_out = weights.get("b_out")
+        b_in = weights.get("in.bias")
+        b_out = weights.get("out.bias")
         self._use_processed_weights = True
         self._processed_W_in = W_in
         self._processed_b_in = b_in
