@@ -1188,46 +1188,46 @@ class ProcessWeights:
             Dict[str, torch.Tensor]: Fully processed state dict.
         """
         final_state_dict = state_dict if adapter is None else {}
-        # if fold_ln:
-        #     if getattr(cfg, "num_experts", None) and cfg.num_experts > 1:
-        #         pass
-        #     elif getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"]:
-        #         final_state_dict = ProcessWeights.fold_layer_norm(
-        #             state_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter, final_state_dict=final_state_dict
-        #         )
-        #         state_dict.update(final_state_dict)
-        #     elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
-        #         final_state_dict = ProcessWeights.fold_layer_norm(
-        #             state_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter, final_state_dict=final_state_dict
-        #         )
-        #         state_dict.update(final_state_dict)
-        # if center_writing_weights:
-        #     if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and (
-        #         not getattr(cfg, "final_rms", False)
-        #     ):
-        #         final_state_dict = ProcessWeights.center_writing_weights(state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict)
-        #         state_dict.update(final_state_dict)
-        # if center_unembed:
-        #     final_state_dict = ProcessWeights.center_unembed(state_dict, adapter=adapter, final_state_dict=final_state_dict)
-        #     state_dict.update(final_state_dict)
-        # if fold_value_biases:
-        #     final_state_dict = ProcessWeights.fold_value_biases(state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict)
-        #     if center_writing_weights and getattr(cfg, "normalization_type", "LN") in [
-        #         "LN",
-        #         "LNPre",
-        #     ]:
-        #         for layer_idx in range(cfg.n_layers):
-        #             b_O_key = ProcessWeights._get_param_key(
-        #                 f"blocks.{layer_idx}.attn.b_O", adapter
-        #             )
-        #             if b_O_key in state_dict:
-        #                 b_O = final_state_dict[b_O_key]
-        #                 final_state_dict[b_O_key] = b_O - b_O.mean()
-        #     state_dict.update(final_state_dict)
-        # if refactor_factored_attn_matrices:
-        #     final_state_dict = ProcessWeights.refactor_factored_attn_matrices(
-        #         state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict
-        #     )
+        if fold_ln:
+            if getattr(cfg, "num_experts", None) and cfg.num_experts > 1:
+                pass
+            elif getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"]:
+                final_state_dict = ProcessWeights.fold_layer_norm(
+                    state_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter, final_state_dict=final_state_dict
+                )
+                state_dict.update(final_state_dict)
+            elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
+                final_state_dict = ProcessWeights.fold_layer_norm(
+                    state_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter, final_state_dict=final_state_dict
+                )
+                state_dict.update(final_state_dict)
+        if center_writing_weights:
+            if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and (
+                not getattr(cfg, "final_rms", False)
+            ):
+                final_state_dict = ProcessWeights.center_writing_weights(state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict)
+                state_dict.update(final_state_dict)
+        if center_unembed:
+            final_state_dict = ProcessWeights.center_unembed(state_dict, adapter=adapter, final_state_dict=final_state_dict)
+            state_dict.update(final_state_dict)
+        if fold_value_biases:
+            final_state_dict = ProcessWeights.fold_value_biases(state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict)
+            if center_writing_weights and getattr(cfg, "normalization_type", "LN") in [
+                "LN",
+                "LNPre",
+            ]:
+                for layer_idx in range(cfg.n_layers):
+                    b_O_key = ProcessWeights._get_param_key(
+                        f"blocks.{layer_idx}.attn.b_O", adapter
+                    )
+                    if b_O_key in state_dict:
+                        b_O = final_state_dict[b_O_key]
+                        final_state_dict[b_O_key] = b_O - b_O.mean()
+            state_dict.update(final_state_dict)
+        if refactor_factored_attn_matrices:
+            final_state_dict = ProcessWeights.refactor_factored_attn_matrices(
+                state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict
+            )
         return final_state_dict
 
     @staticmethod
