@@ -769,16 +769,7 @@ class TransformerBridge(nn.Module):
         self._initialize_hook_registry()
         self._fix_backward_hook_gradients()
         self._setup_hook_compatibility()
-        if no_processing:
-            fold_ln = False
-            center_writing_weights = False
-            center_unembed = False
-            fold_value_biases = False
-            refactor_factored_attn_matrices = False
-            self._enable_split_qkv_attention()
-            self.clear_hook_registry()
-            self._initialize_hook_registry()
-        else:
+        if not no_processing:
             self.process_weights(
                 fold_ln=fold_ln,
                 center_writing_weights=center_writing_weights,
