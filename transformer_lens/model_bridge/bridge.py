@@ -873,28 +873,21 @@ class TransformerBridge(nn.Module):
 
         if verbose:
             print("  Extracting state dict from existing model...")
-        raw_state_dict = self.original_model.state_dict()
-        state_dict = {}
-        for key, value in raw_state_dict.items():
-            clean_key = key
-            while "._original_component" in clean_key:
-                clean_key = clean_key.replace("._original_component", "")
-            state_dict[clean_key] = value
+        state_dict = self.state_dict()
         adapter = self.adapter
-        if adapter and hasattr(adapter, "preprocess_weights"):
-            state_dict = adapter.preprocess_weights(state_dict)
-        if adapter:
-            try:
-                unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
-                if unembed_b_U_key not in state_dict:
-                    state_dict[unembed_b_U_key] = torch.zeros(
-                        self.cfg.d_vocab_out
-                        if hasattr(self.cfg, "d_vocab_out")
-                        else self.cfg.d_vocab,
-                        dtype=self.cfg.dtype if hasattr(self.cfg, "dtype") else torch.float32,
-                    )
-            except (ValueError, KeyError):
-                pass
+        state_dict = adapter.preprocess_weights(state_dict)
+        # if adapter:
+        #     try:
+        #         unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
+        #         if unembed_b_U_key not in state_dict:
+        #             state_dict[unembed_b_U_key] = torch.zeros(
+        #                 self.cfg.d_vocab_out
+        #                 if hasattr(self.cfg, "d_vocab_out")
+        #                 else self.cfg.d_vocab,
+        #                 dtype=self.cfg.dtype if hasattr(self.cfg, "dtype") else torch.float32,
+        #             )
+        #     except (ValueError, KeyError):
+        #         pass
 
         # Use unified ProcessWeights.process_weights() like HookedTransformer does
         if verbose:
@@ -915,66 +908,72 @@ class TransformerBridge(nn.Module):
         ProcessWeights.distribute_weights_to_components(
             state_dict=state_dict,
             component_mapping=self.real_components,
+            verbose=True
         )
 
-        self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
+        # self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
         if verbose:
             print("  Loading processed weights into Bridge components...")
         loaded_count = 0
         missing_count = 0
 
-        for tb_key, weight_tensor in state_dict.items():
-            # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
-            if any(
-                pattern in tb_key
-                for pattern in [
-                    ".attn.q.",
-                    ".attn.k.",
-                    ".attn.v.",
-                    ".q_proj.",
-                    ".k_proj.",
-                    ".v_proj.",
-                    ".out_proj.",
-                ]
-            ):
-                continue
-            try:
-                parts = tb_key.split(".")
-                component: Any = self
-                for i, part in enumerate(parts[:-1]):
-                    if part.isdigit():
-                        if hasattr(component, "__getitem__"):
-                            component = component[int(part)]
-                        else:
-                            raise TypeError(f"Component {component} is not indexable")
-                    elif hasattr(component, part):
-                        component = getattr(component, part)
-                    elif hasattr(component, "_modules") and part in component._modules:
-                        component = component._modules[part]
-                    else:
-                        raise AttributeError(f"Component {part} not found")
-                print("manual for", tb_key, component)
-                param_name = parts[-1]
-                if hasattr(component, "_original_component"):
-                    target_component = component._original_component
-                else:
-                    target_component = component
-                if hasattr(target_component, param_name):
-                    param = getattr(target_component, param_name)
-                    if param is not None and isinstance(param, torch.nn.Parameter):
-                        param.data = weight_tensor
-                        loaded_count += 1
-                    elif param is None:
-                        setattr(target_component, param_name, torch.nn.Parameter(weight_tensor))
-                        loaded_count += 1
-                else:
-                    if verbose:
-                        print(f"    Warning: Parameter {param_name} not found in {tb_key}")
-                    missing_count += 1
-            except (AttributeError, IndexError, KeyError, TypeError) as e:
-                if verbose:
-                    print(f"    Warning: Could not load {tb_key}: {e}")
-                missing_count += 1
+        # if verbose:
+        #     print(f"\n  Manual block will process {len(state_dict)} keys from state_dict:")
+        #     for key in list(state_dict.keys())[:30]:
+        #         print(f"    {key}: {state_dict[key].shape}")
+
+        # for tb_key, weight_tensor in state_dict.items():
+        #     # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
+        #     if any(
+        #         pattern in tb_key
+        #         for pattern in [
+        #             ".attn.q.",
+        #             ".attn.k.",
+        #             ".attn.v.",
+        #             ".q_proj.",
+        #             ".k_proj.",
+        #             ".v_proj.",
+        #             ".out_proj.",
+        #         ]
+        #     ):
+        #         continue
+        #     try:
+        #         parts = tb_key.split(".")
+        #         component: Any = self
+        #         for i, part in enumerate(parts[:-1]):
+        #             if part.isdigit():
+        #                 if hasattr(component, "__getitem__"):
+        #                     component = component[int(part)]
+        #                 else:
+        #                     raise TypeError(f"Component {component} is not indexable")
+        #             elif hasattr(component, part):
+        #                 component = getattr(component, part)
+        #             elif hasattr(component, "_modules") and part in component._modules:
+        #                 component = component._modules[part]
+        #             else:
+        #                 raise AttributeError(f"Component {part} not found")
+        #         print("manual for", tb_key, component)
+        #         param_name = parts[-1]
+        #         if hasattr(component, "_original_component"):
+        #             target_component = component._original_component
+        #         else:
+        #             target_component = component
+        #         if hasattr(target_component, param_name):
+        #             param = getattr(target_component, param_name)
+        #             if param is not None and isinstance(param, torch.nn.Parameter):
+        #                 param.data = weight_tensor
+        #                 loaded_count += 1
+        #             elif param is None:
+        #                 setattr(target_component, param_name, torch.nn.Parameter(weight_tensor))
+        #                 loaded_count += 1
+        #         else:
+        #             if verbose:
+        #                 print(f"    Warning: Parameter {param_name} not found in {tb_key}")
+        #             missing_count += 1
+        #     except (AttributeError, IndexError, KeyError, TypeError) as e:
+        #         if verbose:
+        #             print(f"    Warning: Could not load {tb_key}: {e}")
+        #         missing_count += 1
 
     def _load_all_processed_weights(
         self, verbose: bool = False, processed_state_dict: Optional[Dict[str, torch.Tensor]] = None
@@ -2347,7 +2346,11 @@ class TransformerBridge(nn.Module):
         """Get state dict with TransformerLens format keys.
 
         Converts HuggingFace format keys to TransformerLens format and filters out
-        _original_component references.
+        _original_component references and duplicate TL-style module aliases.
+
+        This returns a clean state dict with only HF-style keys converted to TL format,
+        excluding the duplicate TL-style module names (ln1/ln2, q/k/v, mlp.in/out) that
+        are just property aliases pointing to the same underlying modules.
 
         Args:
             destination: Optional dict to store state dict in
@@ -2363,13 +2366,38 @@ class TransformerBridge(nn.Module):
             )
         else:
             raw_state_dict = self.original_model.state_dict(prefix=prefix, keep_vars=keep_vars)
-        tl_state_dict = {}
+
+        # Clean _original_component references and convert to TL format
+        # The adapter's convert_hf_key_to_tl_key knows which keys are valid based on component_mapping
+        # Keys that don't match any pattern will be returned unchanged, so we can detect and skip them
+        cleaned_keys_with_tl = {}  # Maps clean_key -> (tl_key, value)
+
         for key, value in raw_state_dict.items():
+            # Skip _original_component keys
             if key == "_original_component" or key.startswith("_original_component."):
                 continue
+
+            # Remove all _original_component from the key
             clean_key = key.replace("._original_component", "")
+
+            # Convert to TL format - this uses the adapter's component_mapping
             tl_key = self.adapter.convert_hf_key_to_tl_key(clean_key)
-            tl_state_dict[tl_key] = value
+
+            # Store the mapping for this clean key
+            if clean_key not in cleaned_keys_with_tl:
+                cleaned_keys_with_tl[clean_key] = (tl_key, value)
+
+        # Now filter: keep only keys where TL conversion was successful
+        # A successful conversion means the key changed from HF format to TL format
+        tl_state_dict = {}
+        for clean_key, (tl_key, value) in cleaned_keys_with_tl.items():
+            # If the TL key is different from clean key, conversion worked
+            # OR if it already starts with TL components (embed, blocks, etc.), keep it
+            if (tl_key != clean_key) or tl_key.startswith(("embed.", "pos_embed.", "blocks.", "ln_final.", "unembed.")):
+                # Only add if we haven't seen this TL key yet (handles duplicates like ln1/ln_1)
+                if tl_key not in tl_state_dict:
+                    tl_state_dict[tl_key] = value
+
         return tl_state_dict
 
     def load_state_dict(self, state_dict, strict=True, assign=False):

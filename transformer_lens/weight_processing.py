@@ -32,28 +32,19 @@ class ProcessWeights:
 
     @staticmethod
     def _get_param_key(tl_key: str, adapter=None) -> str:
-        """Get the actual parameter key to use, translating via adapter if provided.
+        """Convert legacy TL key format (W_Q, b_Q) to component-based format (q.weight, q.bias).
 
         Args:
-            tl_key: TransformerLens format parameter key
-            adapter: Optional architecture adapter for key translation
+            tl_key: TransformerLens format parameter key (e.g., "blocks.0.attn.W_Q")
+            adapter: Unused, kept for backward compatibility
 
         Returns:
-            The key to use for accessing parameters in the state dict
+            The component-based key (e.g., "blocks.0.attn.q.weight")
         """
-        if adapter is None:
-            return tl_key
-        try:
-            return adapter.translate_transformer_lens_path(tl_key)
-        except Exception:
-            try:
-                component_path, param_attr = ProcessWeights._prepare_component_path(tl_key)
-                remote_path = adapter.translate_transformer_lens_path(component_path)
-                if param_attr:
-                    return f"{remote_path}.{param_attr}"
-                return remote_path
-            except Exception:
-                return tl_key
+        component_path, param_attr = ProcessWeights._prepare_component_path(tl_key)
+        if param_attr:
+            return f"{component_path}.{param_attr}"
+        return component_path
 
     @staticmethod
     def _prepare_component_path(tl_key: str) -> tuple[str, str]:
@@ -1492,7 +1483,37 @@ class ProcessWeights:
             print(f"distribute_weights_to_components: Starting weight distribution")
             print(f"State dict has {len(state_dict)} keys")
             print(f"Component mapping has {len(component_mapping)} components")
+            print(f"State dict keys sample:")
+            for key in list(state_dict.keys())[:30]:
+                print(f"  {key}: {state_dict[key].shape}")
             print(f"{'='*80}\n")
+
+        # Remove TL-format alias keys (ln1, ln2, q, k, v, mlp.in, mlp.out) that are duplicates of HF keys
+        # The weight processing creates these aliases for compatibility, but we only want HF format keys
+        # for distribute_weights_to_components since real_components uses HF remote_keys
+        keys_to_skip = set()
+        for key in list(state_dict.keys()):
+            # Check if this is a TL-format alias that has an HF-format equivalent
+            if '.ln1.' in key or '.ln2.' in key:
+                hf_key = key.replace('.ln1.', '.ln_1.').replace('.ln2.', '.ln_2.')
+                if hf_key in state_dict and hf_key != key:
+                    keys_to_skip.add(key)  # Skip the TL alias, keep the HF version
+            elif '.attn.q.' in key or '.attn.k.' in key or '.attn.v.' in key or '.mlp.in.' in key or '.mlp.out.' in key:
+                # These are processed TL-format keys that don't have direct HF equivalents
+                # But they're derived from c_attn/c_fc/c_proj which are still in the state dict
+                # Skip them since the manual block will load c_attn/c_fc/c_proj
+                keys_to_skip.add(key)
+
+        # Filter state_dict to remove aliases
+        filtered_state_dict = {k: v for k, v in state_dict.items() if k not in keys_to_skip}
+
+        if verbose and keys_to_skip:
+            print(f"Skipping {len(keys_to_skip)} TL-format alias keys:")
+            for key in sorted(list(keys_to_skip))[:20]:
+                print(f"  {key}")
+            print(f"Using {len(filtered_state_dict)} HF-format keys\n")
+
+        state_dict = filtered_state_dict
 
         for component_name, component_tuple in component_mapping.items():
             # component_mapping is real_components format: (remote_path, instance)
