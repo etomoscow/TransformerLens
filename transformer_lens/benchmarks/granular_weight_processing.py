@@ -40,8 +40,11 @@ class WeightProcessingConfig:
 
 
 # Define all weight processing configurations to test
+# NOTE: Centering operations (center_writing_weights, center_unembed) are only valid
+# when fold_ln=True, as they rely on LayerNorm ignoring the mean. Testing them without
+# fold_ln produces invalid/misleading results.
 WEIGHT_PROCESSING_CONFIGS = [
-    # Individual flags
+    # Base configuration - fold_ln only
     WeightProcessingConfig(
         name="only_fold_ln",
         fold_ln=True,
@@ -50,31 +53,7 @@ WEIGHT_PROCESSING_CONFIGS = [
         fold_value_biases=False,
         refactor_factored_attn_matrices=False,
     ),
-    WeightProcessingConfig(
-        name="only_center_weights",
-        fold_ln=False,
-        center_writing_weights=True,
-        center_unembed=False,
-        fold_value_biases=False,
-        refactor_factored_attn_matrices=False,
-    ),
-    WeightProcessingConfig(
-        name="only_center_unembed",
-        fold_ln=False,
-        center_writing_weights=False,
-        center_unembed=True,
-        fold_value_biases=False,
-        refactor_factored_attn_matrices=False,
-    ),
-    WeightProcessingConfig(
-        name="only_fold_value_biases",
-        fold_ln=False,
-        center_writing_weights=False,
-        center_unembed=False,
-        fold_value_biases=True,
-        refactor_factored_attn_matrices=False,
-    ),
-    # Common combinations
+    # Add centering incrementally (all require fold_ln)
     WeightProcessingConfig(
         name="fold_ln+center_weights",
         fold_ln=True,
@@ -84,11 +63,28 @@ WEIGHT_PROCESSING_CONFIGS = [
         refactor_factored_attn_matrices=False,
     ),
     WeightProcessingConfig(
+        name="fold_ln+center_unembed",
+        fold_ln=True,
+        center_writing_weights=False,
+        center_unembed=True,
+        fold_value_biases=False,
+        refactor_factored_attn_matrices=False,
+    ),
+    WeightProcessingConfig(
         name="fold_ln+center_weights+center_unembed",
         fold_ln=True,
         center_writing_weights=True,
         center_unembed=True,
         fold_value_biases=False,
+        refactor_factored_attn_matrices=False,
+    ),
+    # Test fold_value_biases with different centering combinations
+    WeightProcessingConfig(
+        name="fold_ln+fold_value_biases",
+        fold_ln=True,
+        center_writing_weights=False,
+        center_unembed=False,
+        fold_value_biases=True,
         refactor_factored_attn_matrices=False,
     ),
     WeightProcessingConfig(
@@ -184,26 +180,60 @@ def run_granular_weight_processing_benchmarks(
                 fold_ln=config.fold_ln,
                 center_writing_weights=config.center_writing_weights,
                 center_unembed=config.center_unembed,
+                fold_value_biases=config.fold_value_biases,
+                refactor_factored_attn_matrices=config.refactor_factored_attn_matrices,
             )
 
             # Run core benchmarks
             if verbose:
-                print("Running benchmarks...")
+                print("Running benchmarks...\n")
 
             # Logits/loss equivalence
-            results.append(
-                benchmark_logits_equivalence(bridge, test_text, reference_model=ht_ref)
-            )
-            results.append(benchmark_loss_equivalence(bridge, test_text, reference_model=ht_ref))
+            logits_result = benchmark_logits_equivalence(bridge, test_text, reference_model=ht_ref)
+            results.append(logits_result)
+            if verbose:
+                status = "🟢 [PASS]" if logits_result.passed else "🔴 [FAIL]"
+                print(f"{status} logits_equivalence: {logits_result.message}")
+                if logits_result.details:
+                    for key, value in logits_result.details.items():
+                        print(f"  {key}: {value}")
+
+            loss_result = benchmark_loss_equivalence(bridge, test_text, reference_model=ht_ref)
+            results.append(loss_result)
+            if verbose:
+                status = "🟢 [PASS]" if loss_result.passed else "🔴 [FAIL]"
+                print(f"{status} loss_equivalence: {loss_result.message}")
+                if loss_result.details:
+                    for key, value in loss_result.details.items():
+                        print(f"  {key}: {value}")
 
             # Hook functionality
-            results.append(
-                benchmark_hook_functionality(bridge, test_text, reference_model=ht_ref)
-            )
-            results.append(
-                benchmark_critical_forward_hooks(bridge, test_text, reference_model=ht_ref)
-            )
-            results.append(benchmark_forward_hooks(bridge, test_text, reference_model=ht_ref))
+            hook_func_result = benchmark_hook_functionality(bridge, test_text, reference_model=ht_ref)
+            results.append(hook_func_result)
+            if verbose:
+                status = "🟢 [PASS]" if hook_func_result.passed else "🔴 [FAIL]"
+                print(f"{status} hook_functionality: {hook_func_result.message}")
+                if hook_func_result.details:
+                    for key, value in hook_func_result.details.items():
+                        print(f"  {key}: {value}")
+
+            critical_hooks_result = benchmark_critical_forward_hooks(bridge, test_text, reference_model=ht_ref)
+            results.append(critical_hooks_result)
+            if verbose:
+                status = "🟢 [PASS]" if critical_hooks_result.passed else "🔴 [FAIL]"
+                print(f"{status} critical_forward_hooks: {critical_hooks_result.message}")
+                if critical_hooks_result.details:
+                    for key, value in critical_hooks_result.details.items():
+                        print(f"  {key}: {value}")
+
+            forward_hooks_result = benchmark_forward_hooks(bridge, test_text, reference_model=ht_ref)
+            results.append(forward_hooks_result)
+            if verbose:
+                status = "🟢 [PASS]" if forward_hooks_result.passed else "🔴 [FAIL]"
+                print(f"{status} forward_hooks: {forward_hooks_result.message}")
+                if forward_hooks_result.details:
+                    for key, value in forward_hooks_result.details.items():
+                        print(f"  {key}: {value}")
 
             # Clean up
             del bridge

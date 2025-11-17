@@ -730,6 +730,8 @@ class TransformerBridge(nn.Module):
         fold_ln: bool = True,
         center_writing_weights: bool = True,
         center_unembed: bool = True,
+        fold_value_biases: bool = True,
+        refactor_factored_attn_matrices: bool = False,
     ) -> None:
         """Enable compatibility mode for the bridge.
 
@@ -746,6 +748,10 @@ class TransformerBridge(nn.Module):
                 Default: True. Ignored if no_processing=True.
             center_unembed: Whether to center the unembedding matrix.
                 Default: True. Ignored if no_processing=True.
+            fold_value_biases: Whether to fold value biases into output bias.
+                Default: True. Ignored if no_processing=True.
+            refactor_factored_attn_matrices: Whether to refactor factored attention matrices.
+                Default: False. Ignored if no_processing=True.
         """
         from transformer_lens.utilities.bridge_components import (
             apply_fn_to_all_components,
@@ -767,6 +773,8 @@ class TransformerBridge(nn.Module):
             fold_ln = False
             center_writing_weights = False
             center_unembed = False
+            fold_value_biases = False
+            refactor_factored_attn_matrices = False
             self._enable_split_qkv_attention()
             self.clear_hook_registry()
             self._initialize_hook_registry()
@@ -775,6 +783,8 @@ class TransformerBridge(nn.Module):
                 fold_ln=fold_ln,
                 center_writing_weights=center_writing_weights,
                 center_unembed=center_unembed,
+                fold_value_biases=fold_value_biases,
+                refactor_factored_attn_matrices=refactor_factored_attn_matrices,
             )
         self._register_all_aliases_recursive()
 

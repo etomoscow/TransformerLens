@@ -783,7 +783,8 @@ class ProcessWeights:
         unembed_W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
         ln_final_b_key = ProcessWeights._get_param_key("ln_final.b", adapter)
         has_unembed_bias = unembed_b_U_key in state_dict
-        if not getattr(cfg, "final_rms", False) and fold_biases and has_unembed_bias:
+        has_ln_final_bias = ln_final_b_key in state_dict
+        if not getattr(cfg, "final_rms", False) and fold_biases and has_unembed_bias and has_ln_final_bias:
             unembed_weight = state_dict[unembed_W_U_key]
             ln_bias = state_dict[ln_final_b_key]
             if len(unembed_weight.shape) == 2 and len(ln_bias.shape) == 1:

@@ -44,6 +44,14 @@ class LlamaArchitectureAdapter(ArchitectureAdapter):
     def __init__(self, cfg: Any) -> None:
         """Initialize the Llama architecture adapter."""
         super().__init__(cfg)
+
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "RMS"
+        self.cfg.positional_embedding_type = "rotary"
+        self.cfg.final_rms = True
+        self.cfg.gated_mlp = True
+        self.cfg.attn_only = False
+
         self.default_config = {
             "d_model": cfg.d_model,
             "d_head": cfg.d_model // cfg.n_heads,
@@ -58,14 +66,9 @@ class LlamaArchitectureAdapter(ArchitectureAdapter):
             self.default_config["n_key_value_heads"] = cfg.n_key_value_heads
             self.cfg.n_key_value_heads = cfg.n_key_value_heads
 
-        self.cfg.gated_mlp = True
-
         self.cfg.uses_rms_norm = True
         # Llama uses 'variance_epsilon' instead of 'eps' for RMSNorm
         self.cfg.eps_attr = "variance_epsilon"
-
-        # Llama uses rotary position embeddings
-        self.cfg.positional_embedding_type = "rotary"
 
         self.conversion_rules = HookConversionSet(
             {

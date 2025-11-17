@@ -351,3 +351,94 @@ class AttentionBridge(GeneralizedComponent):
             return
         super().set_processed_weights(weights)
 
+    @property
+    def W_Q(self) -> torch.Tensor:
+        """Get W_Q in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        import einops
+        weight = self.q.weight  # 2D: [d_model, n_heads*d_head] for Conv1D or [n_heads*d_head, d_model] for Linear
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, 'n_heads') else self.config.n_head
+            # Assume Conv1D format [d_model, n_heads*d_head] since postprocess_weights should have handled Linear models
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
+        return weight
+
+    @property
+    def W_K(self) -> torch.Tensor:
+        """Get W_K in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        import einops
+        weight = self.k.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = self.config.n_key_value_heads if hasattr(self.config, 'n_key_value_heads') and self.config.n_key_value_heads else (self.config.n_heads if hasattr(self.config, 'n_heads') else self.config.n_head)
+            # Assume Conv1D format [d_model, n_heads*d_head] since postprocess_weights should have handled Linear models
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
+        return weight
+
+    @property
+    def W_V(self) -> torch.Tensor:
+        """Get W_V in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        import einops
+        weight = self.v.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = self.config.n_key_value_heads if hasattr(self.config, 'n_key_value_heads') and self.config.n_key_value_heads else (self.config.n_heads if hasattr(self.config, 'n_heads') else self.config.n_head)
+            # Assume Conv1D format [d_model, n_heads*d_head] since postprocess_weights should have handled Linear models
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
+        return weight
+
+    @property
+    def W_O(self) -> torch.Tensor:
+        """Get W_O in 3D format [n_heads, d_head, d_model] from 2D linear bridge weight."""
+        import einops
+        weight = self.o.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, 'n_heads') else self.config.n_head
+            if weight.shape[0] == n_heads * (weight.shape[1] // n_heads if weight.shape[1] % n_heads == 0 else weight.shape[0] // n_heads):
+                return einops.rearrange(
+                    weight, "(n_heads d_head) d_model -> n_heads d_head d_model", n_heads=n_heads
+                )
+            else:
+                return einops.rearrange(
+                    weight.T, "(n_heads d_head) d_model -> n_heads d_head d_model", n_heads=n_heads
+                )
+        return weight
+
+    @property
+    def b_Q(self) -> Optional[torch.Tensor]:
+        """Get b_Q in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        import einops
+        bias = self.q.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, 'n_heads') else self.config.n_head
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_K(self) -> Optional[torch.Tensor]:
+        """Get b_K in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        import einops
+        bias = self.k.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = self.config.n_key_value_heads if hasattr(self.config, 'n_key_value_heads') and self.config.n_key_value_heads else (self.config.n_heads if hasattr(self.config, 'n_heads') else self.config.n_head)
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_V(self) -> Optional[torch.Tensor]:
+        """Get b_V in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        import einops
+        bias = self.v.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = self.config.n_key_value_heads if hasattr(self.config, 'n_key_value_heads') and self.config.n_key_value_heads else (self.config.n_heads if hasattr(self.config, 'n_heads') else self.config.n_head)
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_O(self) -> Optional[torch.Tensor]:
+        """Get b_O bias from linear bridge."""
+        return self.o.bias
+

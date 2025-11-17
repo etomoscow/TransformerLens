@@ -44,8 +44,14 @@ class Qwen2ArchitectureAdapter(ArchitectureAdapter):
         """Initialize the Qwen2 architecture adapter."""
         super().__init__(cfg)
 
-        self.cfg.default_prepend_bos = False
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "RMS"
+        self.cfg.positional_embedding_type = "rotary"
+        self.cfg.final_rms = True
         self.cfg.gated_mlp = True
+        self.cfg.attn_only = False
+
+        self.cfg.default_prepend_bos = False
         self.cfg.uses_rms_norm = True
 
         self.conversion_rules = HookConversionSet(

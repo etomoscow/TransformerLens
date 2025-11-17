@@ -26,6 +26,13 @@ class OptArchitectureAdapter(ArchitectureAdapter):
         """Initialize the OPT architecture adapter."""
         super().__init__(cfg)
 
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "LN"
+        self.cfg.positional_embedding_type = "standard"
+        self.cfg.final_rms = False
+        self.cfg.gated_mlp = False
+        self.cfg.attn_only = False
+
         # OPT models were trained with BOS tokens (inherits default_prepend_bos = True)
 
         self.conversion_rules = HookConversionSet(

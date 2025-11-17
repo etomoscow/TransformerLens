@@ -27,6 +27,13 @@ class BloomArchitectureAdapter(ArchitectureAdapter):
         """Initialize the Bloom architecture adapter."""
         super().__init__(cfg)
 
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "LN"
+        self.cfg.positional_embedding_type = "alibi"
+        self.cfg.final_rms = False
+        self.cfg.gated_mlp = False
+        self.cfg.attn_only = False
+
         self.cfg.default_prepend_bos = False
         self.conversion_rules = HookConversionSet(
             {

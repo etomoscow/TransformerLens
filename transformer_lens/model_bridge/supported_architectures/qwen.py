@@ -27,6 +27,13 @@ class QwenArchitectureAdapter(ArchitectureAdapter):
         """Initialize the Qwen architecture adapter."""
         super().__init__(cfg)
 
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "RMS"
+        self.cfg.positional_embedding_type = "rotary"
+        self.cfg.final_rms = True
+        self.cfg.gated_mlp = True
+        self.cfg.attn_only = False
+
         self.conversion_rules = HookConversionSet(
             {
                 "embed.e": "transformer.wte.weight",

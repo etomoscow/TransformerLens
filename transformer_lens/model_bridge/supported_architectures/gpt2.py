@@ -116,6 +116,13 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
         """Initialize the GPT2 architecture adapter."""
         super().__init__(cfg)
 
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "LN"
+        self.cfg.positional_embedding_type = "standard"
+        self.cfg.final_rms = False
+        self.cfg.gated_mlp = False
+        self.cfg.attn_only = False
+
         # GPT-2 uses BOS tokens (inherits default_prepend_bos = True)
 
         # Set default config for GPT2 models
