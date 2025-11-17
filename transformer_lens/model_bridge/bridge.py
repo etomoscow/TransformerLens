@@ -909,12 +909,7 @@ class TransformerBridge(nn.Module):
             refactor_factored_attn_matrices=refactor_factored_attn_matrices,
             adapter=adapter,
         )
-        print("done folding")
-        # if verbose:
-        #     print("  Loading processed weights into components...")
-        # object.__setattr__(self, "_processed_tl_weights", state_dict)
 
-        # Distribute weights to components using the new unified approach
         if verbose:
             print("  Distributing weights to generalized components...")
         ProcessWeights.distribute_weights_to_components(
@@ -927,11 +922,6 @@ class TransformerBridge(nn.Module):
             print("  Loading processed weights into Bridge components...")
         loaded_count = 0
         missing_count = 0
-        import einops
-
-        from transformer_lens.model_bridge.generalized_components.joint_qkv_attention import (
-            JointQKVAttentionBridge,
-        )
 
         for tb_key, weight_tensor in state_dict.items():
             # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
@@ -995,52 +985,6 @@ class TransformerBridge(nn.Module):
             "GemmaForCausalLM",
             "Gemma2ForCausalLM",
         ]
-        if fold_ln and (not is_gemma_model):
-            for layer_idx in range(self.cfg.n_layers):
-                for ln_name in ["ln1", "ln2"]:
-                    try:
-                        block = self.blocks[layer_idx]
-                        ln_component = getattr(block, ln_name, None)
-                        if ln_component is not None:
-                            if hasattr(ln_component, "_original_component"):
-                                norm_module = ln_component._original_component
-                            else:
-                                norm_module = ln_component
-                            if hasattr(norm_module, "weight") and norm_module.weight is not None:
-                                with torch.no_grad():
-                                    norm_module.weight.fill_(1.0)
-                            if hasattr(norm_module, "bias") and norm_module.bias is not None:
-                                with torch.no_grad():
-                                    norm_module.bias.zero_()
-                    except (AttributeError, IndexError):
-                        pass
-            try:
-                if hasattr(self, "ln_final"):
-                    ln_final = self.ln_final
-                    if hasattr(ln_final, "_original_component"):
-                        norm_module = ln_final._original_component
-                    else:
-                        norm_module = ln_final
-                    if hasattr(norm_module, "weight") and norm_module.weight is not None:
-                        with torch.no_grad():
-                            norm_module.weight.fill_(1.0)
-                    if hasattr(norm_module, "bias") and norm_module.bias is not None:
-                        with torch.no_grad():
-                            norm_module.bias.zero_()
-            except (AttributeError, IndexError):
-                pass
-        if verbose:
-            print("  Enabling processed weights mode on components...")
-
-        if verbose:
-            print("  Setting 3D processed weight attributes...")
-        if verbose:
-            print("  Extracting HookedTransformer-compatible weights...")
-
-        if fold_ln:
-            object.__setattr__(self.cfg, "layer_norm_folding", True)
-        if verbose:
-            print("✓ Weight processing complete!")
 
     def _load_all_processed_weights(
         self, verbose: bool = False, processed_state_dict: Optional[Dict[str, torch.Tensor]] = None
