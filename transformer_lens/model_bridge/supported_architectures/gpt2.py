@@ -230,17 +230,20 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
         qkv_bias = qkv_bias.reshape(3, self.cfg.n_heads * self.cfg.d_head)
         b_Q, b_K, b_V = qkv_bias[0, :], qkv_bias[1, :], qkv_bias[2, :]
 
-        # Create plain nn.Linear modules that output 3D tensors [batch, seq, d_model]
-        W_Q_transformation = torch.nn.Linear(W_Q.shape[0], W_Q.shape[1], bias=True)
-        W_Q_transformation.weight = torch.nn.Parameter(W_Q.T)
+        # Create Conv1D modules (same as c_attn) for consistency
+        # Conv1D weights are in [in, out] format (not transposed like Linear)
+        from transformers.pytorch_utils import Conv1D
+
+        W_Q_transformation = Conv1D(W_Q.shape[1], W_Q.shape[0])
+        W_Q_transformation.weight = torch.nn.Parameter(W_Q)  # No transpose for Conv1D
         W_Q_transformation.bias = torch.nn.Parameter(b_Q)
 
-        W_K_transformation = torch.nn.Linear(W_K.shape[0], W_K.shape[1], bias=True)
-        W_K_transformation.weight = torch.nn.Parameter(W_K.T)
+        W_K_transformation = Conv1D(W_K.shape[1], W_K.shape[0])
+        W_K_transformation.weight = torch.nn.Parameter(W_K)  # No transpose for Conv1D
         W_K_transformation.bias = torch.nn.Parameter(b_K)
 
-        W_V_transformation = torch.nn.Linear(W_V.shape[0], W_V.shape[1], bias=True)
-        W_V_transformation.weight = torch.nn.Parameter(W_V.T)
+        W_V_transformation = Conv1D(W_V.shape[1], W_V.shape[0])
+        W_V_transformation.weight = torch.nn.Parameter(W_V)  # No transpose for Conv1D
         W_V_transformation.bias = torch.nn.Parameter(b_V)
 
         return W_Q_transformation, W_K_transformation, W_V_transformation

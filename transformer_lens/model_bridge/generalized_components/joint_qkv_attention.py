@@ -17,7 +17,7 @@ from transformer_lens.model_bridge.generalized_components.attention import (
 from transformer_lens.model_bridge.generalized_components.base import (
     GeneralizedComponent,
 )
-from transformer_lens.model_bridge.generalized_components.linear import LinearBridge
+from transformer_lens.model_bridge.generalized_components.conv1d import Conv1DBridge
 
 
 class JointQKVAttentionBridge(AttentionBridge):
@@ -79,9 +79,9 @@ class JointQKVAttentionBridge(AttentionBridge):
             self.qkv_conversion_rule = qkv_conversion_rule
         else:
             self.qkv_conversion_rule = self._create_qkv_conversion_rule()
-        self.q = LinearBridge(name="q")
-        self.k = LinearBridge(name="k")
-        self.v = LinearBridge(name="v")
+        self.q = Conv1DBridge(name="q")
+        self.k = Conv1DBridge(name="k")
+        self.v = Conv1DBridge(name="v")
         for submodule_name, submodule in (submodules or {}).items():
             if not hasattr(self, submodule_name):
                 setattr(self, submodule_name, submodule)
