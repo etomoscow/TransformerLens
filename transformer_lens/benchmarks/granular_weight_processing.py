@@ -44,7 +44,7 @@ class WeightProcessingConfig:
 # when fold_ln=True, as they rely on LayerNorm ignoring the mean. Testing them without
 # fold_ln produces invalid/misleading results.
 WEIGHT_PROCESSING_CONFIGS = [
-    # Base configuration - fold_ln only
+    # Test each operation in complete isolation with fold_ln
     WeightProcessingConfig(
         name="only_fold_ln",
         fold_ln=True,
@@ -53,7 +53,31 @@ WEIGHT_PROCESSING_CONFIGS = [
         fold_value_biases=False,
         refactor_factored_attn_matrices=False,
     ),
-    # Add centering incrementally (all require fold_ln)
+    WeightProcessingConfig(
+        name="only_center_weights",
+        fold_ln=True,
+        center_writing_weights=True,
+        center_unembed=False,
+        fold_value_biases=False,
+        refactor_factored_attn_matrices=False,
+    ),
+    WeightProcessingConfig(
+        name="only_center_unembed",
+        fold_ln=True,
+        center_writing_weights=False,
+        center_unembed=True,
+        fold_value_biases=False,
+        refactor_factored_attn_matrices=False,
+    ),
+    WeightProcessingConfig(
+        name="only_fold_value_biases",
+        fold_ln=True,
+        center_writing_weights=False,
+        center_unembed=False,
+        fold_value_biases=True,
+        refactor_factored_attn_matrices=False,
+    ),
+    # Two-way combinations (fold_ln + one other)
     WeightProcessingConfig(
         name="fold_ln+center_weights",
         fold_ln=True,
@@ -71,15 +95,6 @@ WEIGHT_PROCESSING_CONFIGS = [
         refactor_factored_attn_matrices=False,
     ),
     WeightProcessingConfig(
-        name="fold_ln+center_weights+center_unembed",
-        fold_ln=True,
-        center_writing_weights=True,
-        center_unembed=True,
-        fold_value_biases=False,
-        refactor_factored_attn_matrices=False,
-    ),
-    # Test fold_value_biases with different centering combinations
-    WeightProcessingConfig(
         name="fold_ln+fold_value_biases",
         fold_ln=True,
         center_writing_weights=False,
@@ -87,11 +102,28 @@ WEIGHT_PROCESSING_CONFIGS = [
         fold_value_biases=True,
         refactor_factored_attn_matrices=False,
     ),
+    # Three-way combinations (commonly used together)
+    WeightProcessingConfig(
+        name="fold_ln+center_weights+center_unembed",
+        fold_ln=True,
+        center_writing_weights=True,
+        center_unembed=True,
+        fold_value_biases=False,
+        refactor_factored_attn_matrices=False,
+    ),
     WeightProcessingConfig(
         name="fold_ln+center_weights+fold_value_biases",
         fold_ln=True,
         center_writing_weights=True,
         center_unembed=False,
+        fold_value_biases=True,
+        refactor_factored_attn_matrices=False,
+    ),
+    WeightProcessingConfig(
+        name="fold_ln+center_unembed+fold_value_biases",
+        fold_ln=True,
+        center_writing_weights=False,
+        center_unembed=True,
         fold_value_biases=True,
         refactor_factored_attn_matrices=False,
     ),
@@ -106,12 +138,42 @@ WEIGHT_PROCESSING_CONFIGS = [
     ),
 ]
 
+# Experimental configurations that test refactor_factored_attn_matrices
+# These are only run when explicitly requested via include_refactor_tests=True
+REFACTOR_ATTN_CONFIGS = [
+    WeightProcessingConfig(
+        name="only_refactor_attn",
+        fold_ln=True,
+        center_writing_weights=False,
+        center_unembed=False,
+        fold_value_biases=False,
+        refactor_factored_attn_matrices=True,
+    ),
+    WeightProcessingConfig(
+        name="fold_ln+refactor_attn",
+        fold_ln=True,
+        center_writing_weights=False,
+        center_unembed=False,
+        fold_value_biases=False,
+        refactor_factored_attn_matrices=True,
+    ),
+    WeightProcessingConfig(
+        name="all_with_refactor",
+        fold_ln=True,
+        center_writing_weights=True,
+        center_unembed=True,
+        fold_value_biases=True,
+        refactor_factored_attn_matrices=True,
+    ),
+]
+
 
 def run_granular_weight_processing_benchmarks(
     model_name: str,
     device: str,
     test_text: str,
     verbose: bool = True,
+    include_refactor_tests: bool = False,
 ) -> Dict[str, List[BenchmarkResult]]:
     """Run benchmarks with each weight processing configuration.
 
@@ -123,6 +185,7 @@ def run_granular_weight_processing_benchmarks(
         device: Device to run on ("cpu" or "cuda")
         test_text: Test text for generation/inference
         verbose: Whether to print detailed output
+        include_refactor_tests: Whether to include experimental refactor_factored_attn_matrices tests
 
     Returns:
         Dictionary mapping config name to list of benchmark results
@@ -141,14 +204,21 @@ def run_granular_weight_processing_benchmarks(
 
     all_results: Dict[str, List[BenchmarkResult]] = {}
 
+    # Determine which configurations to test
+    configs_to_test = WEIGHT_PROCESSING_CONFIGS.copy()
+    if include_refactor_tests:
+        configs_to_test.extend(REFACTOR_ATTN_CONFIGS)
+
     if verbose:
         print("\n" + "=" * 80)
         print("GRANULAR WEIGHT PROCESSING BENCHMARKS")
         print(f"Model: {model_name}")
-        print(f"Testing {len(WEIGHT_PROCESSING_CONFIGS)} configurations")
+        print(f"Testing {len(configs_to_test)} configurations")
+        if include_refactor_tests:
+            print(f"  ({len(WEIGHT_PROCESSING_CONFIGS)} standard + {len(REFACTOR_ATTN_CONFIGS)} refactor tests)")
         print("=" * 80)
 
-    for config in WEIGHT_PROCESSING_CONFIGS:
+    for config in configs_to_test:
         if verbose:
             print(f"\n{'='*80}")
             print(f"Testing: {config.name}")
