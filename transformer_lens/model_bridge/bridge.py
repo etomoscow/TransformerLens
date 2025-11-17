@@ -907,38 +907,39 @@ class TransformerBridge(nn.Module):
         ProcessWeights.distribute_weights_to_components(
             state_dict=state_dict,
             component_mapping=self.real_components,
+            verbose=True
         )
 
         # If fold_ln is enabled, switch all normalization layers to LayerNormPre mode
         # This matches HookedTransformer's behavior where LayerNorm is replaced with LayerNormPre
-        if fold_ln and self.cfg.normalization_type == "LN":
-            if verbose:
-                print("  Switching normalization layers to LayerNormPre mode...")
-            from transformer_lens.model_bridge.generalized_components.normalization import (
-                NormalizationBridge,
-            )
+        # if fold_ln and self.cfg.normalization_type == "LN":
+        #     if verbose:
+        #         print("  Switching normalization layers to LayerNormPre mode...")
+        #     from transformer_lens.model_bridge.generalized_components.normalization import (
+        #         NormalizationBridge,
+        #     )
 
-            # Switch ln_final to LayerNormPre mode
-            if hasattr(self, "ln_final") and isinstance(self.ln_final, NormalizationBridge):
-                self.ln_final.enable_layernorm_pre_mode()
+        #     # Switch ln_final to LayerNormPre mode
+        #     if hasattr(self, "ln_final") and isinstance(self.ln_final, NormalizationBridge):
+        #         self.ln_final.enable_layernorm_pre_mode()
 
-            # Switch all block normalization layers to LayerNormPre mode
-            for block in self.blocks:
-                if hasattr(block, "ln1") and isinstance(block.ln1, NormalizationBridge):
-                    block.ln1.enable_layernorm_pre_mode()
-                if hasattr(block, "ln2") and isinstance(block.ln2, NormalizationBridge):
-                    block.ln2.enable_layernorm_pre_mode()
-                # Handle MLP layer norm if it exists (for some architectures)
-                if hasattr(block, "mlp") and hasattr(block.mlp, "ln") and isinstance(
-                    block.mlp.ln, NormalizationBridge
-                ):
-                    block.mlp.ln.enable_layernorm_pre_mode()
+        #     # Switch all block normalization layers to LayerNormPre mode
+        #     for block in self.blocks:
+        #         if hasattr(block, "ln1") and isinstance(block.ln1, NormalizationBridge):
+        #             block.ln1.enable_layernorm_pre_mode()
+        #         if hasattr(block, "ln2") and isinstance(block.ln2, NormalizationBridge):
+        #             block.ln2.enable_layernorm_pre_mode()
+        #         # Handle MLP layer norm if it exists (for some architectures)
+        #         if hasattr(block, "mlp") and hasattr(block.mlp, "ln") and isinstance(
+        #             block.mlp.ln, NormalizationBridge
+        #         ):
+        #             block.mlp.ln.enable_layernorm_pre_mode()
 
         # self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
-        if verbose:
-            print("  Loading processed weights into Bridge components...")
-        loaded_count = 0
-        missing_count = 0
+        # if verbose:
+        #     print("  Loading processed weights into Bridge components...")
+        # loaded_count = 0
+        # missing_count = 0
 
         # if verbose:
         #     print(f"\n  Manual block will process {len(state_dict)} keys from state_dict:")
