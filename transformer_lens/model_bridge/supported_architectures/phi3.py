@@ -25,6 +25,13 @@ class Phi3ArchitectureAdapter(ArchitectureAdapter):
     def __init__(self, cfg: Any) -> None:
         super().__init__(cfg)
 
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "RMS"
+        self.cfg.positional_embedding_type = "rotary"
+        self.cfg.final_rms = False
+        self.cfg.gated_mlp = True
+        self.cfg.attn_only = False
+
         self.conversion_rules = HookConversionSet(
             {
                 "embed.e": "model.embed_tokens.weight",

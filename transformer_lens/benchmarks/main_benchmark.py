@@ -1,10 +1,12 @@
 """Main benchmark runner for TransformerBridge.
 
 This module provides the main benchmark suite that compares TransformerBridge
-against reference implementations in an optimized 3-phase approach:
+against reference implementations in an optimized 5-phase approach:
 Phase 1: HF + Bridge (unprocessed) - Compare against raw HuggingFace model
 Phase 2: Bridge (unprocessed) + HT (unprocessed) - Compare unprocessed models
-Phase 3: Bridge (processed) + HT (processed) - Full compatibility mode testing
+Phase 3: Weight Extraction/Reloading Validation (no_processing)
+Phase 4: Bridge (processed) + HT (processed) - Full compatibility mode testing
+Phase 5: Granular Weight Processing Tests (optional)
 """
 
 import gc
@@ -75,13 +77,13 @@ def run_comparison_benchmarks(
     """Run standardized comparison benchmarks between Bridge and reference model.
 
     This function runs the same comprehensive test suite for both unprocessed (Phase 2)
-    and processed (Phase 3) modes to ensure parity in testing coverage.
+    and processed (Phase 4) modes to ensure parity in testing coverage.
 
     Args:
         bridge_model: TransformerBridge model to test
         reference_model: HookedTransformer reference (same architecture) or None
         test_text: Input text for testing
-        phase_name: Name of the phase ("Phase 2" or "Phase 3") for logging
+        phase_name: Name of the phase ("Phase 2" or "Phase 4") for logging
         is_processed: Whether models have processed weights (for weight-specific tests)
         verbose: Whether to print detailed results
         gpt2_reference: Optional GPT-2 reference for cross-model validation
@@ -102,31 +104,81 @@ def run_comparison_benchmarks(
     has_cross_model_ref = gpt2_reference is not None
 
     # ========================================================================
-    # 1. Model Equivalence Benchmarks
+    # 1. Weight Processing Benchmarks (only for processed mode)
+    # MOST BASIC: Check weights are valid before testing anything else
+    # ========================================================================
+    if is_processed:
+        if verbose:
+            print("1. Weight Processing Benchmarks (Foundation)")
+        try:
+            # Critical weight validation tests (run first - most basic)
+            add_result(benchmark_no_nan_inf(bridge_model, test_text))
+            add_result(benchmark_weight_magnitudes(bridge_model, test_text))
+
+            # Detailed weight processing validation benchmarks (don't need reference model)
+            add_result(benchmark_layer_norm_folding(bridge_model, test_text))
+            add_result(benchmark_attention_output_centering(bridge_model, test_text))
+            add_result(benchmark_mlp_output_centering(bridge_model, test_text))
+            add_result(benchmark_unembed_centering(bridge_model, test_text))
+            add_result(benchmark_value_bias_folding(bridge_model, test_text))
+
+            # Weight comparison tests (require reference model)
+            if ht_available:
+                add_result(
+                    benchmark_weight_processing(
+                        bridge_model, test_text, reference_model=reference_model
+                    )
+                )
+                add_result(
+                    benchmark_weight_sharing(
+                        bridge_model, test_text, reference_model=reference_model
+                    )
+                )
+            else:
+                if verbose:
+                    print("⏭️ weight_processing and weight_sharing skipped (no HT reference)")
+                for benchmark_name in ["weight_processing", "weight_sharing"]:
+                    add_result(
+                        BenchmarkResult(
+                            name=benchmark_name,
+                            severity=BenchmarkSeverity.SKIPPED,
+                            message="Skipped (HookedTransformer not available for this model)",
+                            passed=True,
+                        )
+                    )
+
+            # weight_modification doesn't need reference model
+            add_result(benchmark_weight_modification(bridge_model, test_text))
+            gc.collect()
+        except Exception as e:
+            if verbose:
+                print(f"✗ Weight processing benchmark failed: {e}\n")
+
+    # ========================================================================
+    # 2. Model Equivalence Benchmarks (Forward Pass)
+    # Tests basic forward computation - depends on weights being correct
     # ========================================================================
     if verbose:
-        print("1. Model Equivalence Benchmarks")
+        print("2. Model Equivalence Benchmarks (Forward Pass)")
 
     if ht_available:
         try:
             add_result(
-                benchmark_loss_equivalence(bridge_model, test_text, reference_model=reference_model)
-            )
-            add_result(
                 benchmark_logits_equivalence(
                     bridge_model, test_text, reference_model=reference_model
                 )
+            )
+            add_result(
+                benchmark_loss_equivalence(bridge_model, test_text, reference_model=reference_model)
             )
             gc.collect()
         except Exception as e:
             if verbose:
                 print(f"✗ Equivalence benchmark failed: {e}\n")
     else:
-        from transformer_lens.benchmarks.utils import BenchmarkSeverity
-
         if verbose:
             print("⏭️ Skipped (no HookedTransformer reference)\n")
-        for benchmark_name in ["loss_equivalence", "logits_equivalence"]:
+        for benchmark_name in ["logits_equivalence", "loss_equivalence"]:
             add_result(
                 BenchmarkResult(
                     name=benchmark_name,
@@ -137,14 +189,50 @@ def run_comparison_benchmarks(
             )
 
     # ========================================================================
-    # 2. Hook Registration Benchmarks
+    # 3. Hook Registration Benchmarks
+    # Tests hooks exist and are registered - depends on model structure
     # ========================================================================
     if verbose:
-        print("2. Hook Registration Benchmarks")
+        print("3. Hook Registration Benchmarks")
 
     if ht_available:
         try:
             add_result(benchmark_hook_registry(bridge_model, reference_model=reference_model))
+            gc.collect()
+        except Exception as e:
+            if verbose:
+                print(f"✗ Hook registry benchmark failed: {e}\n")
+    elif has_cross_model_ref:
+        # Use GPT-2 for cross-model validation with dimensional matching
+        try:
+            if verbose:
+                print("Using GPT-2 for cross-model validation (dimensional matching)")
+            add_result(benchmark_hook_registry(bridge_model, reference_model=gpt2_reference))
+            gc.collect()
+        except Exception as e:
+            if verbose:
+                print(f"✗ Hook registry benchmark failed: {e}\n")
+    else:
+        if verbose:
+            print("⏭️ Skipped (no HookedTransformer reference)\n")
+        add_result(
+            BenchmarkResult(
+                name="hook_registry",
+                severity=BenchmarkSeverity.SKIPPED,
+                message="Skipped (HookedTransformer not available for this model)",
+                passed=True,
+            )
+        )
+
+    # ========================================================================
+    # 4. Forward Hook Functionality Benchmarks
+    # Tests hooks fire and produce correct values - depends on forward pass + hooks
+    # ========================================================================
+    if verbose:
+        print("4. Forward Hook Functionality Benchmarks")
+
+    if ht_available:
+        try:
             add_result(
                 benchmark_hook_functionality(
                     bridge_model, test_text, reference_model=reference_model
@@ -166,13 +254,12 @@ def run_comparison_benchmarks(
             gc.collect()
         except Exception as e:
             if verbose:
-                print(f"✗ Hook benchmark failed: {e}\n")
+                print(f"✗ Forward hook benchmark failed: {e}\n")
     elif has_cross_model_ref:
         # Use GPT-2 for cross-model validation with dimensional matching
         try:
             if verbose:
                 print("Using GPT-2 for cross-model validation (dimensional matching)")
-            add_result(benchmark_hook_registry(bridge_model, reference_model=gpt2_reference))
             add_result(
                 benchmark_hook_functionality(
                     bridge_model,
@@ -205,12 +292,11 @@ def run_comparison_benchmarks(
             gc.collect()
         except Exception as e:
             if verbose:
-                print(f"✗ Hook benchmark failed: {e}\n")
+                print(f"✗ Forward hook benchmark failed: {e}\n")
     else:
         if verbose:
             print("⏭️ Skipped (no HookedTransformer reference)\n")
         for benchmark_name in [
-            "hook_registry",
             "hook_functionality",
             "critical_forward_hooks",
             "forward_hooks",
@@ -225,10 +311,83 @@ def run_comparison_benchmarks(
             )
 
     # ========================================================================
-    # 3. Backward Gradient Benchmarks
+    # 5. Activation Cache Benchmarks
+    # Tests caching mechanism - depends on forward pass + hooks working
     # ========================================================================
     if verbose:
-        print("3. Backward Gradient Benchmarks")
+        print("5. Activation Cache Benchmarks")
+
+    if ht_available:
+        try:
+            add_result(
+                benchmark_run_with_cache(bridge_model, test_text, reference_model=reference_model)
+            )
+            add_result(
+                benchmark_activation_cache(bridge_model, test_text, reference_model=reference_model)
+            )
+            # Reset hooks to prevent handle leaks
+            if hasattr(bridge_model, "reset_hooks"):
+                bridge_model.reset_hooks()
+            if reference_model is not None and hasattr(reference_model, "reset_hooks"):
+                reference_model.reset_hooks()
+            gc.collect()
+        except Exception as e:
+            if verbose:
+                print(f"✗ Activation cache benchmark failed: {e}\n")
+    elif has_cross_model_ref:
+        # Use GPT-2 for structural validation of cache
+        try:
+            if verbose:
+                print("Using GPT-2 for cache structural validation")
+            # Structure-only benchmark with cross-model comparison
+            add_result(
+                benchmark_activation_cache_structure(
+                    bridge_model,
+                    test_text,
+                    reference_model=gpt2_reference,
+                    cross_model=True,
+                )
+            )
+            # Value benchmarks are skipped
+            if verbose:
+                print("⏭️ Cache value comparison skipped (requires same-model HT reference)\n")
+            for benchmark_name in ["run_with_cache_values", "activation_cache_values"]:
+                add_result(
+                    BenchmarkResult(
+                        name=benchmark_name,
+                        severity=BenchmarkSeverity.SKIPPED,
+                        message="Skipped (cache value comparison requires same-model HT reference)",
+                        passed=True,
+                    )
+                )
+            # Reset hooks
+            if hasattr(bridge_model, "reset_hooks"):
+                bridge_model.reset_hooks()
+            if gpt2_reference is not None and hasattr(gpt2_reference, "reset_hooks"):
+                gpt2_reference.reset_hooks()
+            gc.collect()
+        except Exception as e:
+            if verbose:
+                print(f"✗ Activation cache structure benchmark failed: {e}\n")
+    else:
+        if verbose:
+            print("⏭️ Skipped (no HookedTransformer reference)\n")
+        for benchmark_name in ["run_with_cache", "activation_cache"]:
+            add_result(
+                BenchmarkResult(
+                    name=benchmark_name,
+                    severity=BenchmarkSeverity.SKIPPED,
+                    message="Skipped (HookedTransformer not available for this model)",
+                    passed=True,
+                )
+            )
+
+    # ========================================================================
+    # 6. Backward Gradient Benchmarks
+    # MOST COMPLEX: Tests gradients and backward hooks - depends on everything above
+    # ========================================================================
+    if verbose:
+        print("6. Backward Gradient Benchmarks")
 
     if ht_available:
         try:
@@ -306,126 +465,6 @@ def run_comparison_benchmarks(
                 )
             )
 
-    # ========================================================================
-    # 4. Weight Processing Benchmarks (only for processed mode)
-    # ========================================================================
-    if is_processed:
-        if verbose:
-            print("4. Weight Processing Benchmarks")
-        try:
-            if ht_available:
-                add_result(
-                    benchmark_weight_processing(
-                        bridge_model, test_text, reference_model=reference_model
-                    )
-                )
-                add_result(
-                    benchmark_weight_sharing(
-                        bridge_model, test_text, reference_model=reference_model
-                    )
-                )
-            else:
-                from transformer_lens.benchmarks.utils import BenchmarkSeverity
-
-                if verbose:
-                    print("⏭️ weight_processing and weight_sharing skipped (no HT reference)")
-                for benchmark_name in ["weight_processing", "weight_sharing"]:
-                    add_result(
-                        BenchmarkResult(
-                            name=benchmark_name,
-                            severity=BenchmarkSeverity.SKIPPED,
-                            message="Skipped (HookedTransformer not available for this model)",
-                            passed=True,
-                        )
-                    )
-
-            # weight_modification doesn't need reference model
-            add_result(benchmark_weight_modification(bridge_model, test_text))
-
-            # Detailed weight processing validation benchmarks (don't need reference model)
-            add_result(benchmark_layer_norm_folding(bridge_model, test_text))
-            add_result(benchmark_attention_output_centering(bridge_model, test_text))
-            add_result(benchmark_mlp_output_centering(bridge_model, test_text))
-            add_result(benchmark_unembed_centering(bridge_model, test_text))
-            add_result(benchmark_value_bias_folding(bridge_model, test_text))
-            add_result(benchmark_no_nan_inf(bridge_model, test_text))
-            add_result(benchmark_weight_magnitudes(bridge_model, test_text))
-            gc.collect()
-        except Exception as e:
-            if verbose:
-                print(f"✗ Weight processing benchmark failed: {e}\n")
-
-    # ========================================================================
-    # 5. Activation Cache Benchmarks
-    # ========================================================================
-    if verbose:
-        print("5. Activation Cache Benchmarks")
-
-    if ht_available:
-        try:
-            add_result(
-                benchmark_run_with_cache(bridge_model, test_text, reference_model=reference_model)
-            )
-            add_result(
-                benchmark_activation_cache(bridge_model, test_text, reference_model=reference_model)
-            )
-            # Reset hooks to prevent handle leaks
-            if hasattr(bridge_model, "reset_hooks"):
-                bridge_model.reset_hooks()
-            if reference_model is not None and hasattr(reference_model, "reset_hooks"):
-                reference_model.reset_hooks()
-            gc.collect()
-        except Exception as e:
-            if verbose:
-                print(f"✗ Activation cache benchmark failed: {e}\n")
-    elif has_cross_model_ref:
-        # Use GPT-2 for structural validation of cache
-        try:
-            if verbose:
-                print("Using GPT-2 for cache structural validation")
-            # Structure-only benchmark with cross-model comparison
-            add_result(
-                benchmark_activation_cache_structure(
-                    bridge_model,
-                    test_text,
-                    reference_model=gpt2_reference,
-                    cross_model=True,
-                )
-            )
-            # Value benchmarks are skipped
-            if verbose:
-                print("⏭️ Cache value comparison skipped (requires same-model HT reference)\n")
-            for benchmark_name in ["run_with_cache_values", "activation_cache_values"]:
-                add_result(
-                    BenchmarkResult(
-                        name=benchmark_name,
-                        severity=BenchmarkSeverity.SKIPPED,
-                        message="Skipped (cache value comparison requires same-model HT reference)",
-                        passed=True,
-                    )
-                )
-            # Reset hooks
-            if hasattr(bridge_model, "reset_hooks"):
-                bridge_model.reset_hooks()
-            if gpt2_reference is not None and hasattr(gpt2_reference, "reset_hooks"):
-                gpt2_reference.reset_hooks()
-            gc.collect()
-        except Exception as e:
-            if verbose:
-                print(f"✗ Activation cache structure benchmark failed: {e}\n")
-    else:
-        if verbose:
-            print("⏭️ Skipped (no HookedTransformer reference)\n")
-        for benchmark_name in ["run_with_cache", "activation_cache"]:
-            add_result(
-                BenchmarkResult(
-                    name=benchmark_name,
-                    severity=BenchmarkSeverity.SKIPPED,
-                    message="Skipped (HookedTransformer not available for this model)",
-                    passed=True,
-                )
-            )
-
     return results
 
 
@@ -438,13 +477,19 @@ def run_benchmark_suite(
     enable_compatibility_mode: bool = True,
     verbose: bool = True,
     track_memory: bool = False,
+    test_weight_processing_individually: bool = False,
 ) -> List[BenchmarkResult]:
     """Run comprehensive benchmark suite for TransformerBridge.
 
-    This function implements an optimized 3-phase approach to minimize model reloading:
+    This function implements an optimized 5-phase approach to minimize model reloading:
     Phase 1: HF + Bridge (unprocessed) - Compare against raw HuggingFace model
     Phase 2: Bridge (unprocessed) + HT (unprocessed) - Compare unprocessed models
-    Phase 3: Bridge (processed) + HT (processed) - Full compatibility mode testing
+    Phase 3: Weight Extraction/Reloading Validation (no_processing)
+    Phase 4: Bridge (processed) + HT (processed) - Full compatibility mode testing
+    Phase 5: Granular Weight Processing Tests (optional)
+
+    When test_weight_processing_individually=True, an additional Phase 5 runs after
+    Phase 4, testing each weight processing flag individually and in combinations.
 
     Args:
         model_name: Name of the model to benchmark (e.g., "gpt2")
@@ -455,6 +500,8 @@ def run_benchmark_suite(
         enable_compatibility_mode: Whether to enable compatibility mode on bridge
         verbose: Whether to print results to console
         track_memory: Whether to track and report memory usage (requires psutil)
+        test_weight_processing_individually: Whether to run granular weight processing
+            tests that check each processing flag individually (default: False)
 
     Returns:
         List of BenchmarkResult objects
@@ -717,8 +764,6 @@ def run_benchmark_suite(
         if verbose:
             print("✓ TransformerBridge loaded (unprocessed)\n")
     except Exception as e:
-        from transformer_lens.benchmarks.utils import BenchmarkSeverity
-
         add_result(
             BenchmarkResult(
                 name="load_bridge_unprocessed",
@@ -760,7 +805,7 @@ def run_benchmark_suite(
             if verbose:
                 print(f"✗ Forward pass benchmark failed: {e}\n")
 
-    # Save bridge_dtype before cleaning up HF model (needed for Phase 3)
+    # Save bridge_dtype before cleaning up HF model (needed for Phase 3 and Phase 4)
     saved_bridge_dtype = bridge_dtype
 
     # Clean up HF model - no longer needed
@@ -854,7 +899,149 @@ def run_benchmark_suite(
         bridge_unprocessed = None
 
     # ========================================================================
-    # PHASE 3: Bridge (processed) + HookedTransformer (processed)
+    # PHASE 3: Weight Extraction/Reloading Validation (no_processing)
+    # ========================================================================
+    if not enable_compatibility_mode:
+        if verbose:
+            print("\n⚠ Compatibility mode disabled - skipping Phases 3 and 4\n")
+        if verbose:
+            print("\n" + format_results(results))
+        return results
+
+    # TEMPORARY: Skip Phase 3 for now
+    if verbose:
+        print(f"\n{'='*80}")
+        print("PHASE 3: Weight Extraction/Reloading Validation (no_processing)")
+        print(f"{'='*80}\n")
+        print("⏭️  SKIPPED (Phase 3 temporarily disabled)\n")
+
+    # Jump directly to Phase 4
+    # The rest of Phase 3 code is commented out but left in place
+    """
+    if verbose:
+        print(f"\n{'='*80}")
+        print("PHASE 3: Weight Extraction/Reloading Validation (no_processing)")
+        print(f"{'='*80}\n")
+        print("Testing that weight extraction and reloading works correctly")
+        print("without any weight processing modifications.\n")
+
+    # Load bridge with no_processing=True
+    bridge_no_processing = None
+    try:
+        if verbose:
+            print("Loading TransformerBridge (no_processing=True)...")
+        bridge_dtype = saved_bridge_dtype
+        bridge_no_processing = TransformerBridge.boot_transformers(model_name, device=device, dtype=bridge_dtype)  # type: ignore[attr-defined]
+        bridge_no_processing.enable_compatibility_mode(
+            disable_warnings=True,
+            no_processing=True,
+        )
+        if verbose:
+            print("✓ TransformerBridge loaded with no_processing=True\n")
+    except Exception as e:
+        add_result(
+            BenchmarkResult(
+                name="load_bridge_no_processing",
+                severity=BenchmarkSeverity.ERROR,
+                message=f"Failed to load TransformerBridge with no_processing: {str(e)}",
+                passed=False,
+            )
+        )
+        if verbose:
+            print(f"✗ Failed to load TransformerBridge with no_processing: {str(e)}\n")
+
+    # Load bridge with all flags=False
+    bridge_all_false = None
+    try:
+        if verbose:
+            print("Loading TransformerBridge (all flags=False)...")
+        bridge_all_false = TransformerBridge.boot_transformers(model_name, device=device, dtype=bridge_dtype)  # type: ignore[attr-defined]
+        bridge_all_false.enable_compatibility_mode(
+            disable_warnings=True,
+            no_processing=False,
+            fold_ln=False,
+            center_writing_weights=False,
+            center_unembed=False,
+            fold_value_biases=False,
+        )
+        if verbose:
+            print("✓ TransformerBridge loaded with all flags=False\n")
+    except Exception as e:
+        add_result(
+            BenchmarkResult(
+                name="load_bridge_all_false",
+                severity=BenchmarkSeverity.ERROR,
+                message=f"Failed to load TransformerBridge with all flags=False: {str(e)}",
+                passed=False,
+            )
+        )
+        if verbose:
+            print(f"✗ Failed to load TransformerBridge with all flags=False: {str(e)}\n")
+
+    # Compare no_processing vs all_false
+    if bridge_no_processing and bridge_all_false:
+        if verbose:
+            print("Running Phase 4 benchmarks...\n")
+            print("Comparing no_processing=True vs all flags=False")
+            print("(Both should match since no weight modifications are made)\n")
+
+        try:
+            test_tokens = bridge_no_processing.to_tokens(test_text)
+            logits_no_proc = bridge_no_processing(test_tokens)
+            logits_all_false = bridge_all_false(test_tokens)
+
+            logits_match = torch.allclose(logits_no_proc, logits_all_false, atol=1e-4, rtol=1e-4)
+
+            if logits_match:
+                add_result(
+                    BenchmarkResult(
+                        name="no_processing_equivalence",
+                        passed=True,
+                        message="Weight extraction/reloading works correctly (no_processing matches all flags=False)",
+                        severity=BenchmarkSeverity.INFO,
+                    )
+                )
+                if verbose:
+                    print("🟢 [PASS] no_processing_equivalence: Models produce identical results\n")
+            else:
+                max_diff = torch.max(torch.abs(logits_no_proc - logits_all_false)).item()
+                mean_diff = torch.mean(torch.abs(logits_no_proc - logits_all_false)).item()
+                add_result(
+                    BenchmarkResult(
+                        name="no_processing_equivalence",
+                        passed=False,
+                        message=f"Weight extraction/reloading mismatch: max_diff={max_diff:.4f}, mean_diff={mean_diff:.4f}",
+                        severity=BenchmarkSeverity.CRITICAL,
+                        details={"max_diff": max_diff, "mean_diff": mean_diff},
+                    )
+                )
+                if verbose:
+                    print(f"❌ [FAIL] no_processing_equivalence: max_diff={max_diff:.4f}, mean_diff={mean_diff:.4f}\n")
+
+        except Exception as e:
+            if verbose:
+                print(f"✗ No processing equivalence test failed: {e}\n")
+            add_result(
+                BenchmarkResult(
+                    name="no_processing_equivalence",
+                    passed=False,
+                    severity=BenchmarkSeverity.ERROR,
+                    message=f"Failed to test no_processing equivalence: {str(e)}",
+                )
+            )
+
+    # Clean up Phase 3 models
+    if bridge_no_processing is not None:
+        cleanup_model(bridge_no_processing, "TransformerBridge (no_processing)")
+        bridge_no_processing = None
+    if bridge_all_false is not None:
+        cleanup_model(bridge_all_false, "TransformerBridge (all flags=False)")
+        bridge_all_false = None
+    """
+    # End of Phase 3 code (commented out)
+
+    # ========================================================================
+    # PHASE 4: Bridge (processed) + HookedTransformer (processed)
     # ========================================================================
     if not enable_compatibility_mode:
         if verbose:
@@ -865,7 +1052,7 @@ def run_benchmark_suite(
 
     if verbose:
         print(f"\n{'='*80}")
-        print("PHASE 3: TransformerBridge (processed) + HookedTransformer (processed)")
+        print("PHASE 4: TransformerBridge (processed) + HookedTransformer (processed)")
         print(f"{'='*80}\n")
 
     bridge_processed = None
@@ -884,8 +1071,6 @@ def run_benchmark_suite(
         if verbose:
             print("✓ TransformerBridge compatibility mode enabled (processed)\n")
     except Exception as e:
-        from transformer_lens.benchmarks.utils import BenchmarkSeverity
-
         add_result(
             BenchmarkResult(
                 name="load_bridge_processed",
@@ -944,7 +1129,7 @@ def run_benchmark_suite(
     # Run Phase 3 benchmarks using unified function
     if bridge_processed:
         if verbose:
-            print("Running Phase 3 benchmarks...\n")
+            print("Running Phase 4 benchmarks...\n")
 
         phase3_results = run_comparison_benchmarks(
             bridge_model=bridge_processed,
@@ -965,10 +1150,57 @@ def run_benchmark_suite(
         cleanup_model(ht_model_processed, "HookedTransformer (processed)")
         ht_model_processed = None
 
+    # ========================================================================
+    # Phase 5: Granular Weight Processing Tests (Optional)
+    # ========================================================================
+    if test_weight_processing_individually and enable_compatibility_mode:
+        if verbose:
+            print("\n" + "=" * 80)
+            print("PHASE 5: GRANULAR WEIGHT PROCESSING TESTS")
+            print("=" * 80)
+            print("Testing each weight processing flag individually and in combinations")
+            print("to isolate which specific processing steps cause issues.")
+            print("=" * 80 + "\n")
+
+        try:
+            from transformer_lens.benchmarks.granular_weight_processing import (
+                run_granular_weight_processing_benchmarks,
+            )
+
+            granular_results = run_granular_weight_processing_benchmarks(
+                model_name=model_name,
+                device=device,
+                test_text=test_text,
+                verbose=verbose,
+            )
+
+            # Convert granular results to BenchmarkResult format and add to main results
+            for config_name, config_results in granular_results.items():
+                for result in config_results:
+                    # Prefix the name with the config for clarity
+                    result.name = f"granular_{config_name}_{result.name}"
+                    results.append(result)
+
+            if verbose:
+                print("\n" + "=" * 80)
+                print("PHASE 5 COMPLETE")
+                print("=" * 80)
+
+        except Exception as e:
+            if verbose:
+                print(f"\n⚠ Granular weight processing tests failed: {e}\n")
+            results.append(
+                BenchmarkResult(
+                    name="granular_weight_processing_suite",
+                    passed=False,
+                    severity=BenchmarkSeverity.ERROR,
+                    message=f"Failed to run granular weight processing tests: {str(e)}",
+                    details={"error": str(e)},
+                )
+            )
+
     # Print summary (individual results already printed immediately)
     if verbose:
-        from transformer_lens.benchmarks.utils import BenchmarkSeverity
-
         print("\n" + "=" * 80)
         print("BENCHMARK SUMMARY")
         print("=" * 80)

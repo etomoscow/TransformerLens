@@ -24,6 +24,14 @@ class MistralArchitectureAdapter(ArchitectureAdapter):
     def __init__(self, cfg: Any) -> None:
         """Initialize the Mistral architecture adapter."""
         super().__init__(cfg)
+
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "RMS"
+        self.cfg.positional_embedding_type = "rotary"
+        self.cfg.final_rms = False
+        self.cfg.gated_mlp = True
+        self.cfg.attn_only = False
+
         self.default_config = {
             "d_model": cfg.d_model,
             "d_head": cfg.d_model // cfg.n_heads,
@@ -32,8 +40,6 @@ class MistralArchitectureAdapter(ArchitectureAdapter):
             "d_vocab": cfg.d_vocab,
             "n_key_value_heads": cfg.n_key_value_heads,
         }
-
-        self.cfg.gated_mlp = True
 
         self.cfg.uses_rms_norm = True
 

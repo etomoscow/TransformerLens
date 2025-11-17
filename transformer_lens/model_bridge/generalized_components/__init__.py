@@ -11,6 +11,7 @@ from transformer_lens.model_bridge.generalized_components.rms_normalization impo
     RMSNormalizationBridge,
 )
 from transformer_lens.model_bridge.generalized_components.linear import LinearBridge
+from transformer_lens.model_bridge.generalized_components.conv1d import Conv1DBridge
 from transformer_lens.model_bridge.generalized_components.joint_qkv_attention import (
     JointQKVAttentionBridge,
 )
@@ -29,6 +30,7 @@ from transformer_lens.model_bridge.generalized_components.t5_block import T5Bloc
 __all__ = [
     "AttentionBridge",
     "BlockBridge",
+    "Conv1DBridge",
     "EmbeddingBridge",
     "RotaryEmbeddingBridge",
     "PosEmbedBridge",

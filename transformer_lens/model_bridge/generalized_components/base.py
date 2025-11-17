@@ -52,6 +52,9 @@ class GeneralizedComponent(nn.Module):
         self._property_alias_registry: Dict[str, str] = {}
         self.hook_in = HookPoint()
         self.hook_out = HookPoint()
+        # real_components maps TL keys to (remote_path, actual_instance) tuples
+        # For list components, actual_instance will be a list of component instances
+        self.real_components: Dict[str, tuple] = {}
         if self.conversion_rule is not None:
             self.hook_in.hook_conversion = self.conversion_rule
             self.hook_out.hook_conversion = self.conversion_rule
@@ -169,29 +172,9 @@ class GeneralizedComponent(nn.Module):
                 f"Hook name '{hook_name}' not supported. Supported names are 'output' and 'input'."
             )
 
-    def process_weights(
-        self,
-        fold_ln: bool = False,
-        center_writing_weights: bool = False,
-        center_unembed: bool = False,
-        fold_value_biases: bool = False,
-        refactor_factored_attn_matrices: bool = False,
+    def set_processed_weights(
+        self, weights: Dict[str, torch.Tensor], verbose: bool = False
     ) -> None:
-        """Process weights according to weight processing flags.
-
-        This method should be overridden by specific components that need
-        custom weight processing (e.g., QKV splitting, weight rearrangement).
-
-        Args:
-            fold_ln: Whether to fold layer norm weights
-            center_writing_weights: Whether to center writing weights
-            center_unembed: Whether to center unembedding weights
-            fold_value_biases: Whether to fold value biases
-            refactor_factored_attn_matrices: Whether to refactor factored attention matrices
-        """
-        pass
-
-    def set_processed_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         """Set the processed weights for use in compatibility mode.
 
         This method stores processed weights as attributes on the component so they can be
@@ -200,10 +183,46 @@ class GeneralizedComponent(nn.Module):
         Components should override this method to handle their specific weight structure.
         The weights dict contains keys like "weight", "bias", "W_in", "W_out", etc.
 
+        If this component has submodules, this method will automatically distribute the
+        weights to those subcomponents using ProcessWeights.distribute_weights_to_components.
+
         Args:
             weights: Dictionary of processed weight tensors
+            verbose: If True, print detailed information about weight setting
         """
-        pass
+        if verbose:
+            print(
+                f"\n  set_processed_weights: {self.__class__.__name__} (name={getattr(self, 'name', 'unknown')})"
+            )
+            print(f"    Received {len(weights)} weight keys")
+
+        # First, handle single-part keys (keys without ".") by setting them as parameters
+        # on the original component
+        if self.original_component is not None:
+            for key, weight_tensor in weights.items():
+                # Only process keys without "." (single-part keys)
+                if "." not in key:
+                    # Try to set the parameter on the original component
+                    if hasattr(self.original_component, key):
+                        param = getattr(self.original_component, key)
+                        if param is not None and isinstance(param, torch.nn.Parameter):
+                            # Update existing parameter's data
+                            if verbose:
+                                print(f"    Setting weight: {key} (shape: {weight_tensor.shape})")
+                            param.data = weight_tensor
+
+        # If this component has submodules, distribute weights to them
+        if self.real_components:
+            from transformer_lens.weight_processing import ProcessWeights
+
+            if verbose:
+                print(f"    Has {len(self.real_components)} subcomponents, distributing weights...")
+
+            ProcessWeights.distribute_weights_to_components(
+                state_dict=weights,
+                component_mapping=self.real_components,
+                verbose=verbose,
+            )
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Generic forward pass for bridge components with input/output hooks."""

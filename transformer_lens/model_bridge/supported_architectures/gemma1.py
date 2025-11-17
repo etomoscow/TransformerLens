@@ -25,14 +25,16 @@ class Gemma1ArchitectureAdapter(ArchitectureAdapter):
         """Initialize the Gemma1 architecture adapter."""
         super().__init__(cfg)
 
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "RMS"
+        self.cfg.positional_embedding_type = "rotary"
+        self.cfg.final_rms = True
+        self.cfg.gated_mlp = True
+        self.cfg.attn_only = False
+
         # Gemma models were not trained with BOS tokens
         self.cfg.default_prepend_bos = False
-        self.cfg.gated_mlp = True
-
         self.cfg.uses_rms_norm = True
-
-        # Gemma1 uses rotary position embeddings
-        self.cfg.positional_embedding_type = "rotary"
 
         self.conversion_rules = HookConversionSet(
             {

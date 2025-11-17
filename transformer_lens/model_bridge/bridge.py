@@ -126,6 +126,9 @@ class TransformerBridge(nn.Module):
         self._hook_registry_initialized = False
         self._hook_alias_registry: Dict[str, Union[str, List[str]]] = {}
         self._property_alias_registry: Dict[str, str] = {}
+        # real_components maps TL keys to (remote_path, actual_instance) tuples
+        # For list components, actual_instance will be a list of component instances
+        self.real_components: Dict[str, tuple] = {}
         if not hasattr(self.cfg, "device") or self.cfg.device is None:
             try:
                 self.cfg.device = str(next(self.original_model.parameters()).device)
@@ -668,6 +671,14 @@ class TransformerBridge(nn.Module):
                 if output_hidden_states:
                     all_hidden_states = all_hidden_states + (residual,)  # type: ignore[operator]
                 layer_past = past_key_values if use_cache_object else past_key_values[i]
+
+                # Remove explicitly-passed kwargs to avoid "multiple values for argument" errors
+                filtered_kwargs = {
+                    k: v
+                    for k, v in kwargs.items()
+                    if k not in ("encoder_attention_mask", "use_cache", "output_attentions")
+                }
+
                 block_outputs = block_bridge(
                     residual,
                     layer_past,
@@ -678,7 +689,7 @@ class TransformerBridge(nn.Module):
                     encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    **kwargs,
+                    **filtered_kwargs,
                 )
                 if isinstance(block_outputs, tuple):
                     residual = block_outputs[0]
@@ -719,6 +730,8 @@ class TransformerBridge(nn.Module):
         fold_ln: bool = True,
         center_writing_weights: bool = True,
         center_unembed: bool = True,
+        fold_value_biases: bool = True,
+        refactor_factored_attn_matrices: bool = False,
     ) -> None:
         """Enable compatibility mode for the bridge.
 
@@ -735,6 +748,10 @@ class TransformerBridge(nn.Module):
                 Default: True. Ignored if no_processing=True.
             center_unembed: Whether to center the unembedding matrix.
                 Default: True. Ignored if no_processing=True.
+            fold_value_biases: Whether to fold value biases into output bias.
+                Default: True. Ignored if no_processing=True.
+            refactor_factored_attn_matrices: Whether to refactor factored attention matrices.
+                Default: False. Ignored if no_processing=True.
         """
         from transformer_lens.utilities.bridge_components import (
             apply_fn_to_all_components,
@@ -752,18 +769,13 @@ class TransformerBridge(nn.Module):
         self._initialize_hook_registry()
         self._fix_backward_hook_gradients()
         self._setup_hook_compatibility()
-        if no_processing:
-            fold_ln = False
-            center_writing_weights = False
-            center_unembed = False
-            self._enable_split_qkv_attention()
-            self.clear_hook_registry()
-            self._initialize_hook_registry()
-        else:
-            self.process_compatibility_weights(
+        if not no_processing:
+            self.process_weights(
                 fold_ln=fold_ln,
                 center_writing_weights=center_writing_weights,
                 center_unembed=center_unembed,
+                fold_value_biases=fold_value_biases,
+                refactor_factored_attn_matrices=refactor_factored_attn_matrices,
             )
         self._register_all_aliases_recursive()
 
@@ -834,7 +846,7 @@ class TransformerBridge(nn.Module):
                         block.attn._ln1 = ln1
                         block.attn._expects_pre_ln1_input = True
 
-    def process_compatibility_weights(
+    def process_weights(
         self,
         verbose: bool = False,
         fold_ln: bool = True,
@@ -871,7 +883,7 @@ class TransformerBridge(nn.Module):
             clean_key = key
             while "._original_component" in clean_key:
                 clean_key = clean_key.replace("._original_component", "")
-            state_dict[clean_key] = value.clone()
+            state_dict[clean_key] = value
         adapter = self.adapter
         if adapter and hasattr(adapter, "preprocess_weights"):
             state_dict = adapter.preprocess_weights(state_dict)
@@ -887,178 +899,48 @@ class TransformerBridge(nn.Module):
                     )
             except (ValueError, KeyError):
                 pass
-        if fold_ln:
-            if verbose:
-                print("  Folding LayerNorm/RMSNorm...")
-            uses_rms_norm = (
-                getattr(self.cfg, "uses_rms_norm", False)
-                or getattr(self.cfg, "normalization_type", None) == "RMS"
-            )
-            state_dict = ProcessWeights.fold_layer_norm(
-                state_dict,
-                self.cfg,
-                fold_biases=not uses_rms_norm,
-                center_weights=center_writing_weights and (not uses_rms_norm),
-                adapter=adapter,
-            )
-        if center_writing_weights:
-            if verbose:
-                print("  Centering writing weights...")
-            state_dict = ProcessWeights.center_writing_weights(
-                state_dict, self.cfg, adapter=adapter
-            )
-        if center_unembed:
-            if verbose:
-                print("  Centering unembed...")
-            state_dict = ProcessWeights.center_unembed(state_dict, adapter=adapter)
-        if fold_value_biases:
-            if verbose:
-                print("  Folding value biases...")
-            state_dict = ProcessWeights.fold_value_biases(state_dict, self.cfg, adapter=adapter)
-        if refactor_factored_attn_matrices:
-            if verbose:
-                print("  Refactoring attention matrices...")
-            state_dict = ProcessWeights.refactor_factored_attn_matrices(
-                state_dict, self.cfg, adapter=adapter
-            )
+
+        # Use unified ProcessWeights.process_weights() like HookedTransformer does
         if verbose:
-            print("  Loading processed weights into components...")
-        object.__setattr__(self, "_processed_tl_weights", state_dict)
-        self._configure_components_for_processing(verbose=verbose)
+            print("  Processing weights (fold_ln, center_writing_weights, etc.)...")
+        state_dict = ProcessWeights.process_weights(
+            state_dict,
+            self.cfg,
+            fold_ln=fold_ln,
+            center_writing_weights=center_writing_weights,
+            center_unembed=center_unembed,
+            fold_value_biases=fold_value_biases,
+            refactor_factored_attn_matrices=refactor_factored_attn_matrices,
+            adapter=adapter,
+        )
+
+        if verbose:
+            print("  Distributing weights to generalized components...")
+        ProcessWeights.distribute_weights_to_components(
+            state_dict=state_dict,
+            component_mapping=self.real_components,
+        )
+
         self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
         if verbose:
             print("  Loading processed weights into Bridge components...")
         loaded_count = 0
         missing_count = 0
-        import einops
 
-        from transformer_lens.model_bridge.generalized_components.joint_qkv_attention import (
-            JointQKVAttentionBridge,
-        )
-
-        for layer_idx in range(self.cfg.n_layers):
-            if hasattr(self, "blocks") and layer_idx < len(self.blocks):
-                attn_component = self.blocks[layer_idx].attn
-                if isinstance(attn_component, JointQKVAttentionBridge):
-                    q_weight_key = f"blocks.{layer_idx}.attn.q.weight"
-                    k_weight_key = f"blocks.{layer_idx}.attn.k.weight"
-                    v_weight_key = f"blocks.{layer_idx}.attn.v.weight"
-                    q_bias_key = f"blocks.{layer_idx}.attn.q.bias"
-                    k_bias_key = f"blocks.{layer_idx}.attn.k.bias"
-                    v_bias_key = f"blocks.{layer_idx}.attn.v.bias"
-                    if (
-                        q_weight_key in state_dict
-                        and k_weight_key in state_dict
-                        and (v_weight_key in state_dict)
-                    ):
-                        q_weight_hf = state_dict[q_weight_key]
-                        k_weight_hf = state_dict[k_weight_key]
-                        v_weight_hf = state_dict[v_weight_key]
-                        q_weight_tl = einops.rearrange(
-                            q_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
-                        )
-                        k_weight_tl = einops.rearrange(
-                            k_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
-                        )
-                        v_weight_tl = einops.rearrange(
-                            v_weight_hf, "m (n h) -> n m h", n=self.cfg.n_heads
-                        )
-                        qkv_weight = torch.cat([q_weight_hf, k_weight_hf, v_weight_hf], dim=1)
-                        if hasattr(attn_component, "qkv") and hasattr(
-                            attn_component.qkv, "_original_component"
-                        ):
-                            qkv_component = attn_component.qkv._original_component
-                            if hasattr(qkv_component, "weight"):
-                                qkv_component.weight.data = qkv_weight.T
-                                loaded_count += 1
-                        attn_component._W_Q = q_weight_tl
-                        attn_component._W_K = k_weight_tl
-                        attn_component._W_V = v_weight_tl
-                        o_weight_key_tl = f"blocks.{layer_idx}.attn.W_O"
-                        if o_weight_key_tl in state_dict:
-                            o_weight_key = o_weight_key_tl
-                        else:
-                            o_weight_key = self.adapter.translate_transformer_lens_path(
-                                f"blocks.{layer_idx}.attn.W_O"
-                            )
-                        if o_weight_key in state_dict:
-                            o_weight_tl = state_dict[o_weight_key]
-                            if hasattr(attn_component._original_component, "c_proj") and hasattr(
-                                attn_component._original_component.c_proj, "bias"
-                            ):
-                                o_bias = attn_component._original_component.c_proj.bias.data.clone()
-                            else:
-                                o_bias_key_tl = f"blocks.{layer_idx}.attn.b_O"
-                                if o_bias_key_tl in state_dict:
-                                    o_bias_key = o_bias_key_tl
-                                else:
-                                    o_bias_key = self.adapter.translate_transformer_lens_path(
-                                        f"blocks.{layer_idx}.attn.b_O"
-                                    )
-                                o_bias = state_dict.get(o_bias_key, None)
-                            if o_weight_tl.ndim == 3:
-                                o_weight_hf = einops.rearrange(o_weight_tl, "n h m -> (n h) m")
-                            else:
-                                o_weight_hf = o_weight_tl
-                            b_Q_tl = None
-                            b_K_tl = None
-                            b_V_tl = None
-                            if q_bias_key in state_dict:
-                                b_Q_tl = einops.rearrange(
-                                    state_dict[q_bias_key], "(n h) -> n h", n=self.cfg.n_heads
-                                )
-                                b_K_tl = einops.rearrange(
-                                    state_dict[k_bias_key], "(n h) -> n h", n=self.cfg.n_heads
-                                )
-                                b_V_tl = einops.rearrange(
-                                    state_dict[v_bias_key], "(n h) -> n h", n=self.cfg.n_heads
-                                )
-                            attn_component.set_processed_weights(
-                                {
-                                    "W_Q": q_weight_tl,
-                                    "W_K": k_weight_tl,
-                                    "W_V": v_weight_tl,
-                                    "W_O": o_weight_hf,
-                                    "b_Q": b_Q_tl,
-                                    "b_K": b_K_tl,
-                                    "b_V": b_V_tl,
-                                    "b_O": o_bias,
-                                }
-                            )
-                        if q_bias_key in state_dict:
-                            q_bias_hf = state_dict[q_bias_key]
-                            k_bias_hf = state_dict[k_bias_key]
-                            v_bias_hf = state_dict[v_bias_key]
-                            q_bias_tl = einops.rearrange(
-                                q_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
-                            )
-                            k_bias_tl = einops.rearrange(
-                                k_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
-                            )
-                            v_bias_tl = einops.rearrange(
-                                v_bias_hf, "(n h) -> n h", n=self.cfg.n_heads
-                            )
-                            qkv_bias = torch.cat([q_bias_hf, k_bias_hf, v_bias_hf], dim=0)
-                            if hasattr(attn_component, "qkv") and hasattr(
-                                attn_component.qkv, "_original_component"
-                            ):
-                                qkv_component = attn_component.qkv._original_component
-                                if hasattr(qkv_component, "bias"):
-                                    qkv_component.bias.data = qkv_bias
-                                    loaded_count += 1
-                            attn_component._b_Q = q_bias_tl
-                            attn_component._b_K = k_bias_tl
-                            attn_component._b_V = v_bias_tl
-                        attn_component._hooked_weights_extracted = True
-                        if verbose:
-                            print(
-                                f"    Loaded processed QKV weights for layer {layer_idx} (JointQKVAttention)"
-                            )
-                            print(f"      Q/K/V HF format: {q_weight_hf.shape}")
-                            print(f"      Q/K/V TL format: {q_weight_tl.shape}")
-                            print(f"      Reconstructed joint QKV HF format: {qkv_weight.shape}")
         for tb_key, weight_tensor in state_dict.items():
-            if ".attn.q." in tb_key or ".attn.k." in tb_key or ".attn.v." in tb_key:
+            # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
+            if any(
+                pattern in tb_key
+                for pattern in [
+                    ".attn.q.",
+                    ".attn.k.",
+                    ".attn.v.",
+                    ".q_proj.",
+                    ".k_proj.",
+                    ".v_proj.",
+                    ".out_proj.",
+                ]
+            ):
                 continue
             try:
                 parts = tb_key.split(".")
@@ -1141,60 +1023,9 @@ class TransformerBridge(nn.Module):
                             norm_module.bias.zero_()
             except (AttributeError, IndexError):
                 pass
-        if verbose:
-            print("  Enabling processed weights mode on components...")
 
-        def enable_processed_weights(component):
-            """Enable processed weights mode on a component and all subcomponents."""
-            component._use_processed_weights = True
-            if hasattr(component, "submodules"):
-                for subcomp in component.submodules.values():
-                    enable_processed_weights(subcomp)
-
-        if hasattr(self, "blocks"):
-            for block in self.blocks:
-                enable_processed_weights(block)
-        if hasattr(self, "embed"):
-            enable_processed_weights(self.embed)
-        if hasattr(self, "pos_embed"):
-            enable_processed_weights(self.pos_embed)
-        if hasattr(self, "unembed"):
-            enable_processed_weights(self.unembed)
-        if verbose:
-            print("  Setting 3D processed weight attributes...")
-        self._set_processed_weight_attributes()
-        if verbose:
-            print("  Extracting HookedTransformer-compatible weights...")
-        if hasattr(self, "blocks"):
-            for block in self.blocks:
-                if hasattr(block, "attn") and hasattr(
-                    block.attn, "_extract_hooked_transformer_weights"
-                ):
-                    block.attn._hooked_weights_extracted = False
-                    block.attn._extract_hooked_transformer_weights()
-        object.__setattr__(self, "_weights_processed", True)
-        if fold_ln:
-            object.__setattr__(self.cfg, "layer_norm_folding", True)
-        if verbose:
-            print("✓ Weight processing complete!")
-
-    def _configure_components_for_processing(self, verbose: bool = False):
-        """Configure all components for processed weight loading (Phase 1).
-
-        Args:
-            verbose: If True, print detailed progress messages. Default: False
-        """
-        if hasattr(self, "cfg") and hasattr(self.cfg, "layer_norm_folding"):
-            self.cfg.layer_norm_folding = True
-        for layer_idx in range(self.cfg.n_layers):
-            if hasattr(self, "blocks") and layer_idx < len(self.blocks):
-                block = self.blocks[layer_idx]
-                if hasattr(block, "ln1") and hasattr(block.ln1, "config"):
-                    block.ln1.config.layer_norm_folding = True
-                if hasattr(block, "ln2") and hasattr(block.ln2, "config"):
-                    block.ln2.config.layer_norm_folding = True
-        if hasattr(self, "ln_final") and hasattr(self.ln_final, "config"):
-            self.ln_final.config.layer_norm_folding = True
+        # Mark that weights have been processed
+        self._weights_processed = True
 
     def _load_all_processed_weights(
         self, verbose: bool = False, processed_state_dict: Optional[Dict[str, torch.Tensor]] = None
@@ -1207,36 +1038,7 @@ class TransformerBridge(nn.Module):
         """
         if processed_state_dict is not None:
             object.__setattr__(self, "_processed_tl_weights", processed_state_dict)
-        self._load_embedding_weights(verbose=verbose)
         self._load_transformer_block_weights(verbose=verbose)
-        self._load_unembed_weights(verbose=verbose)  # type: ignore[arg-type]
-
-    def _load_embedding_weights(self, verbose: bool = False):  # type: ignore[arg-type]
-        """Load embedding and positional embedding weights into components.
-        # type: ignore[arg-type]
-               Args:
-                   verbose: If True, print detailed progress messages. Default: False
-        """
-        from transformer_lens.weight_processing import ProcessWeights
-
-        processed_weights = self._processed_tl_weights
-        adapter = self.adapter
-        if hasattr(self, "embed"):
-            try:
-                embed_key = ProcessWeights._get_param_key("embed.W_E", adapter)
-                if embed_key in processed_weights:
-                    embed_weight = processed_weights[embed_key]
-                    self.embed.set_processed_weight(embed_weight)
-            except (ValueError, KeyError):
-                pass
-        if hasattr(self, "pos_embed"):
-            try:
-                pos_embed_key = ProcessWeights._get_param_key("pos_embed.W_pos", adapter)
-                if pos_embed_key in processed_weights:
-                    pos_embed_weight = processed_weights[pos_embed_key]
-                    self.pos_embed.set_processed_weight(pos_embed_weight)
-            except (ValueError, KeyError):
-                pass
 
     def _load_transformer_block_weights(self, verbose: bool = False) -> None:
         """Load transformer block weights into attention and MLP components.
@@ -1249,67 +1051,8 @@ class TransformerBridge(nn.Module):
             if not hasattr(self, "blocks") or layer_idx >= len(self.blocks):
                 continue
             block = self.blocks[layer_idx]
-            if hasattr(block, "attn"):
-                self._load_attention_weights(
-                    block.attn, layer_idx, processed_weights, verbose=verbose
-                )
             if hasattr(block, "mlp"):
                 self._load_mlp_weights(block.mlp, layer_idx, processed_weights, verbose=verbose)
-
-    def _load_attention_weights(
-        self,
-        attn_component: Any,
-        layer_idx: int,
-        processed_weights: Dict[str, torch.Tensor],
-        verbose: bool = False,
-    ) -> None:
-        """Load attention weights into the AttentionBridge component.
-
-        Args:
-            attn_component: The attention component to load weights into
-            layer_idx: The layer index
-            processed_weights: Dictionary of processed weights (in HF format with processed values)
-            verbose: If True, print detailed progress messages
-        """
-        from transformer_lens.weight_processing import ProcessWeights
-
-        adapter = self.adapter
-        cfg = self.cfg
-        base_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.attn.W_Q", adapter)
-        parts = base_key.rsplit(".", 2)
-        if len(parts) == 3:
-            attn_prefix = parts[0]
-        else:
-            attn_prefix = base_key.rsplit(".", 1)[0]
-        w_q_key = f"blocks.{layer_idx}.attn.q.weight"
-        w_k_key = f"blocks.{layer_idx}.attn.k.weight"
-        w_v_key = f"blocks.{layer_idx}.attn.v.weight"
-        w_o_key = f"{attn_prefix}.c_proj.weight"
-        b_q_key = f"blocks.{layer_idx}.attn.q.bias"
-        b_k_key = f"blocks.{layer_idx}.attn.k.bias"
-        b_v_key = f"blocks.{layer_idx}.attn.v.bias"
-        b_o_key = f"{attn_prefix}.c_proj.bias"
-        W_Q = processed_weights.get(w_q_key)
-        W_K = processed_weights.get(w_k_key)
-        W_V = processed_weights.get(w_v_key)
-        W_O = processed_weights.get(w_o_key)
-        b_Q = processed_weights.get(b_q_key)
-        b_K = processed_weights.get(b_k_key)
-        b_V = processed_weights.get(b_v_key)
-        b_O = processed_weights.get(b_o_key)
-        if W_Q is not None and W_K is not None and (W_V is not None) and (W_O is not None):
-            attn_component.set_processed_weights(
-                {
-                    "W_Q": W_Q,
-                    "W_K": W_K,
-                    "W_V": W_V,
-                    "W_O": W_O,
-                    "b_Q": b_Q,
-                    "b_K": b_K,
-                    "b_V": b_V,
-                    "b_O": b_O,
-                }
-            )
 
     def _load_mlp_weights(self, mlp_component, layer_idx, processed_weights, verbose: bool = False):
         """Load MLP weights into the MLPBridge or GatedMLPBridge component.
@@ -1337,39 +1080,14 @@ class TransformerBridge(nn.Module):
             return
         mlp_component.set_processed_weights(
             {
-                "W_in": W_in,
-                "W_out": W_out,
-                "b_in": b_in,
-                "b_out": b_out,
-                "W_gate": W_gate,
-                "b_gate": b_gate,
+                "in.weight": W_in,
+                "out.weight": W_out,
+                "in.bias": b_in,
+                "out.bias": b_out,
+                "gate.weight": W_gate,
+                "gate.bias": b_gate,
             }
         )
-
-    def _load_unembed_weights(self, verbose: bool = False):
-        """Load unembedding weights into the UnembeddingBridge component.
-
-        Args:
-            verbose: If True, print detailed progress messages. Default: False
-        """
-        from transformer_lens.weight_processing import ProcessWeights
-
-        processed_weights = self._processed_tl_weights
-        adapter = self.adapter
-        if hasattr(self, "unembed"):
-            try:
-                W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
-                if W_U_key in processed_weights:
-                    W_U_hf = processed_weights[W_U_key]
-                    W_U = W_U_hf.T
-                    try:
-                        b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
-                        b_U = processed_weights.get(b_U_key)
-                    except (ValueError, KeyError):
-                        b_U = None
-                    self.unembed.set_processed_weight(W_U, b_U)
-            except (ValueError, KeyError):
-                pass
 
     def _ported_forward_pass(
         self,
@@ -1925,111 +1643,124 @@ class TransformerBridge(nn.Module):
         Returns:
             Model output based on return_type
         """
-        # If weights have been processed and we need stop_at_layer or start_at_layer,
-        # use the ported forward pass which properly implements those features
-        if (
-            hasattr(self, "_weights_processed")
-            and self._weights_processed
-            and (stop_at_layer is not None or start_at_layer is not None)
-        ):
+        # If weights have been processed, use the ported forward pass which has better stop_at_layer support
+        if hasattr(self, "_weights_processed") and self._weights_processed:
             return self._ported_forward_pass(
-                input,
+                input=input,
                 return_type=return_type,
-                loss_per_token=loss_per_token,
                 prepend_bos=prepend_bos,
+                loss_per_token=loss_per_token,
                 start_at_layer=start_at_layer,
                 stop_at_layer=stop_at_layer,
             )
 
-        if isinstance(input, (str, list)):
-            input_ids = self.to_tokens(input, prepend_bos=prepend_bos, padding_side=padding_side)
-        else:
-            input_ids = input
-        if attention_mask is not None:
-            kwargs["attention_mask"] = attention_mask
-        if past_kv_cache is not None:
-            backend_cache = []
-            for entry in past_kv_cache.entries:
-                if entry.past_keys.numel() > 0:
-                    cached_keys = entry.past_keys.transpose(1, 2)
-                    cached_values = entry.past_values.transpose(1, 2)
-                    backend_cache.append((cached_keys, cached_values))
-            kwargs["past_key_values"] = backend_cache
-            if hasattr(past_kv_cache, "previous_attention_mask"):
-                batch_size = input_ids.shape[0]
-                current_length = input_ids.shape[1]
-                past_length = past_kv_cache.previous_attention_mask.shape[1]
+        from transformer_lens.model_bridge.exceptions import StopAtLayerException
+
+        # Set stop_at_layer flag on all blocks if requested
+        if stop_at_layer is not None and hasattr(self, "blocks"):
+            for block in self.blocks:
+                block._stop_at_layer_idx = stop_at_layer
+
+        try:
+            if isinstance(input, (str, list)):
+                input_ids = self.to_tokens(
+                    input, prepend_bos=prepend_bos, padding_side=padding_side
+                )
+            else:
+                input_ids = input
+            if attention_mask is not None:
+                kwargs["attention_mask"] = attention_mask
+            if past_kv_cache is not None:
+                backend_cache = []
+                for entry in past_kv_cache.entries:
+                    if entry.past_keys.numel() > 0:
+                        cached_keys = entry.past_keys.transpose(1, 2)
+                        cached_values = entry.past_values.transpose(1, 2)
+                        backend_cache.append((cached_keys, cached_values))
+                kwargs["past_key_values"] = backend_cache
+                if hasattr(past_kv_cache, "previous_attention_mask"):
+                    batch_size = input_ids.shape[0]
+                    current_length = input_ids.shape[1]
+                    past_length = past_kv_cache.previous_attention_mask.shape[1]
+                    if attention_mask is not None:
+                        current_mask = attention_mask
+                    else:
+                        current_mask = torch.ones(
+                            batch_size, current_length, dtype=torch.long, device=input_ids.device
+                        )
+                    if past_length > 0:
+                        full_attention_mask = torch.cat(
+                            [past_kv_cache.previous_attention_mask, current_mask], dim=1
+                        )
+                    else:
+                        full_attention_mask = current_mask
+                    kwargs["attention_mask"] = full_attention_mask
+                kwargs["use_cache"] = True
+            elif "use_past_kv_cache" in kwargs and kwargs["use_past_kv_cache"]:
+                kwargs["use_cache"] = True
+            original_tl_cache = past_kv_cache
+            if return_type in ["loss", "both"]:
+                kwargs["labels"] = input_ids
+            output = self.original_model(input_ids, **kwargs)
+            if (
+                original_tl_cache is not None
+                and hasattr(output, "past_key_values")
+                and (output.past_key_values is not None)
+            ):
+                backend_cache = output.past_key_values
+                for i, (cached_keys, cached_values) in enumerate(backend_cache):
+                    if i < len(original_tl_cache.entries) and cached_keys is not None:
+                        tl_keys = cached_keys.transpose(1, 2)
+                        tl_values = cached_values.transpose(1, 2)
+                        original_tl_cache.entries[i].past_keys = tl_keys
+                        original_tl_cache.entries[i].past_values = tl_values
                 if attention_mask is not None:
-                    current_mask = attention_mask
-                else:
-                    current_mask = torch.ones(
+                    original_tl_cache.previous_attention_mask = kwargs.get(
+                        "attention_mask", attention_mask
+                    )
+                elif hasattr(original_tl_cache, "previous_attention_mask"):
+                    batch_size, current_length = input_ids.shape
+                    new_mask = torch.ones(
                         batch_size, current_length, dtype=torch.long, device=input_ids.device
                     )
-                if past_length > 0:
-                    full_attention_mask = torch.cat(
-                        [past_kv_cache.previous_attention_mask, current_mask], dim=1
-                    )
-                else:
-                    full_attention_mask = current_mask
-                kwargs["attention_mask"] = full_attention_mask
-            kwargs["use_cache"] = True
-        elif "use_past_kv_cache" in kwargs and kwargs["use_past_kv_cache"]:
-            kwargs["use_cache"] = True
-        original_tl_cache = past_kv_cache
-        if return_type in ["loss", "both"]:
-            kwargs["labels"] = input_ids
-        output = self.original_model(input_ids, **kwargs)
-        if (
-            original_tl_cache is not None
-            and hasattr(output, "past_key_values")
-            and (output.past_key_values is not None)
-        ):
-            backend_cache = output.past_key_values
-            for i, (cached_keys, cached_values) in enumerate(backend_cache):
-                if i < len(original_tl_cache.entries) and cached_keys is not None:
-                    tl_keys = cached_keys.transpose(1, 2)
-                    tl_values = cached_values.transpose(1, 2)
-                    original_tl_cache.entries[i].past_keys = tl_keys
-                    original_tl_cache.entries[i].past_values = tl_values
-            if attention_mask is not None:
-                original_tl_cache.previous_attention_mask = kwargs.get(
-                    "attention_mask", attention_mask
-                )
-            elif hasattr(original_tl_cache, "previous_attention_mask"):
-                batch_size, current_length = input_ids.shape
-                new_mask = torch.ones(
-                    batch_size, current_length, dtype=torch.long, device=input_ids.device
-                )
-                if original_tl_cache.previous_attention_mask is not None:
-                    original_tl_cache.previous_attention_mask = torch.cat(
-                        [original_tl_cache.previous_attention_mask, new_mask], dim=1
-                    )
-                else:
-                    original_tl_cache.previous_attention_mask = new_mask
-        if hasattr(output, "logits"):
-            logits = output.logits
-        elif isinstance(output, tuple) and len(output) > 0:
-            logits = output[0]
-        else:
-            logits = output
-        if return_type == "logits":
-            return logits
-        elif return_type == "loss":
-            if hasattr(output, "loss") and output.loss is not None:
-                return output.loss
+                    if original_tl_cache.previous_attention_mask is not None:
+                        original_tl_cache.previous_attention_mask = torch.cat(
+                            [original_tl_cache.previous_attention_mask, new_mask], dim=1
+                        )
+                    else:
+                        original_tl_cache.previous_attention_mask = new_mask
+            if hasattr(output, "logits"):
+                logits = output.logits
+            elif isinstance(output, tuple) and len(output) > 0:
+                logits = output[0]
             else:
-                return self.loss_fn(logits, input_ids, per_token=loss_per_token)
-        elif return_type == "both":
-            loss = None  # type: ignore[operator]
-            if hasattr(output, "loss") and output.loss is not None:
-                loss = output.loss
+                logits = output
+            if return_type == "logits":
+                return logits
+            elif return_type == "loss":
+                if hasattr(output, "loss") and output.loss is not None:
+                    return output.loss
+                else:
+                    return self.loss_fn(logits, input_ids, per_token=loss_per_token)
+            elif return_type == "both":
+                loss = None  # type: ignore[operator]
+                if hasattr(output, "loss") and output.loss is not None:
+                    loss = output.loss
+                else:
+                    loss = self.loss_fn(logits, input_ids, per_token=loss_per_token)
+                return (logits, loss)
+            elif return_type is None:
+                return None
             else:
-                loss = self.loss_fn(logits, input_ids, per_token=loss_per_token)
-            return (logits, loss)
-        elif return_type is None:
-            return None
-        else:
-            raise ValueError(f"Invalid return_type: {return_type}")
+                raise ValueError(f"Invalid return_type: {return_type}")
+        except StopAtLayerException as e:
+            # Execution stopped at the requested layer
+            return e.layer_output
+        finally:
+            # Clean up the stop_at_layer flag on all blocks
+            if stop_at_layer is not None and hasattr(self, "blocks"):
+                for block in self.blocks:
+                    block._stop_at_layer_idx = None
 
     def get_hook_point(self, hook_name: str) -> Optional[HookPoint]:
         """Get a hook point by name from the bridge's hook system."""
@@ -2648,34 +2379,6 @@ class TransformerBridge(nn.Module):
 
         return _hooks_context()
 
-    def process_weights(
-        self,
-        fold_ln: bool = True,
-        center_writing_weights: bool = True,
-        center_unembed: bool = True,
-        fold_value_biases: bool = True,
-        refactor_factored_attn_matrices: bool = False,
-    ):
-        """Process weights to match TransformerLens processing exactly.
-
-        When called from enable_compatibility_mode(), the bridge components already
-        work correctly, so this method primarily just marks weights as processed.
-        """
-        print("Processing weights to match TransformerLens exactly...")
-
-        # Check if we've already processed weights to avoid infinite loops
-        if getattr(self, "_weights_processed", False):
-            print("Weights already processed, skipping...")
-            return
-
-        # Mark as processed first to prevent re-processing
-        object.__setattr__(self, "_weights_processed", True)
-
-        # When called from enable_compatibility_mode(), the bridge is already working correctly
-        # The adapter has already processed weights and created proper components
-        print("Bridge components should already match HookedTransformer from adapter processing")
-        print("✅ Process weights complete - bridge ready for use")
-
     def get_processed_hf_weights(self) -> Dict[str, torch.Tensor]:
         """Get the processed HuggingFace format weights.
 
@@ -2757,10 +2460,7 @@ class TransformerBridge(nn.Module):
             if input_key in current_state_dict:
                 mapped_state_dict[input_key] = value
             else:
-                bridge_key = self.adapter.convert_hf_key_to_bridge_key(input_key)
-                if bridge_key in current_state_dict:
-                    mapped_state_dict[bridge_key] = value
-                elif input_key in clean_to_actual:
+                if input_key in clean_to_actual:
                     actual_key = clean_to_actual[input_key]
                     mapped_state_dict[actual_key] = value
                 else:

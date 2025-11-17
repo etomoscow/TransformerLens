@@ -2,7 +2,7 @@ from __future__ import annotations
 
 "Component setup utilities for creating and configuring bridged components."
 import copy
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch.nn as nn
 
@@ -11,6 +11,9 @@ from transformer_lens.model_bridge.generalized_components.base import (
     GeneralizedComponent,
 )
 from transformer_lens.model_bridge.types import RemoteModel
+
+if TYPE_CHECKING:
+    pass
 
 
 def replace_remote_component(
@@ -70,6 +73,8 @@ def setup_submodules(
             bridged_list = setup_blocks_bridge(submodule, architecture_adapter, original_model)
             component.add_module(module_name, bridged_list)
             replace_remote_component(bridged_list, submodule.name, original_model)
+            # Add to real_components mapping
+            component.real_components[module_name] = (submodule.name, list(bridged_list))
         if module_name not in component._modules:
             if submodule.name is None:
                 original_subcomponent = original_model
@@ -83,6 +88,9 @@ def setup_submodules(
             component.add_module(module_name, submodule)
             if submodule.name is not None:
                 replace_remote_component(submodule, submodule.name, original_model)
+            # Add to real_components mapping (for non-list components)
+            if not submodule.is_list_item and submodule.name is not None:
+                component.real_components[module_name] = (submodule.name, submodule)
 
 
 def setup_components(
@@ -107,6 +115,9 @@ def setup_components(
             )
             bridge_module.add_module(tl_path, bridged_list)
             replace_remote_component(bridged_list, remote_path, original_model)
+            # Add to bridge module's real_components if it has the attribute
+            if hasattr(bridge_module, "real_components"):
+                bridge_module.real_components[tl_path] = (remote_path, list(bridged_list))  # type: ignore[index, assignment, operator]
         else:
             original_component = architecture_adapter.get_remote_component(
                 original_model, remote_path
@@ -115,6 +126,9 @@ def setup_components(
             setup_submodules(bridge_component, architecture_adapter, original_component)
             bridge_module.add_module(tl_path, bridge_component)
             replace_remote_component(bridge_component, remote_path, original_model)
+            # Add to bridge module's real_components if it has the attribute
+            if hasattr(bridge_module, "real_components"):
+                bridge_module.real_components[tl_path] = (remote_path, bridge_component)  # type: ignore[index, assignment, operator]
 
 
 def setup_blocks_bridge(

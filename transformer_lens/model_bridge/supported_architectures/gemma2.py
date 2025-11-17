@@ -26,14 +26,16 @@ class Gemma2ArchitectureAdapter(ArchitectureAdapter):
         """Initialize the Gemma2 architecture adapter."""
         super().__init__(cfg)
 
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "RMS"
+        self.cfg.positional_embedding_type = "rotary"
+        self.cfg.final_rms = True
+        self.cfg.gated_mlp = True
+        self.cfg.attn_only = False
+
         # Gemma models were not trained with BOS tokens
         # self.cfg.default_prepend_bos = False
-        self.cfg.gated_mlp = True
-
         self.cfg.uses_rms_norm = True
-
-        # Gemma2 uses rotary position embeddings
-        self.cfg.positional_embedding_type = "rotary"
 
         # Note: n_key_value_heads is now automatically mapped from num_key_value_heads
         # by map_default_transformer_lens_config() in sources/transformers.py

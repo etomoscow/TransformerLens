@@ -314,59 +314,178 @@ class AttentionBridge(GeneralizedComponent):
             args = args[1:]
         output = self.original_component(*args, **kwargs)
         if isinstance(output, tuple) and len(output) >= 2:
-            output = (self.hook_out(output[0]), output[1])
+            # output[0] is attention output, output[1] is attention weights (pattern)
+            attn_output = self.hook_out(output[0])
+            attn_weights = output[1]
+
+            # Fire hook_pattern if attention weights are present
+            if isinstance(attn_weights, torch.Tensor):
+                attn_weights = self.hook_pattern(attn_weights)
+                # Also store for potential hook_attn_scores (before softmax)
+                # Note: Most HF implementations return post-softmax weights, so pattern == attn_scores for them
+                self.hook_attn_scores(attn_weights)
+
+            output = (attn_output, attn_weights)
         elif isinstance(output, tuple) and len(output) == 1:
             output = (self.hook_out(output[0]),)
         else:
             output = self.hook_out(output)
         return output
 
-    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
+    def set_processed_weights(
+        self, weights: Mapping[str, torch.Tensor | None], verbose: bool = False
+    ) -> None:
         """Set the processed weights by delegating to LinearBridge submodules.
 
-        This uses LinearBridge's set_processed_weights method for Q/K/V/O submodules,
-        so when forward() delegates to original_component, it uses the processed weights.
-
-        The weights should already be in the correct 2D format from weight processing.
+        This method uses the base class's recursive distribution mechanism to
+        distribute weights to q/k/v/o LinearBridge subcomponents via real_components.
 
         Args:
-            weights: Dictionary containing processed weight tensors with keys:
-                - "W_Q": Query weight tensor (already in 2D format)
-                - "W_K": Key weight tensor (already in 2D format)
-                - "W_V": Value weight tensor (already in 2D format)
-                - "W_O": Output projection weight tensor (already in 2D format)
-                - "b_Q": Query bias tensor (optional)
-                - "b_K": Key bias tensor (optional)
-                - "b_V": Value bias tensor (optional)
-                - "b_O": Output bias tensor (optional)
+            weights: Dictionary containing processed weight tensors. The base class
+                     will filter by the remote component names (e.g., "q_proj") and
+                     distribute to the corresponding subcomponents.
+            verbose: If True, print detailed information about weight setting
         """
+        if verbose:
+            print(
+                f"\n  set_processed_weights: AttentionBridge (name={getattr(self, 'name', 'unknown')})"
+            )
+            print(f"    Received {len(weights)} weight keys")
+
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
-        W_Q = weights.get("W_Q")
-        W_K = weights.get("W_K")
-        W_V = weights.get("W_V")
-        W_O = weights.get("W_O")
-        if W_Q is None or W_K is None or W_V is None or (W_O is None):
-            raise ValueError(
-                "Processed attention weights must include W_Q, W_K, W_V, and W_O tensors."
-            )
-        b_Q = weights.get("b_Q")
-        b_K = weights.get("b_K")
-        b_V = weights.get("b_V")
-        b_O = weights.get("b_O")
-        q_module = getattr(self, "q", None)
-        k_module = getattr(self, "k", None)
-        v_module = getattr(self, "v", None)
-        o_module = getattr(self, "o", None)
-        if q_module and hasattr(q_module, "set_processed_weights"):
-            q_module.set_processed_weights({"weight": W_Q, "bias": b_Q})
-        if k_module and hasattr(k_module, "set_processed_weights"):
-            k_module.set_processed_weights({"weight": W_K, "bias": b_K})
-        if v_module and hasattr(v_module, "set_processed_weights"):
-            v_module.set_processed_weights({"weight": W_V, "bias": b_V})
-        if o_module and hasattr(o_module, "set_processed_weights"):
-            o_module.set_processed_weights({"weight": W_O, "bias": b_O})
 
-    def __repr__(self) -> str:
-        """String representation of the AttentionBridge."""
-        return f"AttentionBridge(name={self.name})"
+        if "W_Q" in weights.keys():
+            # legacy call that will go away
+            return
+        # Filter out None values for parent class
+        filtered_weights = {k: v for k, v in weights.items() if v is not None}
+        super().set_processed_weights(filtered_weights, verbose=verbose)
+
+    @property
+    def W_Q(self) -> torch.Tensor:
+        """Get W_Q in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        import einops
+
+        weight = (
+            self.q.weight
+        )  # 2D: [d_model, n_heads*d_head] for Conv1D or [n_heads*d_head, d_model] for Linear
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+            # Assume Conv1D format [d_model, n_heads*d_head] since postprocess_weights should have handled Linear models
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
+        return weight
+
+    @property
+    def W_K(self) -> torch.Tensor:
+        """Get W_K in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        import einops
+
+        weight = self.k.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = (
+                self.config.n_key_value_heads
+                if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads
+                else (
+                    self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+                )
+            )
+            # Assume Conv1D format [d_model, n_heads*d_head] since postprocess_weights should have handled Linear models
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
+        return weight
+
+    @property
+    def W_V(self) -> torch.Tensor:
+        """Get W_V in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+        import einops
+
+        weight = self.v.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = (
+                self.config.n_key_value_heads
+                if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads
+                else (
+                    self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+                )
+            )
+            # Assume Conv1D format [d_model, n_heads*d_head] since postprocess_weights should have handled Linear models
+            return einops.rearrange(
+                weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+            )
+        return weight
+
+    @property
+    def W_O(self) -> torch.Tensor:
+        """Get W_O in 3D format [n_heads, d_head, d_model] from 2D linear bridge weight."""
+        import einops
+
+        weight = self.o.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+            if weight.shape[0] == n_heads * (
+                weight.shape[1] // n_heads
+                if weight.shape[1] % n_heads == 0
+                else weight.shape[0] // n_heads
+            ):
+                return einops.rearrange(
+                    weight, "(n_heads d_head) d_model -> n_heads d_head d_model", n_heads=n_heads
+                )
+            else:
+                return einops.rearrange(
+                    weight.T, "(n_heads d_head) d_model -> n_heads d_head d_model", n_heads=n_heads
+                )
+        return weight
+
+    @property
+    def b_Q(self) -> Optional[torch.Tensor]:
+        """Get b_Q in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        import einops
+
+        bias = self.q.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_K(self) -> Optional[torch.Tensor]:
+        """Get b_K in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        import einops
+
+        bias = self.k.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = (
+                self.config.n_key_value_heads
+                if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads
+                else (
+                    self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+                )
+            )
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_V(self) -> Optional[torch.Tensor]:
+        """Get b_V in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+        import einops
+
+        bias = self.v.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = (
+                self.config.n_key_value_heads
+                if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads
+                else (
+                    self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+                )
+            )
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_O(self) -> Optional[torch.Tensor]:
+        """Get b_O bias from linear bridge."""
+        return self.o.bias

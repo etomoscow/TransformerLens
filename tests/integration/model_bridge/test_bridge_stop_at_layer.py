@@ -27,7 +27,7 @@ def bridge_default():
 def bridge_with_processed_weights():
     """Load a small model with processed weights (no compat mode)."""
     bridge = TransformerBridge.boot_transformers("distilgpt2", device="cpu")
-    bridge.process_compatibility_weights()
+    bridge.enable_compatibility_mode()
     if bridge.tokenizer.pad_token is None:
         bridge.tokenizer.pad_token = bridge.tokenizer.eos_token
     return bridge

@@ -110,7 +110,9 @@ class MLPBridge(GeneralizedComponent):
             output = self.out.hook_out(output)
         return output
 
-    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
+    def set_processed_weights(
+        self, weights: Mapping[str, torch.Tensor | None], verbose: bool = False
+    ) -> None:
         """Set the processed weights for use in compatibility mode.
 
         This stores the processed weights as attributes on the MLP component so they can be
@@ -123,15 +125,29 @@ class MLPBridge(GeneralizedComponent):
             b_out: The processed MLP output bias tensor (optional)
             W_gate: The processed MLP gate weight tensor [d_model, d_mlp] (for gated MLPs)
             b_gate: The processed MLP gate bias tensor (optional, for gated MLPs)
+            verbose: If True, print detailed information about weight setting
         """
+        if verbose:
+            print(f"\n  set_processed_weights: MLPBridge (name={getattr(self, 'name', 'unknown')})")
+            print(f"    Received {len(weights)} weight keys")
+
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
-        W_in = weights.get("W_in")
-        W_out = weights.get("W_out")
+        W_in = weights.get("in.weight")
+        W_out = weights.get("out.weight")
         if W_in is None or W_out is None:
-            raise ValueError("Processed MLP weights must include 'W_in' and 'W_out' tensors.")
-        b_in = weights.get("b_in")
-        b_out = weights.get("b_out")
+            return
+        b_in = weights.get("in.bias")
+        b_out = weights.get("out.bias")
+
+        if verbose:
+            print(f"    Setting W_in with shape: {W_in.shape}")
+            print(f"    Setting W_out with shape: {W_out.shape}")
+            if b_in is not None:
+                print(f"    Setting b_in with shape: {b_in.shape}")
+            if b_out is not None:
+                print(f"    Setting b_out with shape: {b_out.shape}")
+
         self._use_processed_weights = True
         self._processed_W_in = W_in
         self._processed_b_in = b_in
@@ -140,6 +156,6 @@ class MLPBridge(GeneralizedComponent):
         in_module = getattr(self, "in", None)
         out_module = getattr(self, "out", None)
         if in_module and hasattr(in_module, "set_processed_weights"):
-            in_module.set_processed_weights({"weight": W_in, "bias": b_in})
+            in_module.set_processed_weights({"weight": W_in, "bias": b_in}, verbose=verbose)
         if out_module and hasattr(out_module, "set_processed_weights"):
-            out_module.set_processed_weights({"weight": W_out, "bias": b_out})
+            out_module.set_processed_weights({"weight": W_out, "bias": b_out}, verbose=verbose)
