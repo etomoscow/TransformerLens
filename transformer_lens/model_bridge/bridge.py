@@ -902,7 +902,6 @@ class TransformerBridge(nn.Module):
             refactor_factored_attn_matrices=refactor_factored_attn_matrices,
             adapter=adapter,
         )
-
         if verbose:
             print("  Distributing weights to generalized components...")
         ProcessWeights.distribute_weights_to_components(
