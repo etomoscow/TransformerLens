@@ -23,6 +23,7 @@ class NormalizationBridge(GeneralizedComponent):
         config: Any,
         submodules: Optional[Dict[str, GeneralizedComponent]] = {},
         use_native_layernorm_autograd: bool = False,
+        use_layernorm_pre: bool = False,
     ):
         """Initialize the normalization bridge.
 
@@ -33,11 +34,16 @@ class NormalizationBridge(GeneralizedComponent):
             use_native_layernorm_autograd: If True, use HuggingFace's native LayerNorm
                                           autograd for exact gradient matching. If False,
                                           use custom implementation. Defaults to False.
+            use_layernorm_pre: If True, act like LayerNormPre (no learnable parameters,
+                              just center and normalize). This should only be used when
+                              LayerNorm weights have been folded into subsequent layers.
+                              Defaults to False.
         """
         super().__init__(name, config, submodules=submodules)
         self.hook_normalized = HookPoint()
         self.hook_scale = HookPoint()
         self.use_native_layernorm_autograd = use_native_layernorm_autograd
+        self.use_layernorm_pre = use_layernorm_pre
 
     def forward(self, hidden_states: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Forward pass through the normalization bridge.
@@ -49,14 +55,30 @@ class NormalizationBridge(GeneralizedComponent):
         Returns:
             Normalized output
         """
-        if self.original_component is None:
+        if self.original_component is None and not self.use_layernorm_pre:
             raise RuntimeError(
                 f"Original component not set for {self.name}. Call set_original_component() first."
             )
         assert self.config is not None
         hidden_states = self.hook_in(hidden_states)
         self._last_input_before_norm = hidden_states
-        if self.use_native_layernorm_autograd:
+
+        # LayerNormPre mode: just center and normalize, no learnable parameters
+        if self.use_layernorm_pre:
+            # Convert to float32 for numerical stability if needed
+            if self.config.dtype not in [torch.float32, torch.float64]:
+                hidden_states = hidden_states.to(torch.float32)
+
+            # Center
+            hidden_states = hidden_states - hidden_states.mean(-1, keepdim=True)
+
+            # Normalize
+            scale = self.hook_scale(
+                (hidden_states.pow(2).mean(-1, keepdim=True) + getattr(self.config, "eps", 1e-05)).sqrt()
+            )
+            result = self.hook_normalized(hidden_states / scale).to(self.config.dtype)
+
+        elif self.use_native_layernorm_autograd:
             result = self._hf_autograd_forward_with_hooks(hidden_states)
         elif hasattr(self.config, "layer_norm_folding") and self.config.layer_norm_folding:
             result = self._hf_autograd_forward_with_hooks(hidden_states)
@@ -158,3 +180,14 @@ class NormalizationBridge(GeneralizedComponent):
         if bias_tensor is not None:
             processed_weights[bias_key] = bias_tensor.clone()
         self._processed_weights = processed_weights
+
+    def enable_layernorm_pre_mode(self) -> None:
+        """Enable LayerNormPre mode (center and normalize only, no learnable parameters).
+
+        This should only be called after LayerNorm weights have been folded into
+        subsequent layers. In this mode, the normalization layer acts like
+        HookedTransformer's LayerNormPre component.
+        """
+        self.use_layernorm_pre = True
+        # Clear processed weights since LayerNormPre has no learnable parameters
+        self._processed_weights = {}
