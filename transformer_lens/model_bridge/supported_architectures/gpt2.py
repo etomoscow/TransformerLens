@@ -12,9 +12,9 @@ from transformer_lens.conversion_utils.conversion_steps import (
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
     BlockBridge,
+    Conv1DBridge,
     EmbeddingBridge,
     JointQKVAttentionBridge,
-    LinearBridge,
     MLPBridge,
     NormalizationBridge,
     PosEmbedBridge,
@@ -178,16 +178,16 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                         config=self.cfg,
                         split_qkv_matrix=self.split_qkv_matrix,
                         submodules={
-                            "qkv": LinearBridge(name="c_attn"),
-                            "o": LinearBridge(name="c_proj"),
+                            "qkv": Conv1DBridge(name="c_attn"),
+                            "o": Conv1DBridge(name="c_proj"),
                         },
                     ),
                     "ln2": NormalizationBridge(name="ln_2", config=self.cfg),
                     "mlp": MLPBridge(
                         name="mlp",
                         submodules={
-                            "in": LinearBridge(name="c_fc"),
-                            "out": LinearBridge(name="c_proj"),
+                            "in": Conv1DBridge(name="c_fc"),
+                            "out": Conv1DBridge(name="c_proj"),
                         },
                     ),
                 },

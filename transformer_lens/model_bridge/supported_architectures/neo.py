@@ -2,7 +2,10 @@
 
 from typing import Any
 
+import torch
+
 from transformer_lens.conversion_utils.conversion_steps import (
+    BaseHookConversion,
     HookConversionSet,
     RearrangeHookConversion,
 )
@@ -17,6 +20,54 @@ from transformer_lens.model_bridge.generalized_components import (
     PosEmbedBridge,
     UnembeddingBridge,
 )
+
+
+class NeoLinearTransposeConversion(BaseHookConversion):
+    """Transpose Linear weights to Conv1D format and rearrange for GPT-Neo.
+
+    GPT-Neo uses standard PyTorch Linear layers with weights shaped [out_features, in_features].
+    This conversion transposes them to Conv1D format [in_features, out_features] and then
+    applies einops rearrangement for attention heads.
+    """
+
+    def __init__(self, rearrange_pattern: str | None = None, **axes_lengths):
+        """Initialize the conversion.
+
+        Args:
+            rearrange_pattern: Optional einops pattern for rearrangement after transpose
+            **axes_lengths: Additional axes lengths for einops (e.g., n=n_heads)
+        """
+        super().__init__()
+        self.rearrange_pattern = rearrange_pattern
+        self.axes_lengths = axes_lengths
+
+    def handle_conversion(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
+        """Transpose from Linear to Conv1D format and optionally rearrange."""
+        # Transpose: [out_features, in_features] -> [in_features, out_features]
+        transposed = input_value.T
+
+        # Apply rearrangement if specified
+        if self.rearrange_pattern:
+            import einops
+            return einops.rearrange(transposed, self.rearrange_pattern, **self.axes_lengths)
+
+        return transposed
+
+    def revert(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
+        """Revert rearrangement and transpose back to Linear format."""
+        result = input_value
+
+        # Reverse rearrangement if specified
+        if self.rearrange_pattern:
+            import einops
+            # Reverse the einops pattern
+            left, right = self.rearrange_pattern.split("->")
+            reversed_pattern = f"{right.strip()} -> {left.strip()}"
+            result = einops.rearrange(result, reversed_pattern, **self.axes_lengths)
+
+        # Transpose back: [in_features, out_features] -> [out_features, in_features]
+        return result.T
+
 
 class NeoArchitectureAdapter(ArchitectureAdapter):
     """Architecture adapter for Neo models."""
@@ -36,54 +87,70 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
 
         self.conversion_rules = HookConversionSet(
             {
-                "embed.e": "transformer.wte.weight",
-                "pos_embed.pos": "transformer.wpe.weight",
-                "blocks.{i}.ln1.w": "transformer.h.{i}.ln_1.weight",
-                "blocks.{i}.ln1.b": "transformer.h.{i}.ln_1.bias",
-                # Property access keys (used by component tree)
+                # Property access keys (used by component tree) - for attention
                 "blocks.{i}.attn.q.weight": (
                     "transformer.h.{i}.attn.attention.q_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                    NeoLinearTransposeConversion("d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
                 "blocks.{i}.attn.k.weight": (
                     "transformer.h.{i}.attn.attention.k_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                    NeoLinearTransposeConversion("d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
                 "blocks.{i}.attn.v.weight": (
                     "transformer.h.{i}.attn.attention.v_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                    NeoLinearTransposeConversion("d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
                 "blocks.{i}.attn.o.weight": (
                     "transformer.h.{i}.attn.attention.out_proj.weight",
-                    RearrangeHookConversion("m (n h) -> n h m", n=self.cfg.n_heads),
+                    NeoLinearTransposeConversion("(n h) d_model -> n h d_model", n=self.cfg.n_heads),
                 ),
-                # Weight processing keys (used by ProcessWeights)
+                # Property access keys - for MLP
+                "blocks.{i}.mlp.in.weight": (
+                    "transformer.h.{i}.mlp.c_fc.weight",
+                    NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed
+                ),
+                "blocks.{i}.mlp.out.weight": (
+                    "transformer.h.{i}.mlp.c_proj.weight",
+                    NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed
+                ),
+                # Weight processing keys (W_Q, W_K, W_V, W_O style) - for weight processing
                 "blocks.{i}.attn.W_Q": (
                     "transformer.h.{i}.attn.attention.q_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                    NeoLinearTransposeConversion("d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
                 "blocks.{i}.attn.W_K": (
                     "transformer.h.{i}.attn.attention.k_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                    NeoLinearTransposeConversion("d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
                 "blocks.{i}.attn.W_V": (
                     "transformer.h.{i}.attn.attention.v_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+                    NeoLinearTransposeConversion("d_model (n h) -> n d_model h", n=self.cfg.n_heads),
                 ),
                 "blocks.{i}.attn.W_O": (
                     "transformer.h.{i}.attn.attention.out_proj.weight",
-                    RearrangeHookConversion("m (n h) -> n h m", n=self.cfg.n_heads),
+                    NeoLinearTransposeConversion("(n h) d_model -> n h d_model", n=self.cfg.n_heads),
                 ),
-                "blocks.{i}.ln2.w": "transformer.h.{i}.ln_2.weight",
-                "blocks.{i}.ln2.b": "transformer.h.{i}.ln_2.bias",
-                "blocks.{i}.mlp.in": "transformer.h.{i}.mlp.c_fc.weight",
-                "blocks.{i}.mlp.b_in": "transformer.h.{i}.mlp.c_fc.bias",
-                "blocks.{i}.mlp.out": "transformer.h.{i}.mlp.c_proj.weight",
-                "blocks.{i}.mlp.b_out": "transformer.h.{i}.mlp.c_proj.bias",
-                "ln_final.w": "transformer.ln_f.weight",
-                "ln_final.b": "transformer.ln_f.bias",
-                "unembed.u": "lm_head.weight",
-                "unembed.b_U": "lm_head.bias",
+                "blocks.{i}.attn.b_Q": (
+                    "transformer.h.{i}.attn.attention.q_proj.bias",
+                    RearrangeHookConversion("(n h) -> n h", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.b_K": (
+                    "transformer.h.{i}.attn.attention.k_proj.bias",
+                    RearrangeHookConversion("(n h) -> n h", n=self.cfg.n_heads),
+                ),
+                "blocks.{i}.attn.b_V": (
+                    "transformer.h.{i}.attn.attention.v_proj.bias",
+                    RearrangeHookConversion("(n h) -> n h", n=self.cfg.n_heads),
+                ),
+                # MLP weight processing keys
+                "blocks.{i}.mlp.W_in": (
+                    "transformer.h.{i}.mlp.c_fc.weight",
+                    NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed
+                ),
+                "blocks.{i}.mlp.W_out": (
+                    "transformer.h.{i}.mlp.c_proj.weight",
+                    NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed
+                ),
             }
         )
 
@@ -118,43 +185,3 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
             "ln_final": NormalizationBridge(name="transformer.ln_f", config=self.cfg),
             "unembed": UnembeddingBridge(name="lm_head"),
         }
-
-    def preprocess_weights(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Transpose GPT-Neo Linear weights to Conv1D format for weight processing.
-
-        GPT-Neo uses standard PyTorch Linear layers with weights shaped [out_features, in_features].
-        However, the weight processing code (fold_layer_norm, etc.) expects Conv1D format
-        with weights shaped [in_features, out_features].
-
-        This method transposes both attention and MLP weights to match the expected format:
-        - Attention Q/K/V: [768, 768] -> [768, 768] (d_model, d_model) -> (d_model, d_model)
-        - Attention O: [768, 768] -> [768, 768] (d_model, d_model) -> (d_model, d_model)
-        - MLP c_fc: [3072, 768] -> [768, 3072]  (d_mlp, d_model) -> (d_model, d_mlp)
-        - MLP c_proj: [768, 3072] -> [3072, 768]  (d_model, d_mlp) -> (d_mlp, d_model)
-
-        Args:
-            state_dict: The state dictionary with HuggingFace format keys and Linear weights
-
-        Returns:
-            The modified state dictionary with transposed weights in Conv1D format
-        """
-        n_layers = self.cfg.n_layers if hasattr(self.cfg, "n_layers") else self.cfg.num_layers
-
-        for layer_idx in range(n_layers):
-            # Transpose attention Q/K/V weights from Linear [d_model, d_model] to Conv1D [d_model, d_model]
-            for proj_name in ["q_proj", "k_proj", "v_proj", "out_proj"]:
-                key = f"transformer.h.{layer_idx}.attn.attention.{proj_name}.weight"
-                if key in state_dict:
-                    state_dict[key] = state_dict[key].T
-
-            # Transpose MLP input weight from Linear [d_mlp, d_model] to Conv1D [d_model, d_mlp]
-            c_fc_key = f"transformer.h.{layer_idx}.mlp.c_fc.weight"
-            if c_fc_key in state_dict:
-                state_dict[c_fc_key] = state_dict[c_fc_key].T
-
-            # Transpose MLP output weight from Linear [d_model, d_mlp] to Conv1D [d_mlp, d_model]
-            c_proj_key = f"transformer.h.{layer_idx}.mlp.c_proj.weight"
-            if c_proj_key in state_dict:
-                state_dict[c_proj_key] = state_dict[c_proj_key].T
-
-        return state_dict

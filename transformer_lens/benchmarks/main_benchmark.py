@@ -1,10 +1,12 @@
 """Main benchmark runner for TransformerBridge.
 
 This module provides the main benchmark suite that compares TransformerBridge
-against reference implementations in an optimized 3-phase approach:
+against reference implementations in an optimized 5-phase approach:
 Phase 1: HF + Bridge (unprocessed) - Compare against raw HuggingFace model
 Phase 2: Bridge (unprocessed) + HT (unprocessed) - Compare unprocessed models
-Phase 3: Bridge (processed) + HT (processed) - Full compatibility mode testing
+Phase 3: Weight Extraction/Reloading Validation (no_processing)
+Phase 4: Bridge (processed) + HT (processed) - Full compatibility mode testing
+Phase 5: Granular Weight Processing Tests (optional)
 """
 
 import gc
@@ -75,13 +77,13 @@ def run_comparison_benchmarks(
     """Run standardized comparison benchmarks between Bridge and reference model.
 
     This function runs the same comprehensive test suite for both unprocessed (Phase 2)
-    and processed (Phase 3) modes to ensure parity in testing coverage.
+    and processed (Phase 4) modes to ensure parity in testing coverage.
 
     Args:
         bridge_model: TransformerBridge model to test
         reference_model: HookedTransformer reference (same architecture) or None
         test_text: Input text for testing
-        phase_name: Name of the phase ("Phase 2" or "Phase 3") for logging
+        phase_name: Name of the phase ("Phase 2" or "Phase 4") for logging
         is_processed: Whether models have processed weights (for weight-specific tests)
         verbose: Whether to print detailed results
         gpt2_reference: Optional GPT-2 reference for cross-model validation
@@ -133,7 +135,6 @@ def run_comparison_benchmarks(
                     )
                 )
             else:
-                from transformer_lens.benchmarks.utils import BenchmarkSeverity
 
                 if verbose:
                     print("⏭️ weight_processing and weight_sharing skipped (no HT reference)")
@@ -176,7 +177,6 @@ def run_comparison_benchmarks(
             if verbose:
                 print(f"✗ Equivalence benchmark failed: {e}\n")
     else:
-        from transformer_lens.benchmarks.utils import BenchmarkSeverity
 
         if verbose:
             print("⏭️ Skipped (no HookedTransformer reference)\n")
@@ -483,13 +483,15 @@ def run_benchmark_suite(
 ) -> List[BenchmarkResult]:
     """Run comprehensive benchmark suite for TransformerBridge.
 
-    This function implements an optimized 3-phase approach to minimize model reloading:
+    This function implements an optimized 5-phase approach to minimize model reloading:
     Phase 1: HF + Bridge (unprocessed) - Compare against raw HuggingFace model
     Phase 2: Bridge (unprocessed) + HT (unprocessed) - Compare unprocessed models
-    Phase 3: Bridge (processed) + HT (processed) - Full compatibility mode testing
+    Phase 3: Weight Extraction/Reloading Validation (no_processing)
+    Phase 4: Bridge (processed) + HT (processed) - Full compatibility mode testing
+    Phase 5: Granular Weight Processing Tests (optional)
 
-    When test_weight_processing_individually=True, an additional Phase 3.5 runs after
-    Phase 3, testing each weight processing flag individually and in combinations.
+    When test_weight_processing_individually=True, an additional Phase 5 runs after
+    Phase 4, testing each weight processing flag individually and in combinations.
 
     Args:
         model_name: Name of the model to benchmark (e.g., "gpt2")
@@ -764,7 +766,6 @@ def run_benchmark_suite(
         if verbose:
             print("✓ TransformerBridge loaded (unprocessed)\n")
     except Exception as e:
-        from transformer_lens.benchmarks.utils import BenchmarkSeverity
 
         add_result(
             BenchmarkResult(
@@ -807,7 +808,7 @@ def run_benchmark_suite(
             if verbose:
                 print(f"✗ Forward pass benchmark failed: {e}\n")
 
-    # Save bridge_dtype before cleaning up HF model (needed for Phase 3)
+    # Save bridge_dtype before cleaning up HF model (needed for Phase 3 and Phase 4)
     saved_bridge_dtype = bridge_dtype
 
     # Clean up HF model - no longer needed
@@ -901,7 +902,137 @@ def run_benchmark_suite(
         bridge_unprocessed = None
 
     # ========================================================================
-    # PHASE 3: Bridge (processed) + HookedTransformer (processed)
+    # PHASE 3: Weight Extraction/Reloading Validation (no_processing)
+    # ========================================================================
+    if not enable_compatibility_mode:
+        if verbose:
+            print("\n⚠ Compatibility mode disabled - skipping Phases 3 and 4\n")
+        if verbose:
+            print("\n" + format_results(results))
+        return results
+
+    if verbose:
+        print(f"\n{'='*80}")
+        print("PHASE 3: Weight Extraction/Reloading Validation (no_processing)")
+        print(f"{'='*80}\n")
+        print("Testing that weight extraction and reloading works correctly")
+        print("without any weight processing modifications.\n")
+
+    # Load bridge with no_processing=True
+    bridge_no_processing = None
+    try:
+        if verbose:
+            print("Loading TransformerBridge (no_processing=True)...")
+        bridge_dtype = saved_bridge_dtype
+        bridge_no_processing = TransformerBridge.boot_transformers(model_name, device=device, dtype=bridge_dtype)  # type: ignore[attr-defined]
+        bridge_no_processing.enable_compatibility_mode(
+            disable_warnings=True,
+            no_processing=True,
+        )
+        if verbose:
+            print("✓ TransformerBridge loaded with no_processing=True\n")
+    except Exception as e:
+        add_result(
+            BenchmarkResult(
+                name="load_bridge_no_processing",
+                severity=BenchmarkSeverity.ERROR,
+                message=f"Failed to load TransformerBridge with no_processing: {str(e)}",
+                passed=False,
+            )
+        )
+        if verbose:
+            print(f"✗ Failed to load TransformerBridge with no_processing: {str(e)}\n")
+
+    # Load bridge with all flags=False
+    bridge_all_false = None
+    try:
+        if verbose:
+            print("Loading TransformerBridge (all flags=False)...")
+        bridge_all_false = TransformerBridge.boot_transformers(model_name, device=device, dtype=bridge_dtype)  # type: ignore[attr-defined]
+        bridge_all_false.enable_compatibility_mode(
+            disable_warnings=True,
+            no_processing=False,
+            fold_ln=False,
+            center_writing_weights=False,
+            center_unembed=False,
+            fold_value_biases=False,
+        )
+        if verbose:
+            print("✓ TransformerBridge loaded with all flags=False\n")
+    except Exception as e:
+        add_result(
+            BenchmarkResult(
+                name="load_bridge_all_false",
+                severity=BenchmarkSeverity.ERROR,
+                message=f"Failed to load TransformerBridge with all flags=False: {str(e)}",
+                passed=False,
+            )
+        )
+        if verbose:
+            print(f"✗ Failed to load TransformerBridge with all flags=False: {str(e)}\n")
+
+    # Compare no_processing vs all_false
+    if bridge_no_processing and bridge_all_false:
+        if verbose:
+            print("Running Phase 4 benchmarks...\n")
+            print("Comparing no_processing=True vs all flags=False")
+            print("(Both should match since no weight modifications are made)\n")
+
+        try:
+            test_tokens = bridge_no_processing.to_tokens(test_text)
+            logits_no_proc = bridge_no_processing(test_tokens)
+            logits_all_false = bridge_all_false(test_tokens)
+
+            logits_match = torch.allclose(logits_no_proc, logits_all_false, atol=1e-4, rtol=1e-4)
+
+            if logits_match:
+                add_result(
+                    BenchmarkResult(
+                        name="no_processing_equivalence",
+                        passed=True,
+                        message="Weight extraction/reloading works correctly (no_processing matches all flags=False)",
+                        severity=BenchmarkSeverity.INFO,
+                    )
+                )
+                if verbose:
+                    print("🟢 [PASS] no_processing_equivalence: Models produce identical results\n")
+            else:
+                max_diff = torch.max(torch.abs(logits_no_proc - logits_all_false)).item()
+                mean_diff = torch.mean(torch.abs(logits_no_proc - logits_all_false)).item()
+                add_result(
+                    BenchmarkResult(
+                        name="no_processing_equivalence",
+                        passed=False,
+                        message=f"Weight extraction/reloading mismatch: max_diff={max_diff:.4f}, mean_diff={mean_diff:.4f}",
+                        severity=BenchmarkSeverity.CRITICAL,
+                        details={"max_diff": max_diff, "mean_diff": mean_diff},
+                    )
+                )
+                if verbose:
+                    print(f"❌ [FAIL] no_processing_equivalence: max_diff={max_diff:.4f}, mean_diff={mean_diff:.4f}\n")
+
+        except Exception as e:
+            if verbose:
+                print(f"✗ No processing equivalence test failed: {e}\n")
+            add_result(
+                BenchmarkResult(
+                    name="no_processing_equivalence",
+                    passed=False,
+                    severity=BenchmarkSeverity.ERROR,
+                    message=f"Failed to test no_processing equivalence: {str(e)}",
+                )
+            )
+
+    # Clean up Phase 3 models
+    if bridge_no_processing is not None:
+        cleanup_model(bridge_no_processing, "TransformerBridge (no_processing)")
+        bridge_no_processing = None
+    if bridge_all_false is not None:
+        cleanup_model(bridge_all_false, "TransformerBridge (all flags=False)")
+        bridge_all_false = None
+
+    # ========================================================================
+    # PHASE 4: Bridge (processed) + HookedTransformer (processed)
     # ========================================================================
     if not enable_compatibility_mode:
         if verbose:
@@ -912,7 +1043,7 @@ def run_benchmark_suite(
 
     if verbose:
         print(f"\n{'='*80}")
-        print("PHASE 3: TransformerBridge (processed) + HookedTransformer (processed)")
+        print("PHASE 4: TransformerBridge (processed) + HookedTransformer (processed)")
         print(f"{'='*80}\n")
 
     bridge_processed = None
@@ -931,7 +1062,6 @@ def run_benchmark_suite(
         if verbose:
             print("✓ TransformerBridge compatibility mode enabled (processed)\n")
     except Exception as e:
-        from transformer_lens.benchmarks.utils import BenchmarkSeverity
 
         add_result(
             BenchmarkResult(
@@ -991,7 +1121,7 @@ def run_benchmark_suite(
     # Run Phase 3 benchmarks using unified function
     if bridge_processed:
         if verbose:
-            print("Running Phase 3 benchmarks...\n")
+            print("Running Phase 4 benchmarks...\n")
 
         phase3_results = run_comparison_benchmarks(
             bridge_model=bridge_processed,
@@ -1013,12 +1143,12 @@ def run_benchmark_suite(
         ht_model_processed = None
 
     # ========================================================================
-    # Phase 3.5: Granular Weight Processing Tests (Optional)
+    # Phase 5: Granular Weight Processing Tests (Optional)
     # ========================================================================
     if test_weight_processing_individually and enable_compatibility_mode:
         if verbose:
             print("\n" + "=" * 80)
-            print("PHASE 3.5: GRANULAR WEIGHT PROCESSING TESTS")
+            print("PHASE 5: GRANULAR WEIGHT PROCESSING TESTS")
             print("=" * 80)
             print("Testing each weight processing flag individually and in combinations")
             print("to isolate which specific processing steps cause issues.")
@@ -1045,7 +1175,7 @@ def run_benchmark_suite(
 
             if verbose:
                 print("\n" + "=" * 80)
-                print("PHASE 3.5 COMPLETE")
+                print("PHASE 5 COMPLETE")
                 print("=" * 80)
 
         except Exception as e:
@@ -1063,7 +1193,6 @@ def run_benchmark_suite(
 
     # Print summary (individual results already printed immediately)
     if verbose:
-        from transformer_lens.benchmarks.utils import BenchmarkSeverity
 
         print("\n" + "=" * 80)
         print("BENCHMARK SUMMARY")

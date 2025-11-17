@@ -1,4 +1,4 @@
-"""Linear bridge component for wrapping linear layers with hook points."""
+"""Conv1D bridge component for wrapping Conv1D layers with hook points."""
 from typing import Any, Dict, Mapping, Optional
 
 import einops
@@ -12,17 +12,18 @@ from transformer_lens.model_bridge.generalized_components.base import (
 )
 
 
-class LinearBridge(GeneralizedComponent):
-    """Bridge component for linear layers.
+class Conv1DBridge(GeneralizedComponent):
+    """Bridge component for Conv1D layers.
 
-    This component wraps a linear layer (nn.Linear) and provides hook points
-    for intercepting the input and output activations.
+    This component wraps a Conv1D layer (transformers.pytorch_utils.Conv1D)
+    and provides hook points for intercepting the input and output activations.
 
-    Note: For Conv1D layers (used in GPT-2 style models), use Conv1DBridge instead.
+    Conv1D is used in GPT-2 style models and has shape [in_features, out_features]
+    (transpose of nn.Linear which is [out_features, in_features]).
     """
 
     def forward(self, input: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-        """Forward pass through the linear layer with hooks.
+        """Forward pass through the Conv1D layer with hooks.
 
         Args:
             input: Input tensor
@@ -30,7 +31,7 @@ class LinearBridge(GeneralizedComponent):
             **kwargs: Additional keyword arguments
 
         Returns:
-            Output tensor after linear transformation
+            Output tensor after Conv1D transformation
         """
         if self.original_component is None:
             raise RuntimeError(
@@ -42,17 +43,18 @@ class LinearBridge(GeneralizedComponent):
         return output
 
     def __repr__(self) -> str:
-        """String representation of the LinearBridge."""
+        """String representation of the Conv1DBridge."""
         if self.original_component is not None:
             try:
-                in_features = self.original_component.in_features
-                out_features = self.original_component.out_features
-                bias = self.original_component.bias is not None
-                return f"LinearBridge({in_features} -> {out_features}, bias={bias}, original_component={type(self.original_component).__name__})"
+                # Conv1D has nf (out) and nx (in) attributes
+                in_features = self.original_component.nx
+                out_features = self.original_component.nf
+                # Conv1D always has bias
+                return f"Conv1DBridge({in_features} -> {out_features}, bias=True, original_component={type(self.original_component).__name__})"
             except AttributeError:
-                return f"LinearBridge(name={self.name}, original_component={type(self.original_component).__name__})"
+                return f"Conv1DBridge(name={self.name}, original_component={type(self.original_component).__name__})"
         else:
-            return f"LinearBridge(name={self.name}, original_component=None)"
+            return f"Conv1DBridge(name={self.name}, original_component=None)"
 
     def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
         """Set the processed weights by loading them into the original component.
@@ -60,13 +62,13 @@ class LinearBridge(GeneralizedComponent):
         This loads the processed weights directly into the original_component's parameters,
         so when forward() delegates to original_component, it uses the processed weights.
 
-        Handles Linear layers (shape [out, in]).
+        Handles Conv1D (GPT-2 style, shape [in, out]).
         Also handles 3D weights [n_heads, d_model, d_head] by flattening them first.
 
         Args:
             weights: Dictionary containing:
                 - weight: The processed weight tensor. Can be:
-                    - 2D [in, out] format (will be transposed to [out, in] for Linear)
+                    - 2D [in, out] format (Conv1D format)
                     - 3D [n_heads, d_model, d_head] format (will be flattened to 2D)
                 - bias: The processed bias tensor (optional). Can be:
                     - 1D [out] format
@@ -76,7 +78,7 @@ class LinearBridge(GeneralizedComponent):
             raise RuntimeError(f"Original component not set for {self.name}")
         weight = weights.get("weight")
         if weight is None:
-            raise ValueError("Processed weights for LinearBridge must include 'weight'.")
+            raise ValueError("Processed weights for Conv1DBridge must include 'weight'.")
         bias = weights.get("bias")
 
         # Handle 3D weights by flattening to 2D
@@ -97,10 +99,10 @@ class LinearBridge(GeneralizedComponent):
         if bias is not None and bias.ndim == 2:
             bias = einops.rearrange(bias, "n_heads d_head -> (n_heads d_head)")
 
-        # Load weights into Linear layer
-        # nn.Linear stores weights in [out, in] format (transpose of input [in, out])
+        # Load weights into Conv1D layer
+        # Conv1D stores weights in [in, out] format (no transpose needed)
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
-                param.data = weight.T.contiguous()
+                param.data = weight.contiguous()
             elif "bias" in name.lower() and bias is not None:
                 param.data = bias.contiguous()

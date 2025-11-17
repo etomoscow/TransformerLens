@@ -187,6 +187,19 @@ class GeneralizedComponent(nn.Module):
         Args:
             weights: Dictionary of processed weight tensors
         """
+        # First, handle single-part keys (keys without ".") by setting them as parameters
+        # on the original component
+        if self.original_component is not None:
+            for key, weight_tensor in weights.items():
+                # Only process keys without "." (single-part keys)
+                if "." not in key:
+                    # Try to set the parameter on the original component
+                    if hasattr(self.original_component, key):
+                        param = getattr(self.original_component, key)
+                        if param is not None and isinstance(param, torch.nn.Parameter):
+                            # Update existing parameter's data
+                            param.data = weight_tensor
+
         # If this component has submodules, distribute weights to them
         if self.real_components:
             from transformer_lens.weight_processing import ProcessWeights

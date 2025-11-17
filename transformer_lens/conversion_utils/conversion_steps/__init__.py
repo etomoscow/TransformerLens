@@ -15,6 +15,9 @@ from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion imp
 from transformer_lens.conversion_utils.conversion_steps.callable_hook_conversion import (
     CallableHookConversion,
 )
+from transformer_lens.conversion_utils.conversion_steps.chain_hook_conversion import (
+    ChainHookConversion,
+)
 from transformer_lens.conversion_utils.conversion_steps.hook_conversion_set import (
     HookConversionSet,
 )
@@ -39,6 +42,7 @@ __all__ = [
     "AttentionAutoConversion",
     "BaseHookConversion",
     "CallableHookConversion",
+    "ChainHookConversion",
     "RearrangeHookConversion",
     "RepeatHookConversion",
     "SplitHookConversion",

@@ -204,6 +204,34 @@ def run_granular_weight_processing_benchmarks(
 
     all_results: Dict[str, List[BenchmarkResult]] = {}
 
+    # Check if HookedTransformer is available for this model before running any tests
+    ht_available = False
+    try:
+        test_ht = HookedTransformer.from_pretrained(model_name, device=device)
+        ht_available = True
+        del test_ht
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    except Exception as e:
+        if verbose:
+            print("\n" + "=" * 80)
+            print("GRANULAR WEIGHT PROCESSING BENCHMARKS")
+            print(f"Model: {model_name}")
+            print("=" * 80)
+            print(f"⚠ HookedTransformer not available for {model_name}: {str(e)}")
+            print("⚠ Skipping granular weight processing tests (requires HookedTransformer reference)")
+            print("=" * 80 + "\n")
+
+        # Return a single SKIPPED result for all tests
+        skip_result = BenchmarkResult(
+            name="granular_weight_processing",
+            passed=True,
+            severity=BenchmarkSeverity.SKIPPED,
+            message=f"HookedTransformer not available for {model_name} - tests skipped",
+            details={"reason": "HookedTransformer unavailable", "error": str(e)},
+        )
+        all_results["skipped"] = [skip_result]
+        return all_results
+
     # Determine which configurations to test
     configs_to_test = WEIGHT_PROCESSING_CONFIGS.copy()
     if include_refactor_tests:
