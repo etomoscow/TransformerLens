@@ -41,6 +41,9 @@ class ProcessWeights:
         Returns:
             The component-based key (e.g., "blocks.0.attn.q.weight")
         """
+        if not adapter:
+            return tl_key
+        
         component_path, param_attr = ProcessWeights._prepare_component_path(tl_key)
         if param_attr:
             return f"{component_path}.{param_attr}"
@@ -143,8 +146,6 @@ class ProcessWeights:
                 raise ValueError("Required weight W_Q not found")
         """
         actual_key = ProcessWeights._get_param_key(tl_key, adapter)
-        if adapter is None:
-            actual_key = ProcessWeights._resolve_tl_key(state_dict, actual_key)
         return state_dict.get(actual_key, default)
 
     @staticmethod
@@ -318,9 +319,11 @@ class ProcessWeights:
         wq_tensor = state_dict[W_Q_key]
         wk_tensor = state_dict[W_K_key]
         wv_tensor = state_dict[W_V_key]
-        bq_tensor = None
-        bk_tensor = None
-        bv_tensor = None
+        bq_tensor = state_dict.get(b_Q_key, None)
+        bk_tensor = state_dict.get(b_K_key, None)
+        bv_tensor = state_dict.get(b_V_key, None)
+        ln1_b = state_dict.get(ln1_b_key, None)
+        ln1_w = state_dict.get(ln1_w_key, None)
         if adapter and uses_hf_format and (not uses_tl_format):
             wq_tensor = ProcessWeights.convert_tensor_to_tl_format(
                 f"blocks.{layer}.attn.W_Q", adapter, state_dict, cfg, layer
@@ -340,35 +343,6 @@ class ProcessWeights:
             bv_tensor = ProcessWeights.convert_tensor_to_tl_format(
                 f"blocks.{layer}.attn.b_V", adapter, state_dict, cfg, layer
             )
-        else:
-            wq_tensor = ProcessWeights._safe_get_tensor(
-                state_dict, f"blocks.{layer}.attn.W_Q", adapter=None
-            )
-            wk_tensor = ProcessWeights._safe_get_tensor(
-                state_dict, f"blocks.{layer}.attn.W_K", adapter=None
-            )
-            wv_tensor = ProcessWeights._safe_get_tensor(
-                state_dict, f"blocks.{layer}.attn.W_V", adapter=None
-            )
-            bq_tensor = ProcessWeights._safe_get_tensor(
-                state_dict, f"blocks.{layer}.attn.b_Q", adapter=None
-            )
-            bk_tensor = ProcessWeights._safe_get_tensor(
-                state_dict, f"blocks.{layer}.attn.b_K", adapter=None
-            )
-            bv_tensor = ProcessWeights._safe_get_tensor(
-                state_dict, f"blocks.{layer}.attn.b_V", adapter=None
-            )
-        if uses_tl_format:
-            ln1_b = ProcessWeights._safe_get_tensor(
-                state_dict, f"blocks.{layer}.ln1.b", adapter=None
-            )
-            ln1_w = ProcessWeights._safe_get_tensor(
-                state_dict, f"blocks.{layer}.ln1.w", adapter=None
-            )
-        else:
-            ln1_b = state_dict.get(ln1_b_key, None)
-            ln1_w = state_dict.get(ln1_w_key, None)
         return {
             "wq": wq_tensor,
             "wk": wk_tensor,
@@ -643,13 +617,13 @@ class ProcessWeights:
         if adapter:
             # Pass TL-format keys to convert_tensor_to_hf_format, not HF-format keys
             converted_wq = ProcessWeights.convert_tensor_to_hf_format(
-                wq_tensor, f"blocks.{layer}.attn.W_Q", adapter, cfg, layer
+                wq_tensor, f"blocks.{layer}.attn.q.weight", adapter, cfg, layer
             )
             converted_wk = ProcessWeights.convert_tensor_to_hf_format(
-                wk_tensor, f"blocks.{layer}.attn.W_K", adapter, cfg, layer
+                wk_tensor, f"blocks.{layer}.attn.k.weight", adapter, cfg, layer
             )
             converted_wv = ProcessWeights.convert_tensor_to_hf_format(
-                wv_tensor, f"blocks.{layer}.attn.W_V", adapter, cfg, layer
+                wv_tensor, f"blocks.{layer}.attn.v.weight", adapter, cfg, layer
                 )
             if converted_wq is None or converted_wk is None or converted_wv is None:
                 raise ValueError(f"Required attention weights missing for layer {layer}")
@@ -657,17 +631,17 @@ class ProcessWeights:
             state_dict[wk_key] = converted_wk
             state_dict[wv_key] = converted_wv
             converted_bq = ProcessWeights.convert_tensor_to_hf_format(
-                bq_tensor, f"blocks.{layer}.attn.b_Q", adapter, cfg, layer
+                bq_tensor, f"blocks.{layer}.attn.q.bias", adapter, cfg, layer
             )
             if converted_bq is not None:
                 state_dict[bq_key] = converted_bq
             converted_bk = ProcessWeights.convert_tensor_to_hf_format(
-                bk_tensor, f"blocks.{layer}.attn.b_K", adapter, cfg, layer
+                bk_tensor, f"blocks.{layer}.attn.k.bias", adapter, cfg, layer
             )
             if converted_bk is not None:
                 state_dict[bk_key] = converted_bk
             converted_bv = ProcessWeights.convert_tensor_to_hf_format(
-                bv_tensor, f"blocks.{layer}.attn.b_V", adapter, cfg, layer
+                bv_tensor, f"blocks.{layer}.attn.v.bias", adapter, cfg, layer
             )
             if converted_bv is not None:
                 state_dict[bv_key] = converted_bv
@@ -809,7 +783,8 @@ class ProcessWeights:
         fold_biases: bool = True,
         center_weights: bool = True,
         adapter=None,
-    ) -> Dict[str, torch.Tensor]:
+        final_state_dict: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Fold Layer Norm. Can also be used to fold RMS Norm, when fold_biases and center_weights are set to False.
 
         Takes in a state dict from a pretrained model, formatted to be consistent with
@@ -822,10 +797,15 @@ class ProcessWeights:
             fold_biases (bool): Enables folding of LN biases. Should be disabled when RMS Norm is used.
             center_weights (bool): Enables the centering of weights after folding in LN. Should be disabled when RMS Norm is used.
             adapter: Optional architecture adapter for parameter key translation.
+            final_state_dict: Optional dict to accumulate processed weights (for TransformerBridge).
 
         Returns:
-            Dict[str, torch.Tensor]: Modified state dict with LayerNorm folded into linear layers.
+            Tuple of (state_dict, final_state_dict): Modified state dict with LayerNorm folded,
+                and final_state_dict with all processed weights accumulated.
         """
+        if final_state_dict is None:
+            final_state_dict = {}
+
         gqa = "" if getattr(cfg, "n_key_value_heads", None) is None else "_"
         for l in range(cfg.n_layers):
             ProcessWeights._fold_layer(
@@ -835,12 +815,17 @@ class ProcessWeights:
         ProcessWeights._fold_unembed_layer_norm(
             state_dict, cfg, fold_biases, center_weights, adapter
         )
-        return state_dict
+        # Update final_state_dict with all modified weights
+        final_state_dict.update(state_dict)
+        return state_dict, final_state_dict
 
     @staticmethod
     def center_writing_weights(
-        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
-    ) -> Dict[str, torch.Tensor]:
+        state_dict: Dict[str, torch.Tensor],
+        cfg,
+        adapter=None,
+        final_state_dict: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Center Writing Weights.
 
         Centers the weights of the model that write to the residual stream - W_out, W_E, W_pos and
@@ -851,10 +836,15 @@ class ProcessWeights:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
             cfg: Model configuration object.
             adapter: Optional architecture adapter for parameter key translation.
+            final_state_dict: Optional dict to accumulate processed weights (for TransformerBridge).
 
         Returns:
-            Dict[str, torch.Tensor]: Modified state dict with centered writing weights.
+            Tuple of (state_dict, final_state_dict): Modified state dict with centered writing weights,
+                and final_state_dict with all processed weights accumulated.
         """
+        if final_state_dict is None:
+            final_state_dict = {}
+
         embed_W_E_key = ProcessWeights._get_param_key("embed.W_E", adapter)
         try:
             pos_embed_W_pos_key = (
@@ -954,12 +944,16 @@ class ProcessWeights:
                         state_dict[mlp_b_out_key] = (
                             state_dict[mlp_b_out_key] - state_dict[mlp_b_out_key].mean()
                         )
-        return state_dict
+        # Update final_state_dict with all modified weights
+        final_state_dict.update(state_dict)
+        return state_dict, final_state_dict
 
     @staticmethod
     def center_unembed(
-        state_dict: Dict[str, torch.Tensor], adapter=None
-    ) -> Dict[str, torch.Tensor]:
+        state_dict: Dict[str, torch.Tensor],
+        adapter=None,
+        final_state_dict: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Center the unembedding weights W_U.
 
         This is done by subtracting the mean of the weights from the weights themselves. This is
@@ -971,10 +965,14 @@ class ProcessWeights:
         Args:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
             adapter: Optional architecture adapter for parameter key translation.
+            final_state_dict: Optional dict to accumulate processed weights (for TransformerBridge).
 
         Returns:
-            Dict[str, torch.Tensor]: Modified state dict with centered unembedding weights.
+            Tuple of (state_dict, final_state_dict): Modified state dict with centered unembedding weights,
+                and final_state_dict with all processed weights accumulated.
         """
+        if final_state_dict is None:
+            final_state_dict = {}
         uses_tl_format, uses_hf_format = ProcessWeights._detect_unembed_format(state_dict, adapter)
         unembed_W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
         unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
@@ -991,12 +989,17 @@ class ProcessWeights:
             state_dict[unembed_b_U_key] = (
                 state_dict[unembed_b_U_key] - state_dict[unembed_b_U_key].mean()
             )
-        return state_dict
+        # Update final_state_dict with all modified weights
+        final_state_dict.update(state_dict)
+        return state_dict, final_state_dict
 
     @staticmethod
     def fold_value_biases(
-        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
-    ) -> Dict[str, torch.Tensor]:
+        state_dict: Dict[str, torch.Tensor],
+        cfg,
+        adapter=None,
+        final_state_dict: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Fold the value biases into the output bias.
 
         Because attention patterns add up to 1, the value biases always have a constant effect on a
@@ -1112,7 +1115,11 @@ class ProcessWeights:
                 else:
                     raise ValueError(f"Unexpected tensor shapes: b_V {b_V.shape}, W_O {W_O.shape}")
                 state_dict[b_O_key] = folded_b_O
-        return state_dict
+        # Update final_state_dict with all modified weights
+        if final_state_dict is None:
+            final_state_dict = {}
+        final_state_dict.update(state_dict)
+        return state_dict, final_state_dict
 
     @staticmethod
     def process_weights(
@@ -1143,26 +1150,37 @@ class ProcessWeights:
         Returns:
             Dict[str, torch.Tensor]: Fully processed state dict.
         """
+        # final_state_dict accumulates all processed weights
+        # When adapter is None (HookedTransformer), we start with empty dict and build it up
+        # When adapter exists (TransformerBridge), we start with the input state_dict
+        final_state_dict = {} if adapter is None else state_dict
+
         if fold_ln:
             if getattr(cfg, "num_experts", None) and cfg.num_experts > 1:
                 pass
             elif getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"]:
-                state_dict = ProcessWeights.fold_layer_norm(
-                    state_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter
+                state_dict, final_state_dict = ProcessWeights.fold_layer_norm(
+                    state_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter, final_state_dict=final_state_dict
                 )
             elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
-                state_dict = ProcessWeights.fold_layer_norm(
-                    state_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
+                state_dict, final_state_dict = ProcessWeights.fold_layer_norm(
+                    state_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter, final_state_dict=final_state_dict
                 )
         if center_writing_weights:
             if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and (
                 not getattr(cfg, "final_rms", False)
             ):
-                state_dict = ProcessWeights.center_writing_weights(state_dict, cfg, adapter=adapter)
+                state_dict, final_state_dict = ProcessWeights.center_writing_weights(
+                    state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict
+                )
         if center_unembed:
-            state_dict = ProcessWeights.center_unembed(state_dict, adapter=adapter)
+            state_dict, final_state_dict = ProcessWeights.center_unembed(
+                state_dict, adapter=adapter, final_state_dict=final_state_dict
+            )
         if fold_value_biases:
-            state_dict = ProcessWeights.fold_value_biases(state_dict, cfg, adapter=adapter)
+            state_dict, final_state_dict = ProcessWeights.fold_value_biases(
+                state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict
+            )
             if center_writing_weights and getattr(cfg, "normalization_type", "LN") in [
                 "LN",
                 "LNPre",
@@ -1183,16 +1201,20 @@ class ProcessWeights:
                     if b_O_key in state_dict:
                         b_O = state_dict[b_O_key]
                         state_dict[b_O_key] = b_O - b_O.mean()
+                        final_state_dict[b_O_key] = b_O - b_O.mean()
         if refactor_factored_attn_matrices:
-            state_dict = ProcessWeights.refactor_factored_attn_matrices(
-                state_dict, cfg, adapter=adapter
+            state_dict, final_state_dict = ProcessWeights.refactor_factored_attn_matrices(
+                state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict
             )
-        return state_dict
+        return final_state_dict
 
     @staticmethod
     def refactor_factored_attn_matrices(
-        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
-    ) -> Dict[str, torch.Tensor]:
+        state_dict: Dict[str, torch.Tensor],
+        cfg,
+        adapter=None,
+        final_state_dict: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Experimental method for managing queries, keys and values.
 
         As argued in [A Mathematical Framework for Transformer
@@ -1311,7 +1333,11 @@ class ProcessWeights:
             state_dict[W_V_key] = U @ S.diag_embed()
             state_dict[W_O_key] = utils.transpose(Vh)
 
-        return state_dict
+        # Update final_state_dict with all modified weights
+        if final_state_dict is None:
+            final_state_dict = {}
+        final_state_dict.update(state_dict)
+        return state_dict, final_state_dict
 
     @staticmethod
     @staticmethod
@@ -1488,33 +1514,6 @@ class ProcessWeights:
                 print(f"  {key}: {state_dict[key].shape}")
             print(f"{'='*80}\n")
 
-        # Remove TL-format alias keys (ln1, ln2, q, k, v, mlp.in, mlp.out) that are duplicates of HF keys
-        # The weight processing creates these aliases for compatibility, but we only want HF format keys
-        # for distribute_weights_to_components since real_components uses HF remote_keys
-        keys_to_skip = set()
-        for key in list(state_dict.keys()):
-            # Check if this is a TL-format alias that has an HF-format equivalent
-            if '.ln1.' in key or '.ln2.' in key:
-                hf_key = key.replace('.ln1.', '.ln_1.').replace('.ln2.', '.ln_2.')
-                if hf_key in state_dict and hf_key != key:
-                    keys_to_skip.add(key)  # Skip the TL alias, keep the HF version
-            elif '.attn.q.' in key or '.attn.k.' in key or '.attn.v.' in key or '.mlp.in.' in key or '.mlp.out.' in key:
-                # These are processed TL-format keys that don't have direct HF equivalents
-                # But they're derived from c_attn/c_fc/c_proj which are still in the state dict
-                # Skip them since the manual block will load c_attn/c_fc/c_proj
-                keys_to_skip.add(key)
-
-        # Filter state_dict to remove aliases
-        filtered_state_dict = {k: v for k, v in state_dict.items() if k not in keys_to_skip}
-
-        if verbose and keys_to_skip:
-            print(f"Skipping {len(keys_to_skip)} TL-format alias keys:")
-            for key in sorted(list(keys_to_skip))[:20]:
-                print(f"  {key}")
-            print(f"Using {len(filtered_state_dict)} HF-format keys\n")
-
-        state_dict = filtered_state_dict
-
         for component_name, component_tuple in component_mapping.items():
             # component_mapping is real_components format: (remote_path, instance)
             # instance can be either a single component or a list of components
@@ -1534,7 +1533,7 @@ class ProcessWeights:
             if is_list:
                 # This is a list component like "blocks"
                 # Extract all weights that start with this prefix
-                all_list_weights = filter_dict_by_prefix(state_dict, remote_key)
+                all_list_weights = filter_dict_by_prefix(state_dict, component_name)
 
                 if verbose:
                     print(f"  Found {len(all_list_weights)} weights for list component")
@@ -1554,7 +1553,7 @@ class ProcessWeights:
                     instance.set_processed_weights(indexed_weights, verbose=verbose)
             else:
                 # This is a single component (not a list)
-                component_weights = filter_dict_by_prefix(state_dict, remote_key)
+                component_weights = filter_dict_by_prefix(state_dict, component_name)
 
                 if verbose:
                     print(f"  Found {len(component_weights)} weights for single component")
