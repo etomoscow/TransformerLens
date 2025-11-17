@@ -22,28 +22,6 @@ class Conv1DBridge(GeneralizedComponent):
     (transpose of nn.Linear which is [out_features, in_features]).
     """
 
-    @property
-    def weight(self) -> torch.Tensor:
-        """Get the weight tensor from the original Conv1D component.
-
-        Returns:
-            Weight tensor in Conv1D format [in_features, out_features]
-        """
-        if self.original_component is None:
-            raise RuntimeError(f"Original component not set for {self.name}")
-        return self.original_component.weight
-
-    @property
-    def bias(self) -> Optional[torch.Tensor]:
-        """Get the bias tensor from the original Conv1D component.
-
-        Returns:
-            Bias tensor [out_features] or None if no bias
-        """
-        if self.original_component is None:
-            raise RuntimeError(f"Original component not set for {self.name}")
-        return getattr(self.original_component, 'bias', None)
-
     def forward(self, input: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         """Forward pass through the Conv1D layer with hooks.
 
