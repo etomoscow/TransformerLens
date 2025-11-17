@@ -975,17 +975,6 @@ class TransformerBridge(nn.Module):
                 if verbose:
                     print(f"    Warning: Could not load {tb_key}: {e}")
                 missing_count += 1
-        if verbose:
-            print(f"    Loaded {loaded_count} weights into Bridge components")
-            print(f"    Skipped {missing_count} keys")
-            print(f"    Processed state_dict has {len(state_dict)} keys")
-        is_gemma_model = getattr(self.cfg, "architecture", None) in [
-            "GemmaForCausalLM",
-            "Gemma2ForCausalLM",
-        ] or getattr(self.cfg, "original_architecture", None) in [
-            "GemmaForCausalLM",
-            "Gemma2ForCausalLM",
-        ]
 
     def _load_all_processed_weights(
         self, verbose: bool = False, processed_state_dict: Optional[Dict[str, torch.Tensor]] = None
