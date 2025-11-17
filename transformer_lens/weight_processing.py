@@ -1491,32 +1491,8 @@ class ProcessWeights:
                 print(f"  {key}: {state_dict[key].shape}")
             print(f"{'='*80}\n")
 
-        # Remove TL-format alias keys (ln1, ln2, q, k, v, mlp.in, mlp.out) that are duplicates of HF keys
-        # The weight processing creates these aliases for compatibility, but we only want HF format keys
-        # for distribute_weights_to_components since real_components uses HF remote_keys
-        keys_to_skip = set()
-        for key in list(state_dict.keys()):
-            # Check if this is a TL-format alias that has an HF-format equivalent
-            if '.ln1.' in key or '.ln2.' in key:
-                hf_key = key.replace('.ln1.', '.ln_1.').replace('.ln2.', '.ln_2.')
-                if hf_key in state_dict and hf_key != key:
-                    keys_to_skip.add(key)  # Skip the TL alias, keep the HF version
-            elif '.attn.q.' in key or '.attn.k.' in key or '.attn.v.' in key or '.mlp.in.' in key or '.mlp.out.' in key:
-                # These are processed TL-format keys that don't have direct HF equivalents
-                # But they're derived from c_attn/c_fc/c_proj which are still in the state dict
-                # Skip them since the manual block will load c_attn/c_fc/c_proj
-                keys_to_skip.add(key)
-
-        # Filter state_dict to remove aliases
-        filtered_state_dict = {k: v for k, v in state_dict.items() if k not in keys_to_skip}
-
-        if verbose and keys_to_skip:
-            print(f"Skipping {len(keys_to_skip)} TL-format alias keys:")
-            for key in sorted(list(keys_to_skip))[:20]:
-                print(f"  {key}")
-            print(f"Using {len(filtered_state_dict)} HF-format keys\n")
-
-        state_dict = filtered_state_dict
+        # No filtering needed - just distribute whatever weights are in the state_dict
+        # The caller is responsible for providing the correct weights
 
         for component_name, component_tuple in component_mapping.items():
             # component_mapping is real_components format: (remote_path, instance)
