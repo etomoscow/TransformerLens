@@ -113,10 +113,14 @@ class Conv1DBridge(GeneralizedComponent):
         # Conv1D stores weights in [in, out] format (no transpose needed)
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
+                new_weight = weight.contiguous()
+                self._validate_weight_shape(name, new_weight, param)
                 if verbose:
-                    print(f"    Setting param '{name}' with shape {weight.contiguous().shape}")
-                param.data = weight.contiguous()
+                    print(f"    Setting param '{name}' with shape {new_weight.shape}")
+                param.data = new_weight
             elif "bias" in name.lower() and bias is not None:
+                new_bias = bias.contiguous()
+                self._validate_weight_shape(name, new_bias, param)
                 if verbose:
-                    print(f"    Setting param '{name}' with shape {bias.contiguous().shape}")
-                param.data = bias.contiguous()
+                    print(f"    Setting param '{name}' with shape {new_bias.shape}")
+                param.data = new_bias

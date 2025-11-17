@@ -172,6 +172,32 @@ class GeneralizedComponent(nn.Module):
                 f"Hook name '{hook_name}' not supported. Supported names are 'output' and 'input'."
             )
 
+    def _validate_weight_shape(
+        self,
+        param_name: str,
+        new_weight: torch.Tensor,
+        original_param: torch.nn.Parameter
+    ) -> None:
+        """Validate that a new weight tensor matches the original parameter's shape.
+
+        Args:
+            param_name: Name of the parameter being set
+            new_weight: The new weight tensor to validate
+            original_param: The original parameter to compare against
+
+        Raises:
+            ValueError: If shapes don't match, with detailed error message
+        """
+        if new_weight.shape != original_param.shape:
+            component_info = f"{self.__class__.__name__} (name={getattr(self, 'name', 'unknown')})"
+            raise ValueError(
+                f"Shape mismatch when loading processed weights into {component_info}:\n"
+                f"  Parameter: {param_name}\n"
+                f"  Original shape: {original_param.shape}\n"
+                f"  New weight shape: {new_weight.shape}\n"
+                f"  Component type: {type(self.original_component).__name__ if self.original_component else 'None'}"
+            )
+
     def set_processed_weights(self, weights: Dict[str, torch.Tensor], verbose: bool = False) -> None:
         """Set the processed weights for use in compatibility mode.
 
@@ -202,6 +228,8 @@ class GeneralizedComponent(nn.Module):
                     if hasattr(self.original_component, key):
                         param = getattr(self.original_component, key)
                         if param is not None and isinstance(param, torch.nn.Parameter):
+                            # Validate shape before setting
+                            self._validate_weight_shape(key, weight_tensor, param)
                             # Update existing parameter's data
                             if verbose:
                                 print(f"    Setting weight: {key} (shape: {weight_tensor.shape})")

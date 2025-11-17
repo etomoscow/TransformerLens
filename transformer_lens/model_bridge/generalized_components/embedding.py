@@ -118,7 +118,6 @@ class EmbeddingBridge(GeneralizedComponent):
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
 
-        print("weights", weights.keys())
         weight = weights.get("weight")
         if weight is None:
             raise ValueError("Processed weights for EmbeddingBridge must include 'weight'.")
@@ -132,6 +131,8 @@ class EmbeddingBridge(GeneralizedComponent):
         # Set the weight directly into the original component's parameters
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
+                new_weight = weight.contiguous()
+                self._validate_weight_shape(name, new_weight, param)
                 if verbose:
-                    print(f"    Setting param '{name}' with shape {weight.contiguous().shape}")
-                param.data = weight.contiguous()
+                    print(f"    Setting param '{name}' with shape {new_weight.shape}")
+                param.data = new_weight
