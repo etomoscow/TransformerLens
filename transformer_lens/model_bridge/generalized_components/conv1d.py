@@ -56,7 +56,7 @@ class Conv1DBridge(GeneralizedComponent):
         else:
             return f"Conv1DBridge(name={self.name}, original_component=None)"
 
-    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
+    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None], verbose: bool = False) -> None:
         """Set the processed weights by loading them into the original component.
 
         This loads the processed weights directly into the original_component's parameters,
@@ -73,13 +73,23 @@ class Conv1DBridge(GeneralizedComponent):
                 - bias: The processed bias tensor (optional). Can be:
                     - 1D [out] format
                     - 2D [n_heads, d_head] format (will be flattened to 1D)
+            verbose: If True, print detailed information about weight setting
         """
+        if verbose:
+            print(f"\n  set_processed_weights: Conv1DBridge (name={self.name})")
+            print(f"    Received {len(weights)} weight keys")
+
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
         weight = weights.get("weight")
         if weight is None:
             raise ValueError("Processed weights for Conv1DBridge must include 'weight'.")
         bias = weights.get("bias")
+
+        if verbose:
+            print(f"    Found weight key with shape: {weight.shape}")
+            if bias is not None:
+                print(f"    Found bias key with shape: {bias.shape}")
 
         # Handle 3D weights by flattening to 2D
         if weight.ndim == 3:
@@ -103,6 +113,10 @@ class Conv1DBridge(GeneralizedComponent):
         # Conv1D stores weights in [in, out] format (no transpose needed)
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
+                if verbose:
+                    print(f"    Setting param '{name}' with shape {weight.contiguous().shape}")
                 param.data = weight.contiguous()
             elif "bias" in name.lower() and bias is not None:
+                if verbose:
+                    print(f"    Setting param '{name}' with shape {bias.contiguous().shape}")
                 param.data = bias.contiguous()

@@ -54,7 +54,7 @@ class LinearBridge(GeneralizedComponent):
         else:
             return f"LinearBridge(name={self.name}, original_component=None)"
 
-    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
+    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None], verbose: bool = False) -> None:
         """Set the processed weights by loading them into the original component.
 
         This loads the processed weights directly into the original_component's parameters,
@@ -71,13 +71,23 @@ class LinearBridge(GeneralizedComponent):
                 - bias: The processed bias tensor (optional). Can be:
                     - 1D [out] format
                     - 2D [n_heads, d_head] format (will be flattened to 1D)
+            verbose: If True, print detailed information about weight setting
         """
+        if verbose:
+            print(f"\n  set_processed_weights: LinearBridge (name={self.name})")
+            print(f"    Received {len(weights)} weight keys")
+
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
         weight = weights.get("weight")
         if weight is None:
             raise ValueError("Processed weights for LinearBridge must include 'weight'.")
         bias = weights.get("bias")
+
+        if verbose:
+            print(f"    Found weight key with shape: {weight.shape}")
+            if bias is not None:
+                print(f"    Found bias key with shape: {bias.shape}")
 
         # Handle 3D weights by flattening to 2D
         if weight.ndim == 3:
@@ -101,6 +111,10 @@ class LinearBridge(GeneralizedComponent):
         # nn.Linear stores weights in [out, in] format (transpose of input [in, out])
         for name, param in self.original_component.named_parameters():
             if "weight" in name.lower():
+                if verbose:
+                    print(f"    Setting param '{name}' with shape {weight.T.contiguous().shape}")
                 param.data = weight.T.contiguous()
             elif "bias" in name.lower() and bias is not None:
+                if verbose:
+                    print(f"    Setting param '{name}' with shape {bias.contiguous().shape}")
                 param.data = bias.contiguous()

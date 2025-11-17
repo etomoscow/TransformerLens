@@ -104,7 +104,7 @@ class UnembeddingBridge(GeneralizedComponent):
             vocab_size: int = int(weight.shape[0])
             return torch.zeros(vocab_size, device=device, dtype=dtype)
 
-    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
+    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None], verbose: bool = False) -> None:
         """Set the processed weights by loading them into the original component.
 
         This loads the processed weights directly into the original_component's parameters,
@@ -117,7 +117,12 @@ class UnembeddingBridge(GeneralizedComponent):
             weights: Dictionary containing:
                 - "weight": The processed W_U tensor in TL format [d_model, d_vocab]
                 - "bias": The processed b_U tensor (optional) [d_vocab]
+            verbose: If True, print detailed information about weight setting
         """
+        if verbose:
+            print(f"\n  set_processed_weights: UnembeddingBridge (name={getattr(self, 'name', 'unknown')})")
+            print(f"    Received {len(weights)} weight keys")
+
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
 
@@ -126,6 +131,11 @@ class UnembeddingBridge(GeneralizedComponent):
             raise ValueError("Processed weights for UnembeddingBridge must include 'weight'.")
 
         bias = weights.get("bias")
+
+        if verbose:
+            print(f"    Found weight key with shape: {weight.shape}")
+            if bias is not None:
+                print(f"    Found bias key with shape: {bias.shape}")
 
         # Register processed weights as parameters (for backward compatibility)
         self.register_parameter("_processed_W_U", torch.nn.Parameter(weight))

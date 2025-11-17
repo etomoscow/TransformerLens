@@ -332,7 +332,7 @@ class AttentionBridge(GeneralizedComponent):
             output = self.hook_out(output)
         return output
 
-    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
+    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None], verbose: bool = False) -> None:
         """Set the processed weights by delegating to LinearBridge submodules.
 
         This method uses the base class's recursive distribution mechanism to
@@ -342,14 +342,19 @@ class AttentionBridge(GeneralizedComponent):
             weights: Dictionary containing processed weight tensors. The base class
                      will filter by the remote component names (e.g., "q_proj") and
                      distribute to the corresponding subcomponents.
+            verbose: If True, print detailed information about weight setting
         """
+        if verbose:
+            print(f"\n  set_processed_weights: AttentionBridge (name={getattr(self, 'name', 'unknown')})")
+            print(f"    Received {len(weights)} weight keys")
+
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
 
         if "W_Q" in weights.keys():
             #legacy call that will go away
             return
-        super().set_processed_weights(weights)
+        super().set_processed_weights(weights, verbose=verbose)
 
     @property
     def W_Q(self) -> torch.Tensor:

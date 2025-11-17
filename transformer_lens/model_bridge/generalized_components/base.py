@@ -172,7 +172,7 @@ class GeneralizedComponent(nn.Module):
                 f"Hook name '{hook_name}' not supported. Supported names are 'output' and 'input'."
             )
 
-    def set_processed_weights(self, weights: Dict[str, torch.Tensor]) -> None:
+    def set_processed_weights(self, weights: Dict[str, torch.Tensor], verbose: bool = False) -> None:
         """Set the processed weights for use in compatibility mode.
 
         This method stores processed weights as attributes on the component so they can be
@@ -186,7 +186,12 @@ class GeneralizedComponent(nn.Module):
 
         Args:
             weights: Dictionary of processed weight tensors
+            verbose: If True, print detailed information about weight setting
         """
+        if verbose:
+            print(f"\n  set_processed_weights: {self.__class__.__name__} (name={getattr(self, 'name', 'unknown')})")
+            print(f"    Received {len(weights)} weight keys")
+
         # First, handle single-part keys (keys without ".") by setting them as parameters
         # on the original component
         if self.original_component is not None:
@@ -198,15 +203,21 @@ class GeneralizedComponent(nn.Module):
                         param = getattr(self.original_component, key)
                         if param is not None and isinstance(param, torch.nn.Parameter):
                             # Update existing parameter's data
+                            if verbose:
+                                print(f"    Setting weight: {key} (shape: {weight_tensor.shape})")
                             param.data = weight_tensor
 
         # If this component has submodules, distribute weights to them
         if self.real_components:
             from transformer_lens.weight_processing import ProcessWeights
 
+            if verbose:
+                print(f"    Has {len(self.real_components)} subcomponents, distributing weights...")
+
             ProcessWeights.distribute_weights_to_components(
                 state_dict=weights,
                 component_mapping=self.real_components,
+                verbose=verbose,
             )
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:

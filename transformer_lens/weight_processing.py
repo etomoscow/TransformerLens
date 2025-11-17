@@ -1455,6 +1455,7 @@ class ProcessWeights:
     def distribute_weights_to_components(
         state_dict: Dict[str, torch.Tensor],
         component_mapping: Dict[str, Any],
+        verbose: bool = False,
     ) -> None:
         """Distribute processed weights from state_dict to generalized components.
 
@@ -1468,6 +1469,7 @@ class ProcessWeights:
             component_mapping: Dictionary (real_components) mapping TL keys to tuples of
                 (remote_path, component_instance), where component_instance can be either
                 a single component or a list of components
+            verbose: If True, print detailed information about weight distribution
 
         Example:
             For a real_components mapping like:
@@ -1485,6 +1487,13 @@ class ProcessWeights:
         """
         from transformer_lens.utilities import filter_dict_by_prefix
 
+        if verbose:
+            print(f"\n{'='*80}")
+            print(f"distribute_weights_to_components: Starting weight distribution")
+            print(f"State dict has {len(state_dict)} keys")
+            print(f"Component mapping has {len(component_mapping)} components")
+            print(f"{'='*80}\n")
+
         for component_name, component_tuple in component_mapping.items():
             # component_mapping is real_components format: (remote_path, instance)
             # instance can be either a single component or a list of components
@@ -1496,18 +1505,39 @@ class ProcessWeights:
             remote_key, component = component_tuple
             is_list = isinstance(component, list)
 
+            if verbose:
+                print(f"\nProcessing component: {component_name}")
+                print(f"  Remote key: {remote_key}")
+                print(f"  Is list: {is_list}")
+
             if is_list:
                 # This is a list component like "blocks"
                 # Extract all weights that start with this prefix
                 all_list_weights = filter_dict_by_prefix(state_dict, remote_key)
+
+                if verbose:
+                    print(f"  Found {len(all_list_weights)} weights for list component")
+                    print(f"  List has {len(component)} instances")
 
                 # Component is a list of actual instances
                 for i, instance in enumerate(component):
                     # Extract weights for this specific index
                     # This will get keys like "0.attn.W_Q" and strip the "0." to get "attn.W_Q"
                     indexed_weights = filter_dict_by_prefix(all_list_weights, str(i))
-                    instance.set_processed_weights(indexed_weights)
+
+                    if verbose:
+                        print(f"    Instance {i}: Found {len(indexed_weights)} weights")
+                        for key in indexed_weights.keys():
+                            print(f"      - {key}")
+
+                    instance.set_processed_weights(indexed_weights, verbose=verbose)
             else:
                 # This is a single component (not a list)
                 component_weights = filter_dict_by_prefix(state_dict, remote_key)
-                component.set_processed_weights(component_weights)
+
+                if verbose:
+                    print(f"  Found {len(component_weights)} weights for single component")
+                    for key in component_weights.keys():
+                        print(f"    - {key}")
+
+                component.set_processed_weights(component_weights, verbose=verbose)

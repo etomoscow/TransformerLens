@@ -124,7 +124,7 @@ class GatedMLPBridge(MLPBridge):
         output = self.hook_out(output)
         return output
 
-    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None]) -> None:
+    def set_processed_weights(self, weights: Mapping[str, torch.Tensor | None], verbose: bool = False) -> None:
         """Set the processed weights to use when layer norm is folded.
 
         Args:
@@ -134,15 +134,26 @@ class GatedMLPBridge(MLPBridge):
             b_gate: The processed MLP gate bias tensor (optional)
             b_in: The processed MLP input bias tensor (optional)
             b_out: The processed MLP output bias tensor (optional)
+            verbose: If True, print detailed information about weight setting
         """
-        super().set_processed_weights(weights)
+        if verbose:
+            print(f"\n  set_processed_weights: GatedMLPBridge (name={getattr(self, 'name', 'unknown')})")
+            print(f"    Received {len(weights)} weight keys")
+
+        super().set_processed_weights(weights, verbose=verbose)
         W_gate = weights.get("gate.weight")
         if W_gate is None:
             return
         b_gate = weights.get("gate.bias")
+
+        if verbose:
+            print(f"    Setting W_gate with shape: {W_gate.shape}")
+            if b_gate is not None:
+                print(f"    Setting b_gate with shape: {b_gate.shape}")
+
         gate_module = getattr(self, "gate", None)
         self._use_processed_weights = True
         self._processed_W_gate = W_gate
         self._processed_b_gate = b_gate
         if gate_module and hasattr(gate_module, "set_processed_weights"):
-            gate_module.set_processed_weights({"weight": W_gate, "bias": b_gate})
+            gate_module.set_processed_weights({"weight": W_gate, "bias": b_gate}, verbose=verbose)
