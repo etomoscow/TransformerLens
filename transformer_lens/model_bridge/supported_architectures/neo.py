@@ -17,10 +17,6 @@ from transformer_lens.model_bridge.generalized_components import (
     PosEmbedBridge,
     UnembeddingBridge,
 )
-from transformer_lens.model_bridge.generalized_components.gpt_neo_block import (
-    GPTNeoBlockBridge,
-)
-
 
 class NeoArchitectureAdapter(ArchitectureAdapter):
     """Architecture adapter for Neo models."""
@@ -45,19 +41,19 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
                 "blocks.{i}.ln1.w": "transformer.h.{i}.ln_1.weight",
                 "blocks.{i}.ln1.b": "transformer.h.{i}.ln_1.bias",
                 # Property access keys (used by component tree)
-                "blocks.{i}.attn.q": (
+                "blocks.{i}.attn.q.weight": (
                     "transformer.h.{i}.attn.attention.q_proj.weight",
                     RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
                 ),
-                "blocks.{i}.attn.k": (
+                "blocks.{i}.attn.k.weight": (
                     "transformer.h.{i}.attn.attention.k_proj.weight",
                     RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
                 ),
-                "blocks.{i}.attn.v": (
+                "blocks.{i}.attn.v.weight": (
                     "transformer.h.{i}.attn.attention.v_proj.weight",
                     RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
                 ),
-                "blocks.{i}.attn.o": (
+                "blocks.{i}.attn.o.weight": (
                     "transformer.h.{i}.attn.attention.out_proj.weight",
                     RearrangeHookConversion("m (n h) -> n h m", n=self.cfg.n_heads),
                 ),
