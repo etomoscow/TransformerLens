@@ -41,6 +41,9 @@ class ProcessWeights:
         Returns:
             The component-based key (e.g., "blocks.0.attn.q.weight")
         """
+        if not adapter:
+            return tl_key
+        
         component_path, param_attr = ProcessWeights._prepare_component_path(tl_key)
         if param_attr:
             return f"{component_path}.{param_attr}"
@@ -399,6 +402,7 @@ class ProcessWeights:
         center_weights: bool,
         adapter,
         gqa: str,
+        final_state_dict: Dict[str, torch.Tensor],
     ) -> None:
         """Fold LayerNorm for a single layer.
 
@@ -410,6 +414,7 @@ class ProcessWeights:
             center_weights: Whether to center weights after folding
             adapter: Optional architecture adapter for parameter key translation
             gqa: GQA prefix string (empty or "_")
+            final_state_dict: Dict to accumulate processed weights
         """
         layer = layer_idx
         tensors = ProcessWeights.extract_attention_tensors_for_folding(
@@ -450,6 +455,7 @@ class ProcessWeights:
                     )
                 if keys["ln1_b"] in state_dict:
                     state_dict[keys["ln1_b"]] = torch.zeros_like(ln1_b)
+                    final_state_dict[keys["ln1_b"]] = torch.zeros_like(ln1_b)
                 alternate_b_key = (
                     keys["ln1_b"].replace("ln_1", "ln1")
                     if "ln_1" in keys["ln1_b"]
@@ -457,12 +463,14 @@ class ProcessWeights:
                 )
                 if alternate_b_key != keys["ln1_b"] and alternate_b_key in state_dict:
                     state_dict[alternate_b_key] = torch.zeros_like(ln1_b)
+                    final_state_dict[alternate_b_key] = torch.zeros_like(ln1_b)
             if wk_tensor is not None and wv_tensor is not None:
                 wq_tensor, wk_tensor, wv_tensor = ProcessWeights.fold_layer_norm_weights(
                     wq_tensor, wk_tensor, wv_tensor, ln1_w
                 )
             if keys["ln1_w"] in state_dict:
                 state_dict[keys["ln1_w"]] = torch.ones_like(ln1_w)
+                final_state_dict[keys["ln1_w"]] = torch.ones_like(ln1_w)
             alternate_w_key = (
                 keys["ln1_w"].replace("ln_1", "ln1")
                 if "ln_1" in keys["ln1_w"]
@@ -470,6 +478,7 @@ class ProcessWeights:
             )
             if alternate_w_key != keys["ln1_w"] and alternate_w_key in state_dict:
                 state_dict[alternate_w_key] = torch.ones_like(ln1_w)
+                final_state_dict[alternate_w_key] = torch.ones_like(ln1_w)
         if center_weights and wk_tensor is not None and (wv_tensor is not None):
             wq_tensor, wk_tensor, wv_tensor = ProcessWeights.center_attention_weights(
                 wq_tensor, wk_tensor, wv_tensor
@@ -486,9 +495,10 @@ class ProcessWeights:
             adapter,
             cfg,
             layer,
+            final_state_dict,
         )
         ProcessWeights._fold_mlp_layer_norm(
-            state_dict, cfg, layer, fold_biases, center_weights, adapter
+            state_dict, cfg, layer, fold_biases, center_weights, adapter, final_state_dict
         )
 
     @staticmethod
@@ -499,6 +509,7 @@ class ProcessWeights:
         fold_biases: bool,
         center_weights: bool,
         adapter,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> None:
         """Fold LayerNorm into MLP layer.
 
@@ -553,10 +564,11 @@ class ProcessWeights:
                     f"Cannot broadcast MLP weight {mlp_W_in.shape} with layer norm weight {ln2_w.shape}"
                 )
             if fold_biases:
-                state_dict[mlp_b_in_key] = state_dict[mlp_b_in_key] + (
-                    mlp_W_in * ln2_b_broadcast
-                ).sum(sum_dim)
+                new_mlp_b_in = state_dict[mlp_b_in_key] + (mlp_W_in * ln2_b_broadcast).sum(sum_dim)
+                state_dict[mlp_b_in_key] = new_mlp_b_in
+                final_state_dict[mlp_b_in_key] = new_mlp_b_in
                 state_dict[ln2_b_key] = torch.zeros_like(ln2_b)
+                final_state_dict[ln2_b_key] = torch.zeros_like(ln2_b)
                 alternate_ln2_b_key = (
                     ln2_b_key.replace("ln_2", "ln2")
                     if "ln_2" in ln2_b_key
@@ -564,22 +576,32 @@ class ProcessWeights:
                 )
                 if alternate_ln2_b_key != ln2_b_key and alternate_ln2_b_key in state_dict:
                     state_dict[alternate_ln2_b_key] = torch.zeros_like(ln2_b)
-            state_dict[mlp_W_in_key] = mlp_W_in * ln2_w_broadcast
+                    final_state_dict[alternate_ln2_b_key] = torch.zeros_like(ln2_b)
+            new_mlp_W_in = mlp_W_in * ln2_w_broadcast
+            state_dict[mlp_W_in_key] = new_mlp_W_in
+            final_state_dict[mlp_W_in_key] = new_mlp_W_in
             if getattr(cfg, "gated_mlp", False) and mlp_W_gate_key is not None:
                 mlp_W_gate = state_dict[mlp_W_gate_key]
-                state_dict[mlp_W_gate_key] = mlp_W_gate * ln2_w_broadcast
-            state_dict[ln2_w_key] = torch.ones_like(state_dict[ln2_w_key])
+                new_mlp_W_gate = mlp_W_gate * ln2_w_broadcast
+                state_dict[mlp_W_gate_key] = new_mlp_W_gate
+                final_state_dict[mlp_W_gate_key] = new_mlp_W_gate
+            new_ln2_w = torch.ones_like(state_dict[ln2_w_key])
+            state_dict[ln2_w_key] = new_ln2_w
+            final_state_dict[ln2_w_key] = new_ln2_w
             alternate_ln2_w_key = (
                 ln2_w_key.replace("ln_2", "ln2")
                 if "ln_2" in ln2_w_key
                 else ln2_w_key.replace("ln2", "ln_2")
             )
             if alternate_ln2_w_key != ln2_w_key and alternate_ln2_w_key in state_dict:
-                state_dict[alternate_ln2_w_key] = torch.ones_like(state_dict[ln2_w_key])
+                state_dict[alternate_ln2_w_key] = new_ln2_w
+                final_state_dict[alternate_ln2_w_key] = new_ln2_w
         if center_weights and mlp_W_in_key in state_dict:
-            state_dict[mlp_W_in_key] -= einops.reduce(
+            centered_mlp_W_in = state_dict[mlp_W_in_key] - einops.reduce(
                 state_dict[mlp_W_in_key], "d_model d_mlp -> 1 d_mlp", "mean"
             )
+            state_dict[mlp_W_in_key] = centered_mlp_W_in
+            final_state_dict[mlp_W_in_key] = centered_mlp_W_in
         if getattr(cfg, "act_fn", None) is not None and cfg.act_fn.startswith("solu"):
             if uses_tl_format:
                 mlp_b_out_key = f"blocks.{layer}.mlp.b_out"
@@ -592,20 +614,26 @@ class ProcessWeights:
                 mlp_ln_b_key = ProcessWeights._get_param_key(f"blocks.{layer}.mlp.ln.b", adapter)
                 mlp_ln_w_key = ProcessWeights._get_param_key(f"blocks.{layer}.mlp.ln.w", adapter)
             if fold_biases:
-                state_dict[mlp_b_out_key] = state_dict[mlp_b_out_key] + (
+                new_mlp_b_out = state_dict[mlp_b_out_key] + (
                     state_dict[mlp_W_out_key] * state_dict[mlp_ln_b_key][:, None]
                 ).sum(-2)
+                state_dict[mlp_b_out_key] = new_mlp_b_out
+                final_state_dict[mlp_b_out_key] = new_mlp_b_out
                 if mlp_ln_b_key in state_dict:
-                    state_dict[mlp_ln_b_key] = torch.zeros_like(state_dict[mlp_ln_b_key])
-            state_dict[mlp_W_out_key] = (
-                state_dict[mlp_W_out_key] * state_dict[mlp_ln_w_key][:, None]
-            )
+                    zero_mlp_ln_b = torch.zeros_like(state_dict[mlp_ln_b_key])
+                    state_dict[mlp_ln_b_key] = zero_mlp_ln_b
+                    final_state_dict[mlp_ln_b_key] = zero_mlp_ln_b
+            new_mlp_W_out = state_dict[mlp_W_out_key] * state_dict[mlp_ln_w_key][:, None]
             if center_weights:
-                state_dict[mlp_W_out_key] -= einops.reduce(
-                    state_dict[mlp_W_out_key], "d_mlp d_model -> 1 d_model", "mean"
+                new_mlp_W_out -= einops.reduce(
+                    new_mlp_W_out, "d_mlp d_model -> 1 d_model", "mean"
                 )
+            state_dict[mlp_W_out_key] = new_mlp_W_out
+            final_state_dict[mlp_W_out_key] = new_mlp_W_out
             if mlp_ln_w_key in state_dict:
-                state_dict[mlp_ln_w_key] = torch.ones_like(state_dict[mlp_ln_w_key])
+                ones_mlp_ln_w = torch.ones_like(state_dict[mlp_ln_w_key])
+                state_dict[mlp_ln_w_key] = ones_mlp_ln_w
+                final_state_dict[mlp_ln_w_key] = ones_mlp_ln_w
 
     @staticmethod
     def _store_processed_attention_tensors(
@@ -620,6 +648,7 @@ class ProcessWeights:
         adapter,
         cfg,
         layer: int,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> None:
         """Store processed attention tensors back to state dict in appropriate format.
 
@@ -631,6 +660,7 @@ class ProcessWeights:
             adapter: Optional architecture adapter for parameter key translation
             cfg: Model configuration object
             layer: The layer index
+            final_state_dict: Dict to accumulate processed weights
         """
         if wq_tensor is None:
             return
@@ -654,33 +684,45 @@ class ProcessWeights:
             if converted_wq is None or converted_wk is None or converted_wv is None:
                 raise ValueError(f"Required attention weights missing for layer {layer}")
             state_dict[wq_key] = converted_wq
+            final_state_dict[wq_key] = converted_wq
             state_dict[wk_key] = converted_wk
+            final_state_dict[wk_key] = converted_wk
             state_dict[wv_key] = converted_wv
+            final_state_dict[wv_key] = converted_wv
             converted_bq = ProcessWeights.convert_tensor_to_hf_format(
                 bq_tensor, f"blocks.{layer}.attn.b_Q", adapter, cfg, layer
             )
             if converted_bq is not None:
                 state_dict[bq_key] = converted_bq
+                final_state_dict[bq_key] = converted_bq
             converted_bk = ProcessWeights.convert_tensor_to_hf_format(
                 bk_tensor, f"blocks.{layer}.attn.b_K", adapter, cfg, layer
             )
             if converted_bk is not None:
                 state_dict[bk_key] = converted_bk
+                final_state_dict[bk_key] = converted_bk
             converted_bv = ProcessWeights.convert_tensor_to_hf_format(
                 bv_tensor, f"blocks.{layer}.attn.b_V", adapter, cfg, layer
             )
             if converted_bv is not None:
                 state_dict[bv_key] = converted_bv
+                final_state_dict[bv_key] = converted_bv
         else:
             state_dict[wq_key] = wq_tensor
+            final_state_dict[wq_key] = wq_tensor
             state_dict[wk_key] = wk_tensor
+            final_state_dict[wk_key] = wk_tensor
             state_dict[wv_key] = wv_tensor
+            final_state_dict[wv_key] = wv_tensor
             if bq_tensor is not None:
                 state_dict[bq_key] = bq_tensor
+                final_state_dict[bq_key] = bq_tensor
             if bk_tensor is not None:
                 state_dict[bk_key] = bk_tensor
+                final_state_dict[bk_key] = bk_tensor
             if bv_tensor is not None:
                 state_dict[bv_key] = bv_tensor
+                final_state_dict[bv_key] = bv_tensor
 
     @staticmethod
     def _detect_unembed_format(state_dict: Dict[str, torch.Tensor], adapter) -> tuple[bool, bool]:
@@ -702,7 +744,8 @@ class ProcessWeights:
 
     @staticmethod
     def _fold_unembed_layer_norm(
-        state_dict: Dict[str, torch.Tensor], cfg, fold_biases: bool, center_weights: bool, adapter
+        state_dict: Dict[str, torch.Tensor], cfg, fold_biases: bool, center_weights: bool, adapter,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> None:
         """Fold LayerNorm into unembedding layer.
 
@@ -723,9 +766,13 @@ class ProcessWeights:
         ln_weight = state_dict[ln_final_w_key]
         if len(unembed_weight.shape) == 2 and len(ln_weight.shape) == 1:
             if unembed_weight.shape[1] == ln_weight.shape[0]:
-                state_dict[unembed_W_U_key] = unembed_weight * ln_weight[None, :]
+                new_unembed_w = unembed_weight * ln_weight[None, :]
+                state_dict[unembed_W_U_key] = new_unembed_w
+                final_state_dict[unembed_W_U_key] = new_unembed_w
             elif unembed_weight.shape[0] == ln_weight.shape[0]:
-                state_dict[unembed_W_U_key] = unembed_weight * ln_weight[:, None]
+                new_unembed_w = unembed_weight * ln_weight[:, None]
+                state_dict[unembed_W_U_key] = new_unembed_w
+                final_state_dict[unembed_W_U_key] = new_unembed_w
             else:
                 raise ValueError(
                     f"Cannot broadcast unembedding weight {unembed_weight.shape} with layer norm weight {ln_weight.shape}"
@@ -735,31 +782,40 @@ class ProcessWeights:
                 f"Unexpected tensor shapes: unembedding {unembed_weight.shape}, layer norm {ln_weight.shape}"
             )
         if ln_final_w_key in state_dict:
-            state_dict[ln_final_w_key] = torch.ones_like(ln_weight)
+            ones_ln_weight = torch.ones_like(ln_weight)
+            state_dict[ln_final_w_key] = ones_ln_weight
+            final_state_dict[ln_final_w_key] = ones_ln_weight
         alternate_final_w_key = (
             ln_final_w_key.replace("ln_f", "ln_final")
             if "ln_f" in ln_final_w_key
             else ln_final_w_key.replace("ln_final", "ln_f")
         )
         if alternate_final_w_key != ln_final_w_key and alternate_final_w_key in state_dict:
-            state_dict[alternate_final_w_key] = torch.ones_like(ln_weight)
+            ones_ln_weight_alt = torch.ones_like(ln_weight)
+            state_dict[alternate_final_w_key] = ones_ln_weight_alt
+            final_state_dict[alternate_final_w_key] = ones_ln_weight_alt
         if center_weights:
             unembed_weight = state_dict[unembed_W_U_key]
             if len(unembed_weight.shape) == 2:
                 if uses_hf_format and (not uses_tl_format):
-                    state_dict[unembed_W_U_key] -= einops.reduce(
+                    centered_unembed = unembed_weight - einops.reduce(
                         unembed_weight, "vocab_size d_model -> vocab_size 1", "mean"
                     )
+                    state_dict[unembed_W_U_key] = centered_unembed
+                    final_state_dict[unembed_W_U_key] = centered_unembed
                 else:
-                    state_dict[unembed_W_U_key] -= einops.reduce(
+                    centered_unembed = unembed_weight - einops.reduce(
                         unembed_weight, "d_model d_vocab -> 1 d_vocab", "mean"
                     )
+                    state_dict[unembed_W_U_key] = centered_unembed
+                    final_state_dict[unembed_W_U_key] = centered_unembed
             else:
                 raise ValueError(f"Unexpected unembedding weight shape: {unembed_weight.shape}")
 
     @staticmethod
     def _fold_final_rms_bias(
-        state_dict: Dict[str, torch.Tensor], cfg, fold_biases: bool, adapter
+        state_dict: Dict[str, torch.Tensor], cfg, fold_biases: bool, adapter,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> None:
         """Fold final RMS bias into unembedding (separate from regular unembed folding).
 
@@ -791,16 +847,22 @@ class ProcessWeights:
                 raise ValueError(
                     f"Unexpected tensor shapes: unembedding {unembed_weight.shape}, layer norm bias {ln_bias.shape}"
                 )
-            state_dict[unembed_b_U_key] = state_dict[unembed_b_U_key] + bias_contribution
+            new_unembed_b = state_dict[unembed_b_U_key] + bias_contribution
+            state_dict[unembed_b_U_key] = new_unembed_b
+            final_state_dict[unembed_b_U_key] = new_unembed_b
             if ln_final_b_key in state_dict:
-                state_dict[ln_final_b_key] = torch.zeros_like(ln_bias)
+                zero_ln_bias = torch.zeros_like(ln_bias)
+                state_dict[ln_final_b_key] = zero_ln_bias
+                final_state_dict[ln_final_b_key] = zero_ln_bias
             alternate_final_b_key = (
                 ln_final_b_key.replace("ln_f", "ln_final")
                 if "ln_f" in ln_final_b_key
                 else ln_final_b_key.replace("ln_final", "ln_f")
             )
             if alternate_final_b_key != ln_final_b_key and alternate_final_b_key in state_dict:
-                state_dict[alternate_final_b_key] = torch.zeros_like(ln_bias)
+                zero_ln_bias_alt = torch.zeros_like(ln_bias)
+                state_dict[alternate_final_b_key] = zero_ln_bias_alt
+                final_state_dict[alternate_final_b_key] = zero_ln_bias_alt
 
     @staticmethod
     def fold_layer_norm(
@@ -809,6 +871,7 @@ class ProcessWeights:
         fold_biases: bool = True,
         center_weights: bool = True,
         adapter=None,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> Dict[str, torch.Tensor]:
         """Fold Layer Norm. Can also be used to fold RMS Norm, when fold_biases and center_weights are set to False.
 
@@ -822,6 +885,7 @@ class ProcessWeights:
             fold_biases (bool): Enables folding of LN biases. Should be disabled when RMS Norm is used.
             center_weights (bool): Enables the centering of weights after folding in LN. Should be disabled when RMS Norm is used.
             adapter: Optional architecture adapter for parameter key translation.
+            final_state_dict: Dict to accumulate processed weights (for TransformerBridge).
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with LayerNorm folded into linear layers.
@@ -829,17 +893,20 @@ class ProcessWeights:
         gqa = "" if getattr(cfg, "n_key_value_heads", None) is None else "_"
         for l in range(cfg.n_layers):
             ProcessWeights._fold_layer(
-                state_dict, cfg, l, fold_biases, center_weights, adapter, gqa
+                state_dict, cfg, l, fold_biases, center_weights, adapter, gqa, final_state_dict
             )
-        ProcessWeights._fold_final_rms_bias(state_dict, cfg, fold_biases, adapter)
+        ProcessWeights._fold_final_rms_bias(state_dict, cfg, fold_biases, adapter, final_state_dict)
         ProcessWeights._fold_unembed_layer_norm(
-            state_dict, cfg, fold_biases, center_weights, adapter
+            state_dict, cfg, fold_biases, center_weights, adapter, final_state_dict
         )
         return state_dict
 
     @staticmethod
     def center_writing_weights(
-        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
+        state_dict: Dict[str, torch.Tensor],
+        cfg,
+        adapter=None,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> Dict[str, torch.Tensor]:
         """Center Writing Weights.
 
@@ -851,6 +918,7 @@ class ProcessWeights:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
             cfg: Model configuration object.
             adapter: Optional architecture adapter for parameter key translation.
+            final_state_dict: Dict to accumulate processed weights.
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with centered writing weights.
@@ -868,9 +936,11 @@ class ProcessWeights:
             raise KeyError(
                 f"Expected embedding key '{embed_W_E_key}' not found in state_dict. Available keys: {list(state_dict.keys())[:10]}..."
             )
-        state_dict[embed_W_E_key] = state_dict[embed_W_E_key] - state_dict[embed_W_E_key].mean(
+        centered_embed = state_dict[embed_W_E_key] - state_dict[embed_W_E_key].mean(
             -1, keepdim=True
         )
+        state_dict[embed_W_E_key] = centered_embed
+        final_state_dict[embed_W_E_key] = centered_embed
         if (
             getattr(cfg, "positional_embedding_type", "standard") != "rotary"
             and pos_embed_W_pos_key is not None
@@ -879,9 +949,11 @@ class ProcessWeights:
                 raise KeyError(
                     f"Expected positional embedding key '{pos_embed_W_pos_key}' not found in state_dict. Available keys: {list(state_dict.keys())[:10]}..."
                 )
-            state_dict[pos_embed_W_pos_key] = state_dict[pos_embed_W_pos_key] - state_dict[
+            centered_pos_embed = state_dict[pos_embed_W_pos_key] - state_dict[
                 pos_embed_W_pos_key
             ].mean(-1, keepdim=True)
+            state_dict[pos_embed_W_pos_key] = centered_pos_embed
+            final_state_dict[pos_embed_W_pos_key] = centered_pos_embed
         for l in range(cfg.n_layers):
             attn_W_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.W_O", adapter)
             attn_b_O_key = ProcessWeights._get_param_key(f"blocks.{l}.attn.b_O", adapter)
@@ -895,13 +967,15 @@ class ProcessWeights:
                 raise KeyError(
                     f"Expected attention W_O key '{attn_W_O_key}' not found in state_dict for layer {l}. Available keys: {list(state_dict.keys())[:10]}..."
                 )
-            state_dict[attn_W_O_key] = state_dict[attn_W_O_key] - state_dict[attn_W_O_key].mean(
+            centered_attn_W_O = state_dict[attn_W_O_key] - state_dict[attn_W_O_key].mean(
                 -1, keepdim=True
             )
+            state_dict[attn_W_O_key] = centered_attn_W_O
+            final_state_dict[attn_W_O_key] = centered_attn_W_O
             if attn_b_O_key in state_dict:
-                state_dict[attn_b_O_key] = (
-                    state_dict[attn_b_O_key] - state_dict[attn_b_O_key].mean()
-                )
+                centered_attn_b_O = state_dict[attn_b_O_key] - state_dict[attn_b_O_key].mean()
+                state_dict[attn_b_O_key] = centered_attn_b_O
+                final_state_dict[attn_b_O_key] = centered_attn_b_O
             if not getattr(cfg, "attn_only", False):
                 is_moe = getattr(cfg, "num_experts", None) is not None and cfg.num_experts > 0
                 if is_moe:
@@ -926,9 +1000,11 @@ class ProcessWeights:
                             except ValueError:
                                 pass
                         if expert_W_out_key and expert_W_out_key in state_dict:
-                            state_dict[expert_W_out_key] = state_dict[
+                            centered_expert_W_out = state_dict[
                                 expert_W_out_key
                             ] - state_dict[expert_W_out_key].mean(-1, keepdim=True)
+                            state_dict[expert_W_out_key] = centered_expert_W_out
+                            final_state_dict[expert_W_out_key] = centered_expert_W_out
                         expert_b_out_patterns = [
                             f"blocks.{l}.mlp.experts.{e}.b_out",
                             f"blocks.{l}.mlp.experts.{e}.b_out.bias",
@@ -939,26 +1015,30 @@ class ProcessWeights:
                                 expert_b_out_key = resolved
                                 break
                         if expert_b_out_key and expert_b_out_key in state_dict:
-                            state_dict[expert_b_out_key] = (
-                                state_dict[expert_b_out_key] - state_dict[expert_b_out_key].mean()
-                            )
+                            centered_expert_b_out = state_dict[expert_b_out_key] - state_dict[expert_b_out_key].mean()
+                            state_dict[expert_b_out_key] = centered_expert_b_out
+                            final_state_dict[expert_b_out_key] = centered_expert_b_out
                 elif mlp_W_out_key is not None:
                     if mlp_W_out_key not in state_dict:
                         raise KeyError(
                             f"Expected MLP W_out key '{mlp_W_out_key}' not found in state_dict for layer {l}. Available keys: {list(state_dict.keys())[:10]}..."
                         )
-                    state_dict[mlp_W_out_key] = state_dict[mlp_W_out_key] - state_dict[
+                    centered_mlp_W_out = state_dict[mlp_W_out_key] - state_dict[
                         mlp_W_out_key
                     ].mean(-1, keepdim=True)
+                    state_dict[mlp_W_out_key] = centered_mlp_W_out
+                    final_state_dict[mlp_W_out_key] = centered_mlp_W_out
                     if mlp_b_out_key is not None and mlp_b_out_key in state_dict:
-                        state_dict[mlp_b_out_key] = (
-                            state_dict[mlp_b_out_key] - state_dict[mlp_b_out_key].mean()
-                        )
+                        centered_mlp_b_out = state_dict[mlp_b_out_key] - state_dict[mlp_b_out_key].mean()
+                        state_dict[mlp_b_out_key] = centered_mlp_b_out
+                        final_state_dict[mlp_b_out_key] = centered_mlp_b_out
         return state_dict
 
     @staticmethod
     def center_unembed(
-        state_dict: Dict[str, torch.Tensor], adapter=None
+        state_dict: Dict[str, torch.Tensor],
+        adapter=None,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> Dict[str, torch.Tensor]:
         """Center the unembedding weights W_U.
 
@@ -971,6 +1051,7 @@ class ProcessWeights:
         Args:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
             adapter: Optional architecture adapter for parameter key translation.
+            final_state_dict: Dict to accumulate processed weights.
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with centered unembedding weights.
@@ -984,18 +1065,25 @@ class ProcessWeights:
             )
         W_U = state_dict[unembed_W_U_key]
         if uses_hf_format:
-            state_dict[unembed_W_U_key] = W_U - W_U.mean(0, keepdim=True)
+            centered_W_U = W_U - W_U.mean(0, keepdim=True)
+            state_dict[unembed_W_U_key] = centered_W_U
+            final_state_dict[unembed_W_U_key] = centered_W_U
         else:
-            state_dict[unembed_W_U_key] = W_U - W_U.mean(-1, keepdim=True)
+            centered_W_U = W_U - W_U.mean(-1, keepdim=True)
+            state_dict[unembed_W_U_key] = centered_W_U
+            final_state_dict[unembed_W_U_key] = centered_W_U
         if unembed_b_U_key in state_dict:
-            state_dict[unembed_b_U_key] = (
-                state_dict[unembed_b_U_key] - state_dict[unembed_b_U_key].mean()
-            )
+            centered_b_U = state_dict[unembed_b_U_key] - state_dict[unembed_b_U_key].mean()
+            state_dict[unembed_b_U_key] = centered_b_U
+            final_state_dict[unembed_b_U_key] = centered_b_U
         return state_dict
 
     @staticmethod
     def fold_value_biases(
-        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
+        state_dict: Dict[str, torch.Tensor],
+        cfg,
+        adapter=None,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> Dict[str, torch.Tensor]:
         """Fold the value biases into the output bias.
 
@@ -1011,6 +1099,7 @@ class ProcessWeights:
             state_dict (Dict[str, torch.Tensor]): State dict of the model.
             cfg: Model configuration object.
             adapter: Optional architecture adapter for parameter key translation.
+            final_state_dict: Dict to accumulate processed weights.
 
         Returns:
             Dict[str, torch.Tensor]: Modified state dict with value biases folded into output bias.
@@ -1052,10 +1141,14 @@ class ProcessWeights:
                         [0, 1]
                     )
                     state_dict[b_O_key] = folded_b_O
+                    final_state_dict[b_O_key] = folded_b_O
                     tl_b_O_key = f"blocks.{layer}.attn.b_O"
                     if tl_b_O_key in state_dict:
                         state_dict[tl_b_O_key] = folded_b_O
-                    state_dict[b_V_key] = torch.zeros_like(b_V)
+                        final_state_dict[tl_b_O_key] = folded_b_O
+                    zero_b_V = torch.zeros_like(b_V)
+                    state_dict[b_V_key] = zero_b_V
+                    final_state_dict[b_V_key] = zero_b_V
                 elif len(b_V.shape) == 1 and len(W_O.shape) == 2:
                     n_heads = cfg.n_heads
                     d_head = cfg.d_head
@@ -1073,6 +1166,7 @@ class ProcessWeights:
                     new_b_V = b_V.clone()
                     new_b_V[v_bias_start:v_bias_end] = 0
                     state_dict[b_V_key] = new_b_V
+                    final_state_dict[b_V_key] = new_b_V
                 elif len(b_V.shape) == 2 and len(W_O.shape) == 3:
                     b_V_original_shape = b_V.shape
                     if getattr(cfg, "n_key_value_heads", None) is not None:
@@ -1080,9 +1174,11 @@ class ProcessWeights:
                             b_V, dim=0, repeats=cfg.n_heads // cfg.n_key_value_heads
                         )
                     folded_b_O = b_O_original + (b_V[:, :, None] * W_O).sum([0, 1])
-                    state_dict[b_V_key] = torch.zeros(
+                    zero_b_V_gqa = torch.zeros(
                         b_V_original_shape, dtype=b_V.dtype, device=b_V.device
                     )
+                    state_dict[b_V_key] = zero_b_V_gqa
+                    final_state_dict[b_V_key] = zero_b_V_gqa
                 elif len(b_V.shape) == 2 and len(W_O.shape) == 2:
                     n_heads = cfg.n_heads
                     d_head = cfg.d_head
@@ -1106,12 +1202,15 @@ class ProcessWeights:
 
                     W_O_reshaped = einops.rearrange(W_O, "(i h) m -> i h m", i=n_heads)
                     folded_b_O = b_O_original + (b_V[:, :, None] * W_O_reshaped).sum([0, 1])
-                    state_dict[b_V_key] = torch.zeros(
+                    zero_b_V_split = torch.zeros(
                         b_V_original_shape, dtype=b_V.dtype, device=b_V.device
                     )
+                    state_dict[b_V_key] = zero_b_V_split
+                    final_state_dict[b_V_key] = zero_b_V_split
                 else:
                     raise ValueError(f"Unexpected tensor shapes: b_V {b_V.shape}, W_O {W_O.shape}")
                 state_dict[b_O_key] = folded_b_O
+                final_state_dict[b_O_key] = folded_b_O
         return state_dict
 
     @staticmethod
@@ -1143,26 +1242,27 @@ class ProcessWeights:
         Returns:
             Dict[str, torch.Tensor]: Fully processed state dict.
         """
+        final_state_dict = state_dict if adapter is None else {}
         if fold_ln:
             if getattr(cfg, "num_experts", None) and cfg.num_experts > 1:
                 pass
             elif getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"]:
                 state_dict = ProcessWeights.fold_layer_norm(
-                    state_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter
+                    state_dict, cfg, fold_biases=True, center_weights=True, adapter=adapter, final_state_dict=final_state_dict
                 )
             elif getattr(cfg, "normalization_type", "LN") in ["RMS", "RMSPre"]:
                 state_dict = ProcessWeights.fold_layer_norm(
-                    state_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter
+                    state_dict, cfg, fold_biases=False, center_weights=False, adapter=adapter, final_state_dict=final_state_dict
                 )
         if center_writing_weights:
             if getattr(cfg, "normalization_type", "LN") in ["LN", "LNPre"] and (
                 not getattr(cfg, "final_rms", False)
             ):
-                state_dict = ProcessWeights.center_writing_weights(state_dict, cfg, adapter=adapter)
+                state_dict = ProcessWeights.center_writing_weights(state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict)
         if center_unembed:
-            state_dict = ProcessWeights.center_unembed(state_dict, adapter=adapter)
+            state_dict = ProcessWeights.center_unembed(state_dict, adapter=adapter, final_state_dict=final_state_dict)
         if fold_value_biases:
-            state_dict = ProcessWeights.fold_value_biases(state_dict, cfg, adapter=adapter)
+            state_dict = ProcessWeights.fold_value_biases(state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict)
             if center_writing_weights and getattr(cfg, "normalization_type", "LN") in [
                 "LN",
                 "LNPre",
@@ -1183,15 +1283,19 @@ class ProcessWeights:
                     if b_O_key in state_dict:
                         b_O = state_dict[b_O_key]
                         state_dict[b_O_key] = b_O - b_O.mean()
+                        final_state_dict[b_O_key] = b_O - b_O.mean()
         if refactor_factored_attn_matrices:
             state_dict = ProcessWeights.refactor_factored_attn_matrices(
-                state_dict, cfg, adapter=adapter
+                state_dict, cfg, adapter=adapter, final_state_dict=final_state_dict
             )
-        return state_dict
+        return final_state_dict
 
     @staticmethod
     def refactor_factored_attn_matrices(
-        state_dict: Dict[str, torch.Tensor], cfg, adapter=None
+        state_dict: Dict[str, torch.Tensor],
+        cfg,
+        adapter=None,
+        final_state_dict: Dict[str, torch.Tensor] = {},
     ) -> Dict[str, torch.Tensor]:
         """Experimental method for managing queries, keys and values.
 
@@ -1279,10 +1383,18 @@ class ProcessWeights:
             )
             W_K_eff_even = W_K_eff_even_T.transpose(-1, -2)
 
-            state_dict[W_Q_key] = W_Q_eff_even[:, :-1, :]
-            state_dict[b_Q_key] = W_Q_eff_even[:, -1, :]
-            state_dict[W_K_key] = W_K_eff_even[:, :-1, :]
-            state_dict[b_K_key] = W_K_eff_even[:, -1, :]
+            new_W_Q = W_Q_eff_even[:, :-1, :]
+            state_dict[W_Q_key] = new_W_Q
+            final_state_dict[W_Q_key] = new_W_Q
+            new_b_Q = W_Q_eff_even[:, -1, :]
+            state_dict[b_Q_key] = new_b_Q
+            final_state_dict[b_Q_key] = new_b_Q
+            new_W_K = W_K_eff_even[:, :-1, :]
+            state_dict[W_K_key] = new_W_K
+            final_state_dict[W_K_key] = new_W_K
+            new_b_K = W_K_eff_even[:, -1, :]
+            state_dict[b_K_key] = new_b_K
+            final_state_dict[b_K_key] = new_b_K
 
             # W_OV = W_V @ W_O
             W_V = state_dict[W_V_key]
@@ -1302,14 +1414,21 @@ class ProcessWeights:
             b_V_contribution = b_V_times_W_O.sum(1).sum(0)
 
             effective_bias = b_O + b_V_contribution
-            state_dict[b_V_key] = torch.zeros_like(b_V)
+            zero_b_V_refactor = torch.zeros_like(b_V)
+            state_dict[b_V_key] = zero_b_V_refactor
+            final_state_dict[b_V_key] = zero_b_V_refactor
             state_dict[b_O_key] = effective_bias
+            final_state_dict[b_O_key] = effective_bias
 
             # Helper class to efficiently deal with low rank factored matrices.
             W_OV = FactoredMatrix(W_V, W_O)
             U, S, Vh = W_OV.svd()
-            state_dict[W_V_key] = U @ S.diag_embed()
-            state_dict[W_O_key] = utils.transpose(Vh)
+            new_W_V = U @ S.diag_embed()
+            state_dict[W_V_key] = new_W_V
+            final_state_dict[W_V_key] = new_W_V
+            new_W_O = utils.transpose(Vh)
+            state_dict[W_O_key] = new_W_O
+            final_state_dict[W_O_key] = new_W_O
 
         return state_dict
 
