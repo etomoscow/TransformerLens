@@ -208,7 +208,7 @@ class GeneralizedComponent(nn.Module):
                             param.data = weight_tensor
 
         # If this component has submodules, distribute weights to them
-        if self.real_components:
+        if self.real_components and weights:
             from transformer_lens.weight_processing import ProcessWeights
 
             if verbose:

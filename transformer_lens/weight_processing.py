@@ -1551,7 +1551,8 @@ class ProcessWeights:
                         for key in indexed_weights.keys():
                             print(f"      - {key}")
 
-                    instance.set_processed_weights(indexed_weights, verbose=verbose)
+                    if indexed_weights:
+                        instance.set_processed_weights(indexed_weights, verbose=verbose)
             else:
                 # This is a single component (not a list)
                 component_weights = filter_dict_by_prefix(state_dict, remote_key)
@@ -1561,4 +1562,5 @@ class ProcessWeights:
                     for key in component_weights.keys():
                         print(f"    - {key}")
 
-                component.set_processed_weights(component_weights, verbose=verbose)
+                if component_weights:
+                    component.set_processed_weights(component_weights, verbose=verbose)

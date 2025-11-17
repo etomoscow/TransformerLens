@@ -118,6 +118,7 @@ class EmbeddingBridge(GeneralizedComponent):
         if self.original_component is None:
             raise RuntimeError(f"Original component not set for {self.name}")
 
+        print("weights", weights.keys())
         weight = weights.get("weight")
         if weight is None:
             raise ValueError("Processed weights for EmbeddingBridge must include 'weight'.")
