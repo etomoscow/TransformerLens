@@ -138,11 +138,6 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
 
         self.conversion_rules = HookConversionSet(
             {
-                # Original parameter names (for compatibility)
-                "pos_embed.pos": "transformer.wpe.weight",
-                "embed.e": "transformer.wte.weight",
-                "blocks.{i}.ln1.weight": "transformer.h.{i}.ln_1.weight",
-                "blocks.{i}.ln1.bias": "transformer.h.{i}.ln_1.bias",
                 "blocks.{i}.attn.W_Q": (
                     "transformer.h.{i}.attn.c_attn.weight",
                     QKVSplitRearrangeConversion(0, "d_model (n h) -> n d_model h", n=self.cfg.n_heads),
@@ -154,10 +149,6 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                 "blocks.{i}.attn.W_V": (
                     "transformer.h.{i}.attn.c_attn.weight",
                     QKVSplitRearrangeConversion(2, "d_model (n h) -> n d_model h", n=self.cfg.n_heads),
-                ),
-                "blocks.{i}.attn.o.weight": (
-                    "transformer.h.{i}.attn.c_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n h m", n=self.cfg.n_heads),
                 ),
                 "blocks.{i}.attn.b_Q": (
                     "transformer.h.{i}.attn.c_attn.bias",
@@ -171,38 +162,6 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                     "transformer.h.{i}.attn.c_attn.bias",
                     QKVBiasConversion(2, self.cfg.n_heads, self.cfg.d_head),
                 ),
-                "blocks.{i}.attn.o.bias": "transformer.h.{i}.attn.c_proj.bias",
-                "blocks.{i}.ln2.weight": "transformer.h.{i}.ln_2.weight",
-                "blocks.{i}.ln2.bias": "transformer.h.{i}.ln_2.bias",
-                "blocks.{i}.mlp.input.weight": "transformer.h.{i}.mlp.c_fc.weight",
-                "blocks.{i}.mlp.input.bias": "transformer.h.{i}.mlp.c_fc.bias",
-                "blocks.{i}.mlp.out": "transformer.h.{i}.mlp.c_proj.weight",
-                "blocks.{i}.mlp.b_out": "transformer.h.{i}.mlp.c_proj.bias",
-                "ln_final.weight": "transformer.ln_f.weight",
-                "ln_final.bias": "transformer.ln_f.bias",
-                "unembed.weight": (
-                    "lm_head.weight",
-                    RearrangeHookConversion("d_model d_vocab -> d_vocab d_model"),
-                ),
-                "unembed.bias": "lm_head.bias",
-                # TransformerLens parameter names (for weight processing functions)
-                "embed.W_E": "transformer.wte.weight",
-                "pos_embed.W_pos": "transformer.wpe.weight",
-                "blocks.{i}.ln1.w": "transformer.h.{i}.ln_1.weight",
-                "blocks.{i}.ln1.b": "transformer.h.{i}.ln_1.bias",
-                "blocks.{i}.ln2.w": "transformer.h.{i}.ln_2.weight",
-                "blocks.{i}.ln2.b": "transformer.h.{i}.ln_2.bias",
-                "blocks.{i}.mlp.W_in": "transformer.h.{i}.mlp.c_fc.weight",
-                "blocks.{i}.mlp.W_out": "transformer.h.{i}.mlp.c_proj.weight",
-                "blocks.{i}.mlp.b_in": "transformer.h.{i}.mlp.c_fc.bias",
-                "blocks.{i}.mlp.b_out": "transformer.h.{i}.mlp.c_proj.bias",
-                "ln_final.w": "transformer.ln_f.weight",
-                "ln_final.b": "transformer.ln_f.bias",
-                "unembed.W_U": (
-                    "lm_head.weight",
-                    RearrangeHookConversion("d_model d_vocab -> d_vocab d_model"),
-                ),
-                "unembed.b_U": "lm_head.bias",
             }
         )
 
