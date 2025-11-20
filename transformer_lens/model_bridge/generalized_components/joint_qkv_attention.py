@@ -7,8 +7,8 @@ from typing import Any, Callable, Dict, Optional
 import einops
 import torch
 
-from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion import (
-    BaseHookConversion,
+from transformer_lens.conversion_utils.conversion_steps.base_tensor_conversion import (
+    BaseTensorConversion,
 )
 from transformer_lens.model_bridge.generalized_components.attention import (
     AttentionBridge,
@@ -44,9 +44,9 @@ class JointQKVAttentionBridge(AttentionBridge):
         config: Any,
         split_qkv_matrix: Callable,
         submodules: Optional[Dict[str, GeneralizedComponent]] = None,
-        qkv_conversion_rule: Optional[BaseHookConversion] = None,
-        attn_conversion_rule: Optional[BaseHookConversion] = None,
-        pattern_conversion_rule: Optional[BaseHookConversion] = None,
+        qkv_conversion_rule: Optional[BaseTensorConversion] = None,
+        attn_conversion_rule: Optional[BaseTensorConversion] = None,
+        pattern_conversion_rule: Optional[BaseTensorConversion] = None,
         requires_position_embeddings: bool = False,
         requires_attention_mask: bool = False,
     ):
@@ -57,7 +57,7 @@ class JointQKVAttentionBridge(AttentionBridge):
             config: Model configuration (required for auto-conversion detection)
             split_qkv_matrix: Function to split the qkv matrix into q, k, and v linear transformations
             submodules: Dictionary of submodules to register (e.g., q_proj, k_proj, etc.)
-            qkv_conversion_rule: Optional conversion rule for the individual q, k, and v matrices to convert their output shapes to HookedTransformer format. If None, uses default RearrangeHookConversion
+            qkv_conversion_rule: Optional conversion rule for the individual q, k, and v matrices to convert their output shapes to HookedTransformer format. If None, uses default RearrangeTensorConversion
             attn_conversion_rule: Optional conversion rule. Passed to parent AttentionBridge. If None, AttentionAutoConversion will be used
             pattern_conversion_rule: Optional conversion rule for attention patterns. If None,
                                    uses AttentionPatternConversion to ensure [n_heads, pos, pos] shape
@@ -99,28 +99,18 @@ class JointQKVAttentionBridge(AttentionBridge):
         if hasattr(self, "o"):
             self.real_components["o"] = ("o", self.o)
 
-        self._processed_weights: Optional[Dict[str, torch.Tensor]] = None
-        self._hooked_weights_extracted = False
-        self._W_Q: Optional[torch.Tensor] = None
-        self._W_K: Optional[torch.Tensor] = None
-        self._W_V: Optional[torch.Tensor] = None
-        self._W_O: Optional[torch.Tensor] = None
-        self._b_Q: Optional[torch.Tensor] = None
-        self._b_K: Optional[torch.Tensor] = None
-        self._b_V: Optional[torch.Tensor] = None
-        self._b_O: Optional[torch.Tensor] = None
         self._reference_model: Optional[Any] = None
         self._layer_idx: Optional[int] = None
 
-    def _create_qkv_conversion_rule(self) -> BaseHookConversion:
+    def _create_qkv_conversion_rule(self) -> BaseTensorConversion:
         """Create the appropriate conversion rule for the individual q, k, and v matrices.
 
         Returns:
-            BaseHookConversion for individual q, k, and v matrices
+            BaseTensorConversion for individual q, k, and v matrices
         """
         assert self.config is not None
 
-        class ConditionalRearrangeConversion(BaseHookConversion):
+        class ConditionalRearrangeConversion(BaseTensorConversion):
             def __init__(self, n_heads: int):
                 super().__init__()
                 self.n_heads = n_heads

@@ -3,9 +3,9 @@
 
 from typing import Any
 
-from transformer_lens.conversion_utils.conversion_steps import (
-    HookConversionSet,
-    RearrangeHookConversion,
+from transformer_lens.conversion_utils.conversion_steps import RearrangeTensorConversion
+from transformer_lens.conversion_utils.param_processing_conversion import (
+    ParamProcessingConversion,
 )
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
@@ -41,55 +41,45 @@ class Gemma3ArchitectureAdapter(ArchitectureAdapter):
         # SDPA doesn't support output_attentions, which is required for HookedTransformer compatibility
         self.cfg.attn_implementation = "eager"
 
-        self.conversion_rules = HookConversionSet(
-            {
-                # Gemma3 scales embeddings by sqrt(d_model)
-                "embed.e": (
-                    "model.embed_tokens.weight",
-                    RearrangeHookConversion(
-                        "d_vocab d_model -> d_vocab d_model",
-                        scale=self.cfg.d_model**0.5,
+        self.weight_processing_conversions = {
+            # Gemma3 scales embeddings by sqrt(d_model)
+            "embed": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    "d_vocab d_model -> d_vocab d_model",
+                    scale=self.cfg.d_model**0.5,
+                ),
+                source_key="model.embed_tokens.weight",
+            ),
+            # Q/K/V weight conversions (using canonical W_Q/W_K/W_V naming)
+            "blocks.{i}.attn.q.weight": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+            ),
+            "blocks.{i}.attn.W_K": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    "(n h) m -> n m h",
+                    n=getattr(
+                        self.cfg,
+                        "n_key_value_heads",
+                        self.cfg.n_heads,
                     ),
                 ),
-                "blocks.{i}.ln1.w": "model.layers.{i}.input_layernorm.weight",
-                "blocks.{i}.ln2.w": "model.layers.{i}.post_attention_layernorm.weight",
-                "blocks.{i}.attn.q": (
-                    "model.layers.{i}.self_attn.q_proj.weight",
-                    RearrangeHookConversion("(n h) m -> n m h", n=self.cfg.n_heads),
-                ),
-                "blocks.{i}.attn.k": (
-                    "model.layers.{i}.self_attn.k_proj.weight",
-                    RearrangeHookConversion(
-                        "(n h) m -> n m h",
-                        n=getattr(
-                            self.cfg,
-                            "n_key_value_heads",
-                            self.cfg.n_heads,
-                        ),
+            ),
+            "blocks.{i}.attn.v.weight": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    "(n h) m -> n m h",
+                    n=getattr(
+                        self.cfg,
+                        "n_key_value_heads",
+                        self.cfg.n_heads,
                     ),
                 ),
-                "blocks.{i}.attn.v": (
-                    "model.layers.{i}.self_attn.v_proj.weight",
-                    RearrangeHookConversion(
-                        "(n h) m -> n m h",
-                        n=getattr(
-                            self.cfg,
-                            "n_key_value_heads",
-                            self.cfg.n_heads,
-                        ),
-                    ),
-                ),
-                "blocks.{i}.attn.o": (
-                    "model.layers.{i}.self_attn.o_proj.weight",
-                    RearrangeHookConversion("m (n h) -> n h m", n=self.cfg.n_heads),
-                ),
-                "blocks.{i}.mlp.in": "model.layers.{i}.mlp.up_proj.weight",
-                "blocks.{i}.mlp.gate": "model.layers.{i}.mlp.gate_proj.weight",
-                "blocks.{i}.mlp.out": "model.layers.{i}.mlp.down_proj.weight",
-                "ln_final.w": "model.norm.weight",
-                "unembed.u": "lm_head.weight.T",  # Not shared with embedding
-            }
-        )
+            ),
+            "blocks.{i}.attn.o.weight": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("m (n h) -> n h m", n=self.cfg.n_heads),
+            ),
+            # Note: Gemma-3 does NOT have biases on attention projections (q/k/v/o_proj.bias are all None)
+            # No bias conversions needed
+        }
 
         # Set up component mapping with actual bridge instances
         self.component_mapping = {

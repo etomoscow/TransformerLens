@@ -1,5 +1,5 @@
 """Linear bridge component for wrapping linear layers with hook points."""
-from typing import Any, Mapping
+from typing import Any, Dict, Mapping
 
 import einops
 import torch
@@ -92,28 +92,25 @@ class LinearBridge(GeneralizedComponent):
         if weight.ndim == 3:
             n_heads, dim1, dim2 = weight.shape
             if dim1 > dim2:
-                # [n_heads, d_model, d_head] -> [d_model, n_heads * d_head]
+                # [n_heads, d_model, d_head] -> [n_heads * d_head, d_model] (nn.Linear format)
                 weight = einops.rearrange(
-                    weight, "n_heads d_model d_head -> d_model (n_heads d_head)"
+                    weight, "n_heads d_model d_head -> (n_heads d_head) d_model"
                 )
             else:
-                # [n_heads, d_head, d_model] -> [n_heads * d_head, d_model]
+                # [n_heads, d_head, d_model] -> [d_model, n_heads * d_head]
                 weight = einops.rearrange(
-                    weight, "n_heads d_head d_model -> (n_heads d_head) d_model"
+                    weight, "n_heads d_head d_model -> d_model (n_heads d_head)"
                 )
 
         # Handle 2D bias by flattening to 1D
         if bias is not None and bias.ndim == 2:
             bias = einops.rearrange(bias, "n_heads d_head -> (n_heads d_head)")
 
-        # Load weights into Linear layer
-        # nn.Linear stores weights in [out, in] format (transpose of input [in, out])
-        for name, param in self.original_component.named_parameters():
-            if "weight" in name.lower():
-                if verbose:
-                    print(f"    Setting param '{name}' with shape {weight.T.contiguous().shape}")
-                param.data = weight.T.contiguous()
-            elif "bias" in name.lower() and bias is not None:
-                if verbose:
-                    print(f"    Setting param '{name}' with shape {bias.contiguous().shape}")
-                param.data = bias.contiguous()
+        processed_weights: Dict[str, torch.Tensor] = {
+            "weight": weight,
+        }
+
+        if bias is not None:
+            processed_weights["bias"] = bias
+
+        super().set_processed_weights(processed_weights, verbose=verbose)

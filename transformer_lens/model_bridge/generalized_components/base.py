@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 import torch.nn as nn
 
-from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion import (
-    BaseHookConversion,
+from transformer_lens.conversion_utils.conversion_steps.base_tensor_conversion import (
+    BaseTensorConversion,
 )
 from transformer_lens.hook_points import HookPoint
 
@@ -32,7 +32,7 @@ class GeneralizedComponent(nn.Module):
         name: Optional[str],
         config: Optional[Any] = None,
         submodules: Optional[Dict[str, "GeneralizedComponent"]] = None,
-        conversion_rule: Optional[BaseHookConversion] = None,
+        conversion_rule: Optional[BaseTensorConversion] = None,
     ):
         """Initialize the generalized component.
 
@@ -206,10 +206,26 @@ class GeneralizedComponent(nn.Module):
                     if hasattr(self.original_component, key):
                         param = getattr(self.original_component, key)
                         if param is not None and isinstance(param, torch.nn.Parameter):
-                            # Update existing parameter's data
+                            # Check that shapes match
+                            if param.shape != weight_tensor.shape:
+                                raise ValueError(
+                                    f"Shape mismatch when setting weight '{key}' in {type(self.original_component).__name__}: "
+                                    f"existing param shape {param.shape} != new tensor shape {weight_tensor.shape}"
+                                )
                             if verbose:
                                 print(f"    Setting weight: {key} (shape: {weight_tensor.shape})")
-                            param.data = weight_tensor
+                            # break tying by creating a new param
+                            new_param = nn.Parameter(weight_tensor)
+                            setattr(self.original_component, key, new_param)
+                        elif param is None:
+                            # Parameter exists but is None (e.g., bias=False in nn.Linear)
+                            # Create a new parameter from the weight tensor
+                            if verbose:
+                                print(
+                                    f"    Creating weight: {key} (shape: {weight_tensor.shape}) - was None"
+                                )
+                            new_param = nn.Parameter(weight_tensor)
+                            setattr(self.original_component, key, new_param)
 
         # If this component has submodules, distribute weights to them
         if self.real_components:

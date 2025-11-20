@@ -2,15 +2,15 @@
 
 This module contains the bridge component for attention layers.
 """
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
 from transformer_lens.conversion_utils.conversion_steps.attention_auto_conversion import (
     AttentionAutoConversion,
 )
-from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion import (
-    BaseHookConversion,
+from transformer_lens.conversion_utils.conversion_steps.base_tensor_conversion import (
+    BaseTensorConversion,
 )
 from transformer_lens.hook_points import HookPoint
 from transformer_lens.model_bridge.generalized_components.base import (
@@ -48,8 +48,8 @@ class AttentionBridge(GeneralizedComponent):
         name: str,
         config: Any,
         submodules: Optional[Dict[str, GeneralizedComponent]] = None,
-        conversion_rule: Optional[BaseHookConversion] = None,
-        pattern_conversion_rule: Optional[BaseHookConversion] = None,
+        conversion_rule: Optional[BaseTensorConversion] = None,
+        pattern_conversion_rule: Optional[BaseTensorConversion] = None,
         maintain_native_attention: bool = False,
         requires_position_embeddings: bool = False,
         requires_attention_mask: bool = False,
@@ -171,11 +171,11 @@ class AttentionBridge(GeneralizedComponent):
         - v.hook_out (aliased as hook_v) - uses n_kv_heads if GQA
         - o.hook_in (aliased as hook_z)
         """
-        from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion import (
-            BaseHookConversion,
+        from transformer_lens.conversion_utils.conversion_steps.base_tensor_conversion import (
+            BaseTensorConversion,
         )
 
-        class ReshapeForAttentionHeads(BaseHookConversion):
+        class ReshapeForAttentionHeads(BaseTensorConversion):
             """Reshape tensors to split attention heads for Q/K/V/Z compatibility."""
 
             def __init__(self, n_heads: int, d_head: int):
@@ -237,7 +237,7 @@ class AttentionBridge(GeneralizedComponent):
             z_reshape = ReshapeForAttentionHeads(n_heads, d_head)
             self.o.hook_in.hook_conversion = z_reshape
 
-        class TransposeRotaryHeads(BaseHookConversion):
+        class TransposeRotaryHeads(BaseTensorConversion):
             """Transpose rotary hook tensors from HF format to HookedTransformer format."""
 
             def handle_conversion(self, input_value, *full_context):
@@ -331,36 +331,6 @@ class AttentionBridge(GeneralizedComponent):
         else:
             output = self.hook_out(output)
         return output
-
-    def set_processed_weights(
-        self, weights: Mapping[str, torch.Tensor | None], verbose: bool = False
-    ) -> None:
-        """Set the processed weights by delegating to LinearBridge submodules.
-
-        This method uses the base class's recursive distribution mechanism to
-        distribute weights to q/k/v/o LinearBridge subcomponents via real_components.
-
-        Args:
-            weights: Dictionary containing processed weight tensors. The base class
-                     will filter by the remote component names (e.g., "q_proj") and
-                     distribute to the corresponding subcomponents.
-            verbose: If True, print detailed information about weight setting
-        """
-        if verbose:
-            print(
-                f"\n  set_processed_weights: AttentionBridge (name={getattr(self, 'name', 'unknown')})"
-            )
-            print(f"    Received {len(weights)} weight keys")
-
-        if self.original_component is None:
-            raise RuntimeError(f"Original component not set for {self.name}")
-
-        if "W_Q" in weights.keys():
-            # legacy call that will go away
-            return
-        # Filter out None values for parent class
-        filtered_weights = {k: v for k, v in weights.items() if v is not None}
-        super().set_processed_weights(filtered_weights, verbose=verbose)
 
     @property
     def W_Q(self) -> torch.Tensor:

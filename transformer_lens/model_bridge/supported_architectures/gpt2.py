@@ -5,15 +5,19 @@ from typing import Any
 import torch
 
 from transformer_lens.conversion_utils.conversion_steps import (
-    BaseHookConversion,
-    HookConversionSet,
+    BaseTensorConversion,
+    RearrangeTensorConversion,
+    TransposeTensorConversion,
+)
+from transformer_lens.conversion_utils.param_processing_conversion import (
+    ParamProcessingConversion,
 )
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
     BlockBridge,
-    Conv1DBridge,
     EmbeddingBridge,
     JointQKVAttentionBridge,
+    LinearBridge,
     MLPBridge,
     NormalizationBridge,
     PosEmbedBridge,
@@ -21,7 +25,7 @@ from transformer_lens.model_bridge.generalized_components import (
 )
 
 
-class QKVSplitRearrangeConversion(BaseHookConversion):
+class QKVSplitRearrangeConversion(BaseTensorConversion):
     """Custom conversion that splits QKV tensor and then rearranges."""
 
     def __init__(self, qkv_index: int, rearrange_pattern: str, **axes_lengths):
@@ -50,45 +54,13 @@ class QKVSplitRearrangeConversion(BaseHookConversion):
             raise ValueError(f"Unexpected tensor shape: {input_value.shape}")
 
         # Split the QKV tensor
-        qkv_parts = torch.chunk(input_value, 3, dim=split_dim)
+        qkv_parts = torch.tensor_split(input_value, 3, dim=split_dim)
         selected_part = qkv_parts[self.qkv_index]
 
         # Apply rearrangement
         import einops
 
         return einops.rearrange(selected_part, self.rearrange_pattern, **self.axes_lengths)
-
-
-class QKVBiasConversion(BaseHookConversion):
-    """Custom conversion for QKV biases that matches the original GPT-2 logic."""
-
-    def __init__(self, qkv_index: int, n_heads: int, d_head: int):
-        """Initialize the conversion.
-
-        Args:
-            qkv_index: Index of Q (0), K (1), or V (2) in the QKV tensor
-            n_heads: Number of attention heads
-            d_head: Dimension of each head
-        """
-        super().__init__()
-        self.qkv_index = qkv_index
-        self.n_heads = n_heads
-        self.d_head = d_head
-
-    def handle_conversion(self, input_value: torch.Tensor, *full_context) -> torch.Tensor:
-        """Convert QKV bias following the original GPT-2 logic."""
-        import einops
-
-        # Original logic: rearrange the entire bias tensor first, then split by QKV
-        qkv_bias = einops.rearrange(
-            input_value,
-            "(qkv index head)->qkv index head",
-            qkv=3,
-            index=self.n_heads,
-            head=self.d_head,
-        )
-        # Return the selected QKV part
-        return qkv_bias[self.qkv_index]
 
 
 class GPT2ArchitectureAdapter(ArchitectureAdapter):
@@ -135,40 +107,69 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
         # Set config variable to indicate that attention weights are split (use TransformerLens format processing)
         self.cfg.split_attention_weights = True
 
-        self.conversion_rules = HookConversionSet(
-            {
-                "blocks.{i}.attn.W_Q": (
-                    "transformer.h.{i}.attn.c_attn.weight",
-                    QKVSplitRearrangeConversion(
-                        0, "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
-                ),
-                "blocks.{i}.attn.W_K": (
-                    "transformer.h.{i}.attn.c_attn.weight",
-                    QKVSplitRearrangeConversion(
-                        1, "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
-                ),
-                "blocks.{i}.attn.W_V": (
-                    "transformer.h.{i}.attn.c_attn.weight",
-                    QKVSplitRearrangeConversion(
-                        2, "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
-                ),
-                "blocks.{i}.attn.b_Q": (
-                    "transformer.h.{i}.attn.c_attn.bias",
-                    QKVBiasConversion(0, self.cfg.n_heads, self.cfg.d_head),
-                ),
-                "blocks.{i}.attn.b_K": (
-                    "transformer.h.{i}.attn.c_attn.bias",
-                    QKVBiasConversion(1, self.cfg.n_heads, self.cfg.d_head),
-                ),
-                "blocks.{i}.attn.b_V": (
-                    "transformer.h.{i}.attn.c_attn.bias",
-                    QKVBiasConversion(2, self.cfg.n_heads, self.cfg.d_head),
-                ),
-            }
+        from transformer_lens.conversion_utils.param_processing_conversion import (
+            ParamProcessingConversion,
         )
+
+        self.weight_processing_conversions = {
+            # Q/K/V weights - split from joint qkv.weight and rearrange
+            "blocks.{i}.attn.q.weight": ParamProcessingConversion(
+                tensor_conversion=QKVSplitRearrangeConversion(
+                    qkv_index=0,
+                    rearrange_pattern="d_model (n h) -> n d_model h",
+                    n=self.cfg.n_heads,
+                ),
+                source_key="blocks.{i}.attn.qkv.weight",
+            ),
+            "blocks.{i}.attn.k.weight": ParamProcessingConversion(
+                tensor_conversion=QKVSplitRearrangeConversion(
+                    qkv_index=1,
+                    rearrange_pattern="d_model (n h) -> n d_model h",
+                    n=self.cfg.n_heads,
+                ),
+                source_key="blocks.{i}.attn.qkv.weight",
+            ),
+            "blocks.{i}.attn.v.weight": ParamProcessingConversion(
+                tensor_conversion=QKVSplitRearrangeConversion(
+                    qkv_index=2,
+                    rearrange_pattern="d_model (n h) -> n d_model h",
+                    n=self.cfg.n_heads,
+                ),
+                source_key="blocks.{i}.attn.qkv.weight",
+            ),
+            # Q/K/V biases - split from joint qkv.bias and reshape
+            "blocks.{i}.attn.q.bias": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    pattern="(index head) -> index head",
+                    index=self.cfg.n_heads,
+                    head=self.cfg.d_head,
+                ),
+            ),
+            "blocks.{i}.attn.k.bias": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    pattern="(index head) -> index head",
+                    index=self.cfg.n_heads,
+                    head=self.cfg.d_head,
+                ),
+            ),
+            "blocks.{i}.attn.v.bias": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    pattern="(index head) -> index head",
+                    index=self.cfg.n_heads,
+                    head=self.cfg.d_head,
+                ),
+            ),
+            # O weight - rearrange from 2D to 3D
+            "blocks.{i}.attn.o.weight": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    pattern="(n h) m -> n h m", n=self.cfg.n_heads
+                ),
+            ),
+            # Unembed weight - transpose from [d_model, d_vocab] to [d_vocab, d_model]
+            "unembed.weight": ParamProcessingConversion(
+                tensor_conversion=TransposeTensorConversion(),
+            ),
+        }
 
         self.component_mapping = {
             "embed": EmbeddingBridge(name="transformer.wte"),
@@ -183,16 +184,16 @@ class GPT2ArchitectureAdapter(ArchitectureAdapter):
                         config=self.cfg,
                         split_qkv_matrix=self.split_qkv_matrix,
                         submodules={
-                            "qkv": Conv1DBridge(name="c_attn"),
-                            "o": Conv1DBridge(name="c_proj"),
+                            "qkv": LinearBridge(name="c_attn"),
+                            "o": LinearBridge(name="c_proj"),
                         },
                     ),
                     "ln2": NormalizationBridge(name="ln_2", config=self.cfg),
                     "mlp": MLPBridge(
                         name="mlp",
                         submodules={
-                            "in": Conv1DBridge(name="c_fc"),
-                            "out": Conv1DBridge(name="c_proj"),
+                            "in": LinearBridge(name="c_fc"),
+                            "out": LinearBridge(name="c_proj"),
                         },
                     ),
                 },

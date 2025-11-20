@@ -5,9 +5,11 @@ from typing import Any
 import torch
 
 from transformer_lens.conversion_utils.conversion_steps import (
-    BaseHookConversion,
-    HookConversionSet,
-    RearrangeHookConversion,
+    BaseTensorConversion,
+    RearrangeTensorConversion,
+)
+from transformer_lens.conversion_utils.param_processing_conversion import (
+    ParamProcessingConversion,
 )
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
@@ -22,7 +24,7 @@ from transformer_lens.model_bridge.generalized_components import (
 )
 
 
-class NeoLinearTransposeConversion(BaseHookConversion):
+class NeoLinearTransposeConversion(BaseTensorConversion):
     """Transpose Linear weights to Conv1D format and rearrange for GPT-Neo.
 
     GPT-Neo uses standard PyTorch Linear layers with weights shaped [out_features, in_features].
@@ -87,90 +89,88 @@ class NeoArchitectureAdapter(ArchitectureAdapter):
 
         # GPT-Neo uses BOS tokens (inherits default_prepend_bos = True)
 
-        self.conversion_rules = HookConversionSet(
-            {
-                # Property access keys (used by component tree) - for attention
-                "blocks.{i}.attn.q.weight": (
-                    "transformer.h.{i}.attn.attention.q_proj.weight",
-                    NeoLinearTransposeConversion(
-                        "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
+        self.weight_processing_conversions = {
+            # Property access keys (used by component tree) - for attention
+            "blocks.{i}.attn.W_Q": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(
+                    "d_model (n h) -> n d_model h", n=self.cfg.n_heads
                 ),
-                "blocks.{i}.attn.k.weight": (
-                    "transformer.h.{i}.attn.attention.k_proj.weight",
-                    NeoLinearTransposeConversion(
-                        "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
+                source_key="transformer.h.{i}.attn.attention.q_proj.weight",
+            ),
+            "blocks.{i}.attn.W_K": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(
+                    "d_model (n h) -> n d_model h", n=self.cfg.n_heads
                 ),
-                "blocks.{i}.attn.v.weight": (
-                    "transformer.h.{i}.attn.attention.v_proj.weight",
-                    NeoLinearTransposeConversion(
-                        "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
+                source_key="transformer.h.{i}.attn.attention.k_proj.weight",
+            ),
+            "blocks.{i}.attn.W_V": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(
+                    "d_model (n h) -> n d_model h", n=self.cfg.n_heads
                 ),
-                "blocks.{i}.attn.o.weight": (
-                    "transformer.h.{i}.attn.attention.out_proj.weight",
-                    NeoLinearTransposeConversion(
-                        "(n h) d_model -> n h d_model", n=self.cfg.n_heads
-                    ),
+                source_key="transformer.h.{i}.attn.attention.v_proj.weight",
+            ),
+            "blocks.{i}.attn.W_O": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(
+                    "(n h) d_model -> n h d_model", n=self.cfg.n_heads
                 ),
-                # Property access keys - for MLP
-                "blocks.{i}.mlp.in.weight": (
-                    "transformer.h.{i}.mlp.c_fc.weight",
-                    NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed
+                source_key="transformer.h.{i}.attn.attention.out_proj.weight",
+            ),
+            # Property access keys - for MLP
+            "blocks.{i}.mlp.W_in": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed,
+                source_key="transformer.h.{i}.mlp.c_fc.weight",
+            ),
+            "blocks.{i}.mlp.W_out": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed,
+                source_key="transformer.h.{i}.mlp.c_proj.weight",
+            ),
+            # Weight processing keys (W_Q, W_K, W_V, W_O style) - for weight processing
+            "blocks.{i}.attn.W_Q": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(
+                    "d_model (n h) -> n d_model h", n=self.cfg.n_heads
                 ),
-                "blocks.{i}.mlp.out.weight": (
-                    "transformer.h.{i}.mlp.c_proj.weight",
-                    NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed
+                source_key="transformer.h.{i}.attn.attention.q_proj.weight",
+            ),
+            "blocks.{i}.attn.W_K": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(
+                    "d_model (n h) -> n d_model h", n=self.cfg.n_heads
                 ),
-                # Weight processing keys (W_Q, W_K, W_V, W_O style) - for weight processing
-                "blocks.{i}.attn.W_Q": (
-                    "transformer.h.{i}.attn.attention.q_proj.weight",
-                    NeoLinearTransposeConversion(
-                        "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
+                source_key="transformer.h.{i}.attn.attention.k_proj.weight",
+            ),
+            "blocks.{i}.attn.W_V": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(
+                    "d_model (n h) -> n d_model h", n=self.cfg.n_heads
                 ),
-                "blocks.{i}.attn.W_K": (
-                    "transformer.h.{i}.attn.attention.k_proj.weight",
-                    NeoLinearTransposeConversion(
-                        "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
+                source_key="transformer.h.{i}.attn.attention.v_proj.weight",
+            ),
+            "blocks.{i}.attn.W_O": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(
+                    "(n h) d_model -> n h d_model", n=self.cfg.n_heads
                 ),
-                "blocks.{i}.attn.W_V": (
-                    "transformer.h.{i}.attn.attention.v_proj.weight",
-                    NeoLinearTransposeConversion(
-                        "d_model (n h) -> n d_model h", n=self.cfg.n_heads
-                    ),
-                ),
-                "blocks.{i}.attn.W_O": (
-                    "transformer.h.{i}.attn.attention.out_proj.weight",
-                    NeoLinearTransposeConversion(
-                        "(n h) d_model -> n h d_model", n=self.cfg.n_heads
-                    ),
-                ),
-                "blocks.{i}.attn.b_Q": (
-                    "transformer.h.{i}.attn.attention.q_proj.bias",
-                    RearrangeHookConversion("(n h) -> n h", n=self.cfg.n_heads),
-                ),
-                "blocks.{i}.attn.b_K": (
-                    "transformer.h.{i}.attn.attention.k_proj.bias",
-                    RearrangeHookConversion("(n h) -> n h", n=self.cfg.n_heads),
-                ),
-                "blocks.{i}.attn.b_V": (
-                    "transformer.h.{i}.attn.attention.v_proj.bias",
-                    RearrangeHookConversion("(n h) -> n h", n=self.cfg.n_heads),
-                ),
-                # MLP weight processing keys
-                "blocks.{i}.mlp.W_in": (
-                    "transformer.h.{i}.mlp.c_fc.weight",
-                    NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed
-                ),
-                "blocks.{i}.mlp.W_out": (
-                    "transformer.h.{i}.mlp.c_proj.weight",
-                    NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed
-                ),
-            }
-        )
+                source_key="transformer.h.{i}.attn.attention.out_proj.weight",
+            ),
+            "blocks.{i}.attn.b_Q": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("(n h) -> n h", n=self.cfg.n_heads),
+                source_key="transformer.h.{i}.attn.attention.q_proj.bias",
+            ),
+            "blocks.{i}.attn.b_K": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("(n h) -> n h", n=self.cfg.n_heads),
+                source_key="transformer.h.{i}.attn.attention.k_proj.bias",
+            ),
+            "blocks.{i}.attn.b_V": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("(n h) -> n h", n=self.cfg.n_heads),
+                source_key="transformer.h.{i}.attn.attention.v_proj.bias",
+            ),
+            # MLP weight processing keys
+            "blocks.{i}.mlp.W_in": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed,
+                source_key="transformer.h.{i}.mlp.c_fc.weight",
+            ),
+            "blocks.{i}.mlp.W_out": ParamProcessingConversion(
+                tensor_conversion=NeoLinearTransposeConversion(),  # Just transpose, no rearrange needed,
+                source_key="transformer.h.{i}.mlp.c_proj.weight",
+            ),
+        }
 
         self.component_mapping = {
             "embed": EmbeddingBridge(name="transformer.wte"),

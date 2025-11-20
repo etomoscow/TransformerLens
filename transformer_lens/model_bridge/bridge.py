@@ -586,143 +586,6 @@ class TransformerBridge(nn.Module):
         lines.extend(self._format_component_mapping(mapping, indent=1))
         return "\n".join(lines)
 
-    def _fix_backward_hook_gradients(self) -> None:
-        """Fix backward hook gradients by overriding HF transformer forward.
-
-        The HuggingFace transformer's forward method unpacks tuples between blocks
-        in a way that breaks gradient flow for backward hooks. This override calls
-        BlockBridge blocks directly in sequence, matching HookedTransformer's approach.
-
-        Testing shows this makes backward hook gradients match HookedTransformer exactly.
-        """
-        if not hasattr(self.original_model, "transformer"):
-            return
-        transformer = self.original_model.transformer
-        assert isinstance(
-            transformer, nn.Module
-        ), f"Expected transformer to be a Module, got {type(transformer)}"
-        original_transformer_forward = transformer.forward
-
-        def fixed_transformer_forward(
-            input_ids=None,
-            past_key_values=None,
-            cache_position=None,
-            attention_mask=None,
-            token_type_ids=None,
-            position_ids=None,
-            head_mask=None,
-            inputs_embeds=None,
-            encoder_hidden_states=None,
-            encoder_attention_mask=None,
-            use_cache=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-            **kwargs,
-        ):
-            """Custom transformer forward that preserves gradient flow for backward hooks."""
-            if input_ids is not None and inputs_embeds is not None:
-                raise ValueError("You cannot specify both input_ids and inputs_embeds")
-            elif input_ids is not None:
-                input_shape = input_ids.size()
-                input_ids = input_ids.view(-1, input_shape[-1])
-                batch_size = input_ids.shape[0]
-            elif inputs_embeds is not None:
-                input_shape = inputs_embeds.size()[:-1]
-                batch_size = inputs_embeds.shape[0]
-            else:
-                raise ValueError("You have to specify either input_ids or inputs_embeds")
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            if inputs_embeds is None:
-                inputs_embeds = transformer.wte(input_ids)  # type: ignore[operator]
-            if position_ids is None:
-                if cache_position is not None:
-                    position_ids = cache_position.unsqueeze(0)
-                else:
-                    position_ids = torch.arange(0, input_shape[-1], dtype=torch.long, device=device)
-                    position_ids = position_ids.unsqueeze(0)
-            position_embeds = transformer.wpe(position_ids)  # type: ignore[operator]
-            hidden_states = inputs_embeds + position_embeds
-            if token_type_ids is not None:
-                token_type_ids = token_type_ids.view(-1, input_shape[-1])
-                token_type_embeds = transformer.wte(token_type_ids)  # type: ignore[operator]
-                hidden_states = hidden_states + token_type_embeds
-            hidden_states = transformer.drop(hidden_states)  # type: ignore[operator]
-            if attention_mask is not None:
-                attention_mask = attention_mask.view(batch_size, -1)
-                attention_mask = attention_mask[:, None, None, :]
-                attention_mask = attention_mask.to(dtype=hidden_states.dtype)
-                attention_mask = (1.0 - attention_mask) * torch.finfo(hidden_states.dtype).min
-            if head_mask is not None:
-                if head_mask.dim() == 1:
-                    head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-                    head_mask = head_mask.expand(len(transformer.h), -1, -1, -1, -1)  # type: ignore[arg-type]
-                elif head_mask.dim() == 2:
-                    head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
-            else:
-                head_mask = [None] * len(transformer.h)  # type: ignore[arg-type]
-            if past_key_values is None:
-                past_key_values = tuple([None] * len(transformer.h))  # type: ignore[arg-type]
-            use_cache_object = hasattr(past_key_values, "update")
-            residual = hidden_states
-            all_hidden_states = () if output_hidden_states else None
-            all_attentions = () if output_attentions else None
-            for i, block_bridge in enumerate(self.blocks):
-                if output_hidden_states:
-                    all_hidden_states = all_hidden_states + (residual,)  # type: ignore[operator]
-                layer_past = past_key_values if use_cache_object else past_key_values[i]
-
-                # Remove explicitly-passed kwargs to avoid "multiple values for argument" errors
-                filtered_kwargs = {
-                    k: v
-                    for k, v in kwargs.items()
-                    if k not in ("encoder_attention_mask", "use_cache", "output_attentions")
-                }
-
-                block_outputs = block_bridge(
-                    residual,
-                    layer_past,
-                    cache_position,
-                    attention_mask,
-                    head_mask[i],
-                    encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    **filtered_kwargs,
-                )
-                if isinstance(block_outputs, tuple):
-                    residual = block_outputs[0]
-                    if output_attentions and len(block_outputs) > 1:
-                        all_attentions = all_attentions + (block_outputs[1],)  # type: ignore[operator,assignment]
-                else:
-                    residual = block_outputs
-            hidden_states = residual
-            if transformer.ln_f is not None:
-                hidden_states = transformer.ln_f(hidden_states)  # type: ignore[operator]
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)  # type: ignore[operator]
-            if return_dict:
-                from transformers.modeling_outputs import (
-                    BaseModelOutputWithPastAndCrossAttentions,
-                )
-
-                return BaseModelOutputWithPastAndCrossAttentions(
-                    last_hidden_state=hidden_states,
-                    past_key_values=None,
-                    hidden_states=all_hidden_states,
-                    attentions=all_attentions,
-                )
-            else:
-                outputs: tuple[Any, ...] = (hidden_states,)
-                if output_hidden_states:
-                    outputs = outputs + (all_hidden_states,)
-                if output_attentions:
-                    outputs = outputs + (all_attentions,)
-                return outputs
-
-        transformer.forward = fixed_transformer_forward
-
     def enable_compatibility_mode(
         self,
         disable_warnings: bool = False,
@@ -766,9 +629,6 @@ class TransformerBridge(nn.Module):
 
         apply_fn_to_all_components(self, set_compatibility_mode)
         self.clear_hook_registry()
-        self._initialize_hook_registry()
-        self._fix_backward_hook_gradients()
-        self._setup_hook_compatibility()
         if not no_processing:
             self.process_weights(
                 fold_ln=fold_ln,
@@ -777,6 +637,8 @@ class TransformerBridge(nn.Module):
                 fold_value_biases=fold_value_biases,
                 refactor_factored_attn_matrices=refactor_factored_attn_matrices,
             )
+        self._initialize_hook_registry()
+        self._setup_hook_compatibility()
         self._register_all_aliases_recursive()
 
     def _setup_hook_compatibility(self) -> None:
@@ -813,39 +675,6 @@ class TransformerBridge(nn.Module):
                     elif hasattr(attn, "setup_no_processing_hooks"):
                         attn.setup_no_processing_hooks()
 
-    def _enable_split_qkv_attention(self) -> None:
-        """Enable split Q/K/V computation for attention layers in no_processing mode.
-
-        This extracts Q/K/V weights from HuggingFace attention components using the
-        architecture adapter and sets them on JointQKVAttentionBridge instances.
-        This enables 3 backward paths through ln1 (matching HookedTransformer).
-
-        Unlike enable_ht_computation_for_bridge, this ONLY affects attention layers,
-        leaving MLPs to use their original HF weights.
-        """
-        blocks_to_process = []
-        if hasattr(self, "blocks"):
-            blocks_to_process.extend(self.blocks)
-        if hasattr(self, "encoder_blocks"):
-            blocks_to_process.extend(self.encoder_blocks)
-        if hasattr(self, "decoder_blocks"):
-            blocks_to_process.extend(self.decoder_blocks)
-        for block in blocks_to_process:
-            if hasattr(block, "attn") and hasattr(block, "original_component"):
-                hf_block = block.original_component
-                if hasattr(hf_block, "attn"):
-                    self.adapter._enable_ht_attention(block.attn, hf_block.attn)
-                    ln1 = None
-                    if hasattr(block, "ln1"):
-                        ln1 = block.ln1
-                    elif hasattr(block, "ln_1"):
-                        ln1 = block.ln_1
-                    elif hasattr(block, "input_layernorm"):
-                        ln1 = block.input_layernorm
-                    if ln1 is not None:
-                        block.attn._ln1 = ln1
-                        block.attn._expects_pre_ln1_input = True
-
     def process_weights(
         self,
         verbose: bool = False,
@@ -877,28 +706,25 @@ class TransformerBridge(nn.Module):
 
         if verbose:
             print("  Extracting state dict from existing model...")
-        raw_state_dict = self.original_model.state_dict()
-        state_dict = {}
-        for key, value in raw_state_dict.items():
-            clean_key = key
-            while "._original_component" in clean_key:
-                clean_key = clean_key.replace("._original_component", "")
-            state_dict[clean_key] = value
+        state_dict = self.state_dict()
         adapter = self.adapter
+
+        # Break weight tying between embed and unembed in the state dict
+        # This is necessary for models like GPT-2 that share weights between lm_head and wte
+        # We need to untie them so that center_unembed only affects unembed, not embed
+        embed_key = "embed.weight"
+        unembed_key = "unembed.weight"
+
+        if embed_key in state_dict and unembed_key in state_dict:
+            # Check if they point to the same tensor (weight tying)
+            if state_dict[embed_key].data_ptr() == state_dict[unembed_key].data_ptr():
+                if verbose:
+                    print("  Breaking weight tying between embed and unembed in state dict...")
+                # Clone the unembed weight to break the tie
+                state_dict[unembed_key] = state_dict[unembed_key].clone()
+
         if adapter and hasattr(adapter, "preprocess_weights"):
             state_dict = adapter.preprocess_weights(state_dict)
-        if adapter:
-            try:
-                unembed_b_U_key = ProcessWeights._get_param_key("unembed.b_U", adapter)
-                if unembed_b_U_key not in state_dict:
-                    state_dict[unembed_b_U_key] = torch.zeros(
-                        self.cfg.d_vocab_out
-                        if hasattr(self.cfg, "d_vocab_out")
-                        else self.cfg.d_vocab,
-                        dtype=self.cfg.dtype if hasattr(self.cfg, "dtype") else torch.float32,
-                    )
-            except (ValueError, KeyError):
-                pass
 
         # Use unified ProcessWeights.process_weights() like HookedTransformer does
         if verbose:
@@ -914,261 +740,13 @@ class TransformerBridge(nn.Module):
             adapter=adapter,
         )
 
+        # print("new", state_dict.keys())
         if verbose:
             print("  Distributing weights to generalized components...")
         ProcessWeights.distribute_weights_to_components(
             state_dict=state_dict,
             component_mapping=self.real_components,
         )
-
-        self._load_all_processed_weights(verbose=verbose, processed_state_dict=state_dict)
-        if verbose:
-            print("  Loading processed weights into Bridge components...")
-        loaded_count = 0
-        missing_count = 0
-
-        for tb_key, weight_tensor in state_dict.items():
-            # Skip Q/K/V/O weights - they're handled by _load_attention_weights()
-            if any(
-                pattern in tb_key
-                for pattern in [
-                    ".attn.q.",
-                    ".attn.k.",
-                    ".attn.v.",
-                    ".q_proj.",
-                    ".k_proj.",
-                    ".v_proj.",
-                    ".out_proj.",
-                ]
-            ):
-                continue
-            try:
-                parts = tb_key.split(".")
-                component: Any = self
-                for i, part in enumerate(parts[:-1]):
-                    if part.isdigit():
-                        if hasattr(component, "__getitem__"):
-                            component = component[int(part)]
-                        else:
-                            raise TypeError(f"Component {component} is not indexable")
-                    elif hasattr(component, part):
-                        component = getattr(component, part)
-                    elif hasattr(component, "_modules") and part in component._modules:
-                        component = component._modules[part]
-                    else:
-                        raise AttributeError(f"Component {part} not found")
-                param_name = parts[-1]
-                if hasattr(component, "_original_component"):
-                    target_component = component._original_component
-                else:
-                    target_component = component
-                if hasattr(target_component, param_name):
-                    param = getattr(target_component, param_name)
-                    if param is not None and isinstance(param, torch.nn.Parameter):
-                        param.data = weight_tensor
-                        loaded_count += 1
-                    elif param is None:
-                        setattr(target_component, param_name, torch.nn.Parameter(weight_tensor))
-                        loaded_count += 1
-                else:
-                    if verbose:
-                        print(f"    Warning: Parameter {param_name} not found in {tb_key}")
-                    missing_count += 1
-            except (AttributeError, IndexError, KeyError, TypeError) as e:
-                if verbose:
-                    print(f"    Warning: Could not load {tb_key}: {e}")
-                missing_count += 1
-        if verbose:
-            print(f"    Loaded {loaded_count} weights into Bridge components")
-            print(f"    Skipped {missing_count} keys")
-            print(f"    Processed state_dict has {len(state_dict)} keys")
-        is_gemma_model = getattr(self.cfg, "architecture", None) in [
-            "GemmaForCausalLM",
-            "Gemma2ForCausalLM",
-        ] or getattr(self.cfg, "original_architecture", None) in [
-            "GemmaForCausalLM",
-            "Gemma2ForCausalLM",
-        ]
-        if fold_ln and (not is_gemma_model):
-            for layer_idx in range(self.cfg.n_layers):
-                for ln_name in ["ln1", "ln2"]:
-                    try:
-                        block = self.blocks[layer_idx]
-                        ln_component = getattr(block, ln_name, None)
-                        if ln_component is not None:
-                            if hasattr(ln_component, "_original_component"):
-                                norm_module = ln_component._original_component
-                            else:
-                                norm_module = ln_component
-                            if hasattr(norm_module, "weight") and norm_module.weight is not None:
-                                with torch.no_grad():
-                                    norm_module.weight.fill_(1.0)
-                            if hasattr(norm_module, "bias") and norm_module.bias is not None:
-                                with torch.no_grad():
-                                    norm_module.bias.zero_()
-                    except (AttributeError, IndexError):
-                        pass
-            try:
-                if hasattr(self, "ln_final"):
-                    ln_final = self.ln_final
-                    if hasattr(ln_final, "_original_component"):
-                        norm_module = ln_final._original_component
-                    else:
-                        norm_module = ln_final
-                    if hasattr(norm_module, "weight") and norm_module.weight is not None:
-                        with torch.no_grad():
-                            norm_module.weight.fill_(1.0)
-                    if hasattr(norm_module, "bias") and norm_module.bias is not None:
-                        with torch.no_grad():
-                            norm_module.bias.zero_()
-            except (AttributeError, IndexError):
-                pass
-
-        # Mark that weights have been processed
-        self._weights_processed = True
-
-    def _load_all_processed_weights(
-        self, verbose: bool = False, processed_state_dict: Optional[Dict[str, torch.Tensor]] = None
-    ) -> None:
-        """Load processed weights into all components (Phase 2).
-
-        Args:
-            verbose: If True, print detailed progress messages. Default: False
-            processed_state_dict: Optional processed state dict (if None, uses self._processed_tl_weights)
-        """
-        if processed_state_dict is not None:
-            object.__setattr__(self, "_processed_tl_weights", processed_state_dict)
-        self._load_transformer_block_weights(verbose=verbose)
-
-    def _load_transformer_block_weights(self, verbose: bool = False) -> None:
-        """Load transformer block weights into attention and MLP components.
-
-        Args:
-            verbose: If True, print detailed progress messages. Default: False
-        """
-        processed_weights = self._processed_tl_weights
-        for layer_idx in range(self.cfg.n_layers):
-            if not hasattr(self, "blocks") or layer_idx >= len(self.blocks):
-                continue
-            block = self.blocks[layer_idx]
-            if hasattr(block, "mlp"):
-                self._load_mlp_weights(block.mlp, layer_idx, processed_weights, verbose=verbose)
-
-    def _load_mlp_weights(self, mlp_component, layer_idx, processed_weights, verbose: bool = False):
-        """Load MLP weights into the MLPBridge or GatedMLPBridge component.
-
-        Args:
-            verbose: If True, print detailed progress messages. Default: False
-        """
-        from transformer_lens.weight_processing import ProcessWeights
-
-        adapter = self.adapter
-        cfg = self.cfg
-        W_in_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.W_in", adapter)
-        W_out_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.W_out", adapter)
-        b_in_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.b_in", adapter)
-        b_out_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.b_out", adapter)
-        W_gate_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.W_gate", adapter)
-        b_gate_key = ProcessWeights._get_param_key(f"blocks.{layer_idx}.mlp.b_gate", adapter)
-        W_in = processed_weights.get(W_in_key)
-        W_out = processed_weights.get(W_out_key)
-        b_in = processed_weights.get(b_in_key)
-        b_out = processed_weights.get(b_out_key)
-        W_gate = processed_weights.get(W_gate_key)
-        b_gate = processed_weights.get(b_gate_key)
-        if W_in is None or W_out is None:
-            return
-        mlp_component.set_processed_weights(
-            {
-                "in.weight": W_in,
-                "out.weight": W_out,
-                "in.bias": b_in,
-                "out.bias": b_out,
-                "gate.weight": W_gate,
-                "gate.bias": b_gate,
-            }
-        )
-
-    def _ported_forward_pass(
-        self,
-        input: Union[str, List[str], torch.Tensor],
-        return_type: Optional[str] = "logits",
-        prepend_bos: Optional[bool] = None,
-        loss_per_token: bool = False,
-        start_at_layer: Optional[int] = None,
-        stop_at_layer: Optional[int] = None,
-    ) -> Any:
-        """Forward pass using ported HookedTransformer functionality."""
-        if isinstance(input, (str, list)):
-            tokens = self.to_tokens(input, prepend_bos=prepend_bos)
-        else:
-            tokens = input
-        token_embed = self.embed(tokens)
-        if (
-            hasattr(self.cfg, "positional_embedding_type")
-            and self.cfg.positional_embedding_type == "rotary"
-        ):
-            residual = token_embed
-        elif hasattr(self, "pos_embed"):
-            pos_embed = self.pos_embed(tokens)
-            residual = token_embed + pos_embed
-        else:
-            residual = token_embed
-        start_layer = start_at_layer or 0
-        if stop_at_layer is not None and stop_at_layer < 0:
-            end_layer = self.cfg.n_layers + stop_at_layer
-        else:
-            end_layer = stop_at_layer or self.cfg.n_layers
-        for layer_idx in range(start_layer, end_layer):
-            if layer_idx >= len(self.blocks):
-                break
-            block = self.blocks[layer_idx]
-            if hasattr(block, "hook_in"):
-                residual = block.hook_in(residual)
-            if hasattr(block, "ln1"):
-                normed_residual = block.ln1(residual)
-            else:
-                normed_residual = residual
-            if hasattr(block, "attn"):
-                attn_out = block.attn(normed_residual)
-                if isinstance(attn_out, tuple):
-                    attn_out = attn_out[0]
-                if hasattr(block, "ln1_post"):
-                    attn_out = block.ln1_post(attn_out)
-                residual = residual + attn_out
-            if hasattr(block, "hook_resid_mid"):
-                residual = block.hook_resid_mid(residual)
-            if hasattr(block, "ln2"):
-                normed_residual = block.ln2(residual)
-            else:
-                normed_residual = residual
-            if hasattr(block, "mlp"):
-                mlp_out = block.mlp(normed_residual)
-                if isinstance(mlp_out, tuple):
-                    mlp_out = mlp_out[0]
-                if hasattr(block, "ln2_post"):
-                    mlp_out = block.ln2_post(mlp_out)
-                if hasattr(block, "hook_mlp_out"):
-                    mlp_out = block.hook_mlp_out(mlp_out)
-                residual = residual + mlp_out
-            if hasattr(block, "hook_out"):
-                residual = block.hook_out(residual)
-        if hasattr(self, "ln_final"):
-            residual = self.ln_final(residual)
-        if return_type == "logits":
-            logits = self.unembed(residual)
-            return logits
-        elif return_type == "loss":
-            logits = self.unembed(residual)
-            return self._calculate_loss(logits, tokens, loss_per_token)
-        elif return_type == "both":
-            logits = self.unembed(residual)
-            loss = self._calculate_loss(logits, tokens, loss_per_token)
-            return (logits, loss)
-        elif return_type is None:
-            return None
-        else:
-            return residual
 
     def _calculate_loss(self, logits, tokens, loss_per_token=False):
         """Calculate cross-entropy loss."""
@@ -1182,96 +760,6 @@ class TransformerBridge(nn.Module):
             return loss.view(shift_labels.shape)
         else:
             return loss
-
-    def _run_with_hooks_ported(
-        self,
-        input: Union[str, List[str], torch.Tensor],
-        fwd_hooks: List[Tuple[Union[str, Callable], Callable]] = [],
-        bwd_hooks: List[Tuple[Union[str, Callable], Callable]] = [],
-        reset_hooks_end: bool = True,
-        clear_contexts: bool = False,
-        return_type: Optional[str] = "logits",
-        stop_at_layer: Optional[int] = None,
-        **kwargs,
-    ) -> Any:
-        """Run with hooks using ported components."""
-        if isinstance(input, (str, list)):
-            tokens = self.to_tokens(input, prepend_bos=kwargs.get("prepend_bos", None))
-        else:
-            tokens = input
-        added_hooks: List[Tuple[HookPoint, str]] = []
-
-        def add_hook_to_point(
-            hook_point: HookPoint,
-            hook_fn: Callable,
-            name: str,
-            dir: str = "fwd",
-            use_alias_only: bool = False,
-        ):
-            if self.compatibility_mode and name != hook_point.name and (not use_alias_only):
-                alias_names_list: list[str] = []
-                if hook_point.name is not None:
-                    alias_names_list.append(hook_point.name)
-                alias_names_list.append(name)
-                hook_point.add_hook(hook_fn, dir=dir, alias_names=alias_names_list)  # type: ignore[arg-type]
-            elif use_alias_only and name != hook_point.name:
-                hook_point.add_hook(hook_fn, dir=dir, alias_names=[name])  # type: ignore[arg-type]
-            else:
-                hook_point.add_hook(hook_fn, dir=dir)  # type: ignore[arg-type]
-            added_hooks.append((hook_point, name))
-
-        try:
-            for hook_name_or_filter, hook_fn in fwd_hooks:
-                if isinstance(hook_name_or_filter, str):
-                    hook_point = self.get_hook_point(hook_name_or_filter)
-                    if hook_point is not None:
-                        add_hook_to_point(
-                            hook_point, hook_fn, hook_name_or_filter, "fwd", use_alias_only=True
-                        )
-                elif callable(hook_name_or_filter):
-                    hook_dict = self.hook_dict
-                    hook_point_to_names: dict[int, list[str]] = {}
-                    for name, hook_point in hook_dict.items():
-                        if hook_name_or_filter(name):
-                            hp_id = id(hook_point)
-                            if hp_id not in hook_point_to_names:
-                                hook_point_to_names[hp_id] = []
-                            hook_point_to_names[hp_id].append(name)
-                    for hp_id, matching_names in hook_point_to_names.items():
-                        hook_point = hook_dict[matching_names[0]]
-                        name_to_use = hook_point.name if hook_point.name else matching_names[0]
-                        add_hook_to_point(
-                            hook_point, hook_fn, name_to_use, "fwd", use_alias_only=True
-                        )
-            for hook_name_or_filter, hook_fn in bwd_hooks:
-                if isinstance(hook_name_or_filter, str):
-                    hook_point = self.get_hook_point(hook_name_or_filter)
-                    if hook_point is not None:
-                        add_hook_to_point(
-                            hook_point, hook_fn, hook_name_or_filter, "bwd", use_alias_only=True
-                        )
-                elif callable(hook_name_or_filter):
-                    hook_dict = self.hook_dict
-                    bwd_hook_point_to_names: dict[int, list[str]] = {}
-                    for name, hook_point in hook_dict.items():
-                        if hook_name_or_filter(name):
-                            hp_id = id(hook_point)
-                            if hp_id not in bwd_hook_point_to_names:
-                                bwd_hook_point_to_names[hp_id] = []
-                            bwd_hook_point_to_names[hp_id].append(name)
-                    for hp_id, matching_names in bwd_hook_point_to_names.items():
-                        hook_point = hook_dict[matching_names[0]]
-                        name_to_use = hook_point.name if hook_point.name else matching_names[0]
-                        add_hook_to_point(
-                            hook_point, hook_fn, name_to_use, "bwd", use_alias_only=True
-                        )
-            return self._ported_forward_pass(
-                tokens, return_type=return_type, stop_at_layer=stop_at_layer, **kwargs
-            )
-        finally:
-            if reset_hooks_end:
-                for hook_point, name in added_hooks:
-                    hook_point.remove_hooks()
 
     def _extract_hf_weights(self):
         """Extract weights from the original HuggingFace model."""
@@ -1643,17 +1131,6 @@ class TransformerBridge(nn.Module):
         Returns:
             Model output based on return_type
         """
-        # If weights have been processed, use the ported forward pass which has better stop_at_layer support
-        if hasattr(self, "_weights_processed") and self._weights_processed:
-            return self._ported_forward_pass(
-                input=input,
-                return_type=return_type,
-                prepend_bos=prepend_bos,
-                loss_per_token=loss_per_token,
-                start_at_layer=start_at_layer,
-                stop_at_layer=stop_at_layer,
-            )
-
         from transformer_lens.model_bridge.exceptions import StopAtLayerException
 
         # Set stop_at_layer flag on all blocks if requested
@@ -1939,14 +1416,9 @@ class TransformerBridge(nn.Module):
             def stop_hook(tensor: torch.Tensor, *, hook: Any) -> torch.Tensor:
                 raise StopAtLayerException(tensor, stop_at_layer)
 
-            if stop_at_layer == 0:
-                hook_dict = self.hook_dict
-                block_0_hook_name = "blocks.0.hook_in"
-                if block_0_hook_name in hook_dict:
-                    hook_dict[block_0_hook_name].add_hook(stop_hook)
-                    hooks.append((hook_dict[block_0_hook_name], block_0_hook_name))
-            elif last_layer_to_process >= 0 and last_layer_to_process < len(self.blocks):
-                block_hook_name = f"blocks.{last_layer_to_process}.hook_out"
+            if stop_at_layer >= 0 and stop_at_layer < len(self.blocks):
+                # Stop at the beginning of the specified block, not at the end of the previous block
+                block_hook_name = f"blocks.{stop_at_layer}.hook_in"
                 hook_dict = self.hook_dict
                 if block_hook_name in hook_dict:
                     hook_dict[block_hook_name].add_hook(stop_hook)
@@ -2049,17 +1521,6 @@ class TransformerBridge(nn.Module):
         Returns:
             Model output
         """
-        if hasattr(self, "_weights_processed") and self._weights_processed:
-            return self._run_with_hooks_ported(
-                input,
-                fwd_hooks=fwd_hooks,
-                bwd_hooks=bwd_hooks,
-                reset_hooks_end=reset_hooks_end,
-                clear_contexts=clear_contexts,
-                return_type=return_type,
-                stop_at_layer=stop_at_layer,
-                **kwargs,
-            )
         added_hooks: List[Tuple[HookPoint, str]] = []
         effective_stop_layer = None
         if stop_at_layer is not None and hasattr(self, "blocks"):
@@ -2096,15 +1557,9 @@ class TransformerBridge(nn.Module):
             def stop_hook(tensor: torch.Tensor, *, hook: Any) -> torch.Tensor:
                 raise StopAtLayerException(tensor, stop_at_layer)
 
-            if stop_at_layer == 0:
-                hook_dict = self.hook_dict
-                block_0_hook_name = "blocks.0.hook_in"
-                if block_0_hook_name in hook_dict:
-                    add_hook_to_point(
-                        hook_dict[block_0_hook_name], stop_hook, block_0_hook_name, "fwd"
-                    )
-            elif last_layer_to_process >= 0 and last_layer_to_process < len(self.blocks):
-                block_hook_name = f"blocks.{last_layer_to_process}.hook_out"
+            if stop_at_layer >= 0 and stop_at_layer < len(self.blocks):
+                # Stop at the beginning of the specified block, not at the end of the previous block
+                block_hook_name = f"blocks.{stop_at_layer}.hook_in"
                 hook_dict = self.hook_dict
                 if block_hook_name in hook_dict:
                     add_hook_to_point(hook_dict[block_hook_name], stop_hook, block_hook_name, "fwd")
@@ -2182,54 +1637,136 @@ class TransformerBridge(nn.Module):
         return_type: Optional[str] = "input",
         verbose: bool = True,
     ) -> Union[str, List[str], torch.Tensor]:
-        """Generate text from the model using the underlying HuggingFace model."""
+        """Sample tokens from the model.
+
+        Sample tokens from the model until the model outputs eos_token or max_new_tokens is reached.
+        This implementation is based on HookedTransformer.generate() to ensure consistent behavior.
+
+        Args:
+            input: Text string, list of strings, or tensor of tokens
+            max_new_tokens: Maximum number of tokens to generate
+            stop_at_eos: If True, stop generating tokens when the model outputs eos_token
+            eos_token_id: The token ID to use for end of sentence
+            do_sample: If True, sample from the model's output distribution. Otherwise, use greedy search
+            top_k: Number of tokens to sample from. If None, sample from all tokens
+            top_p: Probability mass to sample from. If 1.0, sample from all tokens
+            temperature: Temperature for sampling. Higher values will make the model more random
+            freq_penalty: Frequency penalty for sampling - how much to penalise previous tokens
+            use_past_kv_cache: Not used in Bridge (kept for API compatibility)
+            prepend_bos: Not used in Bridge (kept for API compatibility)
+            padding_side: Not used in Bridge (kept for API compatibility)
+            return_type: The type of output to return - 'input', 'str', or 'tokens'
+            verbose: Not used in Bridge (kept for API compatibility)
+
+        Returns:
+            Generated sequence as string, list of strings, or tensor depending on input type and return_type
+        """
+        # Convert input to tokens
         if isinstance(input, str):
-            inputs = self.tokenizer(input, return_tensors="pt", padding=False, truncation=False).to(
-                self.cfg.device
-            )
-            input_ids = inputs["input_ids"]
+            input_tokens = self.tokenizer(
+                input, return_tensors="pt", padding=False, truncation=False
+            )["input_ids"].to(self.cfg.device)
+            input_type = "str"
         elif isinstance(input, list):
-            inputs = self.tokenizer(input, return_tensors="pt", padding=True, truncation=False).to(
-                self.cfg.device
-            )
-            input_ids = inputs["input_ids"]
+            input_tokens = self.tokenizer(
+                input, return_tensors="pt", padding=True, truncation=False
+            )["input_ids"].to(self.cfg.device)
+            input_type = "list"
         else:
-            input_ids = input
-            if input_ids.device != self.cfg.device:
-                input_ids = input_ids.to(self.cfg.device)
-        generation_kwargs = {
-            "max_new_tokens": max_new_tokens,
-            "do_sample": do_sample,
-            "temperature": temperature,
-            "pad_token_id": self.tokenizer.eos_token_id,
-        }
-        if top_k is not None:
-            generation_kwargs["top_k"] = top_k
-        if top_p is not None:
-            generation_kwargs["top_p"] = top_p
-        if eos_token_id is not None:
-            generation_kwargs["eos_token_id"] = eos_token_id
-        elif stop_at_eos and self.tokenizer.eos_token_id is not None:
-            generation_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
-        if use_past_kv_cache:
-            generation_kwargs["use_cache"] = True
-        with torch.no_grad():
-            outputs = self.original_model.generate(input_ids, **generation_kwargs)  # type: ignore[operator]
-        if return_type == "input" or return_type is None:
-            if isinstance(input, str):
-                return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            elif isinstance(input, list):
-                return [self.tokenizer.decode(seq, skip_special_tokens=True) for seq in outputs]
+            input_tokens = input.to(self.cfg.device)
+            input_type = "tokens"
+
+        # Determine return type
+        if return_type == "input":
+            if input_type in ["str", "list"]:
+                return_type = "str"
             else:
-                return outputs
-        elif return_type == "tokens":
-            return outputs
-        elif isinstance(input, str):
-            return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        elif isinstance(input, list):
-            return [self.tokenizer.decode(seq, skip_special_tokens=True) for seq in outputs]
-        else:
-            return outputs
+                return_type = "tokens"
+
+        batch_size = input_tokens.shape[0]
+
+        # Setup EOS token handling
+        stop_tokens = []
+        eos_token_for_padding = 0
+        if stop_at_eos:
+            if eos_token_id is None:
+                assert (
+                    self.tokenizer.eos_token_id is not None
+                ), "Must pass eos_token_id if stop_at_eos is True and tokenizer has no eos_token_id"
+                eos_token_id = self.tokenizer.eos_token_id
+
+            if isinstance(eos_token_id, int):
+                stop_tokens = [eos_token_id]
+                eos_token_for_padding = eos_token_id
+            else:
+                stop_tokens = list(eos_token_id)
+                eos_token_for_padding = (
+                    self.tokenizer.eos_token_id
+                    if self.tokenizer.eos_token_id is not None
+                    else eos_token_id[0]
+                )
+
+        # Track which sequences have finished
+        finished_sequences = torch.zeros(batch_size, dtype=torch.bool, device=self.cfg.device)
+
+        # Generate tokens
+        current_tokens = input_tokens.clone()
+        sampled_tokens_list = []
+
+        for _ in range(max_new_tokens):
+            # Get logits for next token
+            with torch.no_grad():
+                logits = self(current_tokens, return_type="logits")
+                final_logits = logits[:, -1, :]
+
+                # Sample next token
+                if do_sample:
+                    sampled_tokens = utils.sample_logits(
+                        final_logits,
+                        top_k=top_k,
+                        top_p=top_p,
+                        temperature=temperature,
+                        freq_penalty=freq_penalty,
+                        tokens=current_tokens,
+                    ).to(self.cfg.device)
+                else:
+                    sampled_tokens = final_logits.argmax(-1).to(self.cfg.device)
+
+                sampled_tokens_list.append(sampled_tokens.unsqueeze(1))
+
+                # Handle EOS tokens for finished sequences
+                if stop_at_eos:
+                    sampled_tokens[finished_sequences] = eos_token_for_padding
+                    finished_sequences.logical_or_(
+                        torch.isin(
+                            sampled_tokens.to(self.cfg.device),
+                            torch.tensor(stop_tokens).to(self.cfg.device),
+                        )
+                    )
+
+                # Append sampled token to current sequence
+                current_tokens = torch.cat([current_tokens, sampled_tokens.unsqueeze(1)], dim=1)
+
+                # Early stopping if all sequences finished
+                if stop_at_eos and finished_sequences.all():
+                    break
+
+        # Concatenate all sampled tokens
+        sampled_tokens = torch.cat(sampled_tokens_list, dim=1)
+        output_tokens = torch.cat([input_tokens, sampled_tokens], dim=1)
+
+        # Format output
+        if return_type == "str":
+            if input_type == "str":
+                return self.tokenizer.decode(output_tokens[0], skip_special_tokens=True)
+            else:
+                decoded_texts = [
+                    self.tokenizer.decode(tokens, skip_special_tokens=True)
+                    for tokens in output_tokens
+                ]
+                return decoded_texts[0] if len(decoded_texts) == 1 else decoded_texts
+        else:  # return_type == "tokens"
+            return output_tokens
 
     def to(self, *args, **kwargs) -> "TransformerBridge":
         """Move model to device or change dtype.
@@ -2379,21 +1916,6 @@ class TransformerBridge(nn.Module):
 
         return _hooks_context()
 
-    def get_processed_hf_weights(self) -> Dict[str, torch.Tensor]:
-        """Get the processed HuggingFace format weights.
-
-        Returns:
-            Dictionary of processed weights in HuggingFace format with folding applied
-        """
-        if not hasattr(self, "_processed_tl_weights"):
-            raise ValueError(
-                "No processed weights available. Call enable_compatibility_mode() first."
-            )
-
-        # The _processed_tl_weights is actually in HF format (despite the name)
-        # because process_compatibility_weights() processes HF format weights in-place
-        return self._processed_tl_weights
-
     def set_use_attn_result(self, use_attn_result: bool):
         """Toggle whether to explicitly calculate and expose the result for each attention head.
 
@@ -2407,11 +1929,142 @@ class TransformerBridge(nn.Module):
         """
         self.cfg.use_split_qkv_input = use_split_qkv_input
 
+    def _is_valid_bridge_path(self, hf_path: str) -> bool:
+        """Check if a HuggingFace path corresponds to a valid bridge component.
+
+        This validates that the path follows the bridge component structure and doesn't
+        contain nested HuggingFace components that should have been wrapped.
+
+        Args:
+            hf_path: HuggingFace path after removing _original_component
+
+        Returns:
+            True if the path is valid, False if it contains nested HF components
+        """
+        # Split the path into parts
+        parts = hf_path.split(".")
+
+        # Get the component mapping for validation
+        component_mapping = self.adapter.component_mapping
+        if not component_mapping:
+            return True  # If no mapping, accept all keys
+
+        # Walk through the path and check if each level is a registered bridge component
+        # For example, transformer.h.0.mlp.in.weight should be valid
+        # but transformer.h.0.mlp.c_fc.weight should be invalid (c_fc is nested HF component)
+
+        # Start from the root
+        current_component = None
+        idx = 0
+
+        # Find which top-level component this belongs to
+        for tl_name, component in component_mapping.items():
+            if component.name and hf_path.startswith(component.name + "."):
+                current_component = component
+                # Skip past the HF prefix
+                remaining_path = hf_path[len(component.name) + 1 :]
+                parts = remaining_path.split(".")
+                idx = 0
+                break
+
+        if current_component is None:
+            return True  # Path doesn't match any component, let it through
+
+        # Special handling for blocks
+        if hasattr(current_component, "is_list_item") and current_component.is_list_item:
+            # Skip the layer index
+            if idx < len(parts) and parts[idx].isdigit():
+                idx += 1
+
+        # Now validate the rest of the path against submodules
+        while idx < len(parts):
+            part = parts[idx]
+
+            # If we hit 'weight' or 'bias', we're at a parameter - this is valid
+            if part in ("weight", "bias"):
+                return True
+
+            # Check if this part is a registered submodule
+            if hasattr(current_component, "submodules") and current_component.submodules:
+                if part in current_component.submodules:
+                    current_component = current_component.submodules[part]
+                    idx += 1
+                    continue
+                else:
+                    # This part is not a registered bridge component
+                    # It's likely a nested HF component (like c_fc, c_proj, c_attn)
+                    return False
+            else:
+                # No submodules to check, but not at a parameter yet
+                # Check if next is weight/bias
+                if idx + 1 < len(parts) and parts[idx + 1] in ("weight", "bias"):
+                    return True
+                # Otherwise this is likely a nested HF component
+                return False
+
+            idx += 1
+
+        return True
+
+    def _normalize_bridge_key_to_hf(self, key: str) -> str:
+        """Normalize a key that uses bridge attribute names to use HF module names.
+
+        PyTorch's state_dict uses the Python attribute names (e.g., 'ln1')
+        but the conversion logic expects HF module names (e.g., 'ln_1'). This
+        function only replaces non-nested component names, leaving bridge
+        subcomponents (like 'in', 'out', 'q', 'k', 'v') unchanged since they're
+        handled by the component structure.
+
+        Args:
+            key: Key that may use bridge attribute names
+
+        Returns:
+            Key with attribute names replaced by module names where needed
+        """
+        component_mapping = self.adapter.component_mapping
+        if not component_mapping:
+            return key
+
+        # Build a mapping of only the direct module attribute names to HF names
+        # We only care about top-level and block-level component names, NOT subcomponents
+        attr_to_hf = {}
+
+        # Map top-level components
+        for tl_name, component in component_mapping.items():
+            if component.name and tl_name != "blocks":
+                attr_to_hf[tl_name] = component.name
+
+        # Map block-level components (ln1, ln2, attn, mlp)
+        blocks_component = component_mapping.get("blocks")
+        if blocks_component and hasattr(blocks_component, "submodules"):
+            for tl_subname, subcomponent in blocks_component.submodules.items():
+                if subcomponent.name:
+                    # Only map if the names differ (e.g., ln1 -> ln_1, but attn -> attn)
+                    if tl_subname != subcomponent.name:
+                        attr_to_hf[tl_subname] = subcomponent.name
+
+        # Replace only these specific attribute names in the key
+        # We need to be careful to only replace whole path components, not substrings
+        parts = key.split(".")
+        result_parts = []
+
+        for part in parts:
+            if part in attr_to_hf:
+                result_parts.append(attr_to_hf[part])
+            else:
+                result_parts.append(part)
+
+        return ".".join(result_parts)
+
     def state_dict(self, destination=None, prefix="", keep_vars=False):
         """Get state dict with TransformerLens format keys.
 
         Converts HuggingFace format keys to TransformerLens format and filters out
-        _original_component references.
+        _original_component references and nested HuggingFace components.
+
+        This returns a clean state dict with only bridge component paths converted to TL format,
+        excluding nested HF components (like c_fc, c_proj, c_attn) that exist inside
+        original_component modules.
 
         Args:
             destination: Optional dict to store state dict in
@@ -2427,13 +2080,34 @@ class TransformerBridge(nn.Module):
             )
         else:
             raw_state_dict = self.original_model.state_dict(prefix=prefix, keep_vars=keep_vars)
+
+        # Clean _original_component references and convert to TL format
+        # Also filter out nested HuggingFace components that are wrapped by bridge components
         tl_state_dict = {}
+
         for key, value in raw_state_dict.items():
+            # Skip _original_component keys
             if key == "_original_component" or key.startswith("_original_component."):
                 continue
+
+            # Remove all _original_component from the key
             clean_key = key.replace("._original_component", "")
-            tl_key = self.adapter.convert_hf_key_to_tl_key(clean_key)
-            tl_state_dict[tl_key] = value
+
+            # Check if this is a valid bridge path (not a nested HF component)
+            if not self._is_valid_bridge_path(clean_key):
+                continue
+
+            # Normalize bridge component names to HF names for conversion
+            # (e.g., 'ln1' -> 'ln_1', 'mlp.in' -> 'mlp.c_fc')
+            hf_key = self._normalize_bridge_key_to_hf(clean_key)
+
+            # Convert to TL format - this uses the adapter's component_mapping
+            tl_key = self.adapter.convert_hf_key_to_tl_key(hf_key)
+
+            # Only add if we haven't seen this TL key yet (handles duplicates)
+            if tl_key not in tl_state_dict:
+                tl_state_dict[tl_key] = value
+
         return tl_state_dict
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
