@@ -39,6 +39,7 @@ from transformer_lens.model_bridge.generalized_components.base import (
 )
 from transformer_lens.model_bridge.get_params_util import get_bridge_params
 from transformer_lens.utilities.aliases import resolve_alias
+from transformer_lens.utilities.devices import move_to_and_update_config
 
 if TYPE_CHECKING:
     from transformer_lens.ActivationCache import ActivationCache
@@ -1754,7 +1755,7 @@ class TransformerBridge(nn.Module):
             return output_tokens
 
     def to(self, *args, **kwargs) -> "TransformerBridge":
-        """Move model to device or change dtype.
+        """Move model to device and/or change dtype.
 
         Args:
             args: Positional arguments for nn.Module.to
@@ -1763,11 +1764,38 @@ class TransformerBridge(nn.Module):
         Returns:
             Self for chaining
         """
-        # Use the shared utility which also updates `cfg` on device/dtype changes
-        from transformer_lens.utilities.devices import move_to_and_update_config
-
-        # Move underlying model (and update config) instead of directly calling nn.Module.to
-        move_to_and_update_config(self, *args, **kwargs)
+        # Extract print_details if provided
+        print_details = kwargs.pop("print_details", True)
+        
+        # Handle both device and dtype changes
+        # torch.nn.Module.to() supports: to(device), to(dtype), to(device, dtype), 
+        # to(device=...), to(dtype=...), to(device=..., dtype=...)
+        target_device, target_dtype = None, None
+        
+        if len(args) >= 1:
+            first_arg = args[0]
+            if isinstance(first_arg, (torch.device, str)):
+                target_device = first_arg
+            elif isinstance(first_arg, torch.dtype):
+                target_dtype = first_arg
+        if len(args) >= 2:
+            second_arg = args[1]
+            if isinstance(second_arg, torch.dtype):
+                target_dtype = second_arg
+        
+        # these override positional args
+        if "device" in kwargs:
+            target_device = kwargs["device"]
+        if "dtype" in kwargs:
+            target_dtype = kwargs["dtype"]
+        
+        if target_device is not None:
+            move_to_and_update_config(self, target_device, print_details)
+        if target_dtype is not None:
+            move_to_and_update_config(self, target_dtype, print_details)
+        
+        # Move the original model with all original args/kwargs (with print_details removed)
+        self.original_model = self.original_model.to(*args, **kwargs)
         return self
 
     def cuda(self, device: Optional[Union[int, torch.device]] = None) -> "TransformerBridge":
