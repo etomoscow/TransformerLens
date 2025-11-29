@@ -6,9 +6,9 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
 from better_abc import abstract_attribute
 from jaxtyping import Float, Int
+from torch import Tensor
 from transformers.utils.import_utils import is_bitsandbytes_available
 
 from transformer_lens.cache.key_value_cache_entry import (
