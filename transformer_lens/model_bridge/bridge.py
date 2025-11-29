@@ -1141,7 +1141,9 @@ class TransformerBridge(nn.Module):
             >>> bridge = TransformerBridge.boot_transformers("gpt2")
             >>> for name, param in bridge.tl_named_parameters():
             ...     if "attn.W_Q" in name:
-            ...         print(f"{name}: {param.shape}")
+            ...         print(f"{name}: {param.shape}")  # doctest: +ELLIPSIS
+            blocks.0.attn.W_Q: torch.Size([12, 768, 64])
+            ...
         """
         return iter(self.get_params().items())
 
