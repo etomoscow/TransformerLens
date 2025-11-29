@@ -1766,12 +1766,12 @@ class TransformerBridge(nn.Module):
         """
         # Extract print_details if provided
         print_details = kwargs.pop("print_details", True)
-        
+
         # Handle both device and dtype changes
-        # torch.nn.Module.to() supports: to(device), to(dtype), to(device, dtype), 
+        # torch.nn.Module.to() supports: to(device), to(dtype), to(device, dtype),
         # to(device=...), to(dtype=...), to(device=..., dtype=...)
         target_device, target_dtype = None, None
-        
+
         if len(args) >= 1:
             first_arg = args[0]
             if isinstance(first_arg, (torch.device, str)):
@@ -1782,18 +1782,18 @@ class TransformerBridge(nn.Module):
             second_arg = args[1]
             if isinstance(second_arg, torch.dtype):
                 target_dtype = second_arg
-        
+
         # these override positional args
         if "device" in kwargs:
             target_device = kwargs["device"]
         if "dtype" in kwargs:
             target_dtype = kwargs["dtype"]
-        
+
         if target_device is not None:
             move_to_and_update_config(self, target_device, print_details)
         if target_dtype is not None:
             move_to_and_update_config(self, target_dtype, print_details)
-        
+
         # Move the original model with all original args/kwargs (with print_details removed)
         self.original_model = self.original_model.to(*args, **kwargs)
         return self

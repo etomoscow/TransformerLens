@@ -6,6 +6,7 @@ import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 from better_abc import abstract_attribute
 from jaxtyping import Float, Int
 from transformers.utils.import_utils import is_bitsandbytes_available
@@ -304,7 +305,7 @@ class AbstractAttention(ABC, nn.Module):
                 # so that the final linear operation occurs on the device of the inputs
                 if w.device != z.device:
                     w = w.to(z.device)
-                b_O = self.b_O
+                b_O: Tensor = self.b_O
                 if b_O.device != z.device:
                     b_O = b_O.to(z.device)
                 # Ensure z has the same dtype as weights used in the output projection
