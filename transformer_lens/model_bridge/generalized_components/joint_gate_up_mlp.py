@@ -2,7 +2,6 @@
 
 This module contains the bridge component for MLP layers with joint gating and up-projection.
 """
-
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -22,6 +21,8 @@ class JointGateUpMLPBridge(MLPBridge):
     This component wraps an MLP layer with fused gate and up projections such that both the activations
     from the joint projection and the seperate gate and up projections are hooked and accessible.
     """
+
+    hook_aliases = {"hook_pre": "gate.hook_out"}
 
     def __init__(
         self,
@@ -50,12 +51,9 @@ class JointGateUpMLPBridge(MLPBridge):
             original_component: The original MLP component to wrap
         """
         super().set_original_component(original_component)
-
         Gate_projection, Up_projection = self.gate_up_config["split_gate_up_matrix"](
             original_component
         )
-
-        # Initialize the LinearBridges for the seperated gate and up projections
         self.gate.set_original_component(Gate_projection)
         self.up.set_original_component(Up_projection)
 
@@ -70,14 +68,10 @@ class JointGateUpMLPBridge(MLPBridge):
             Output hidden states
         """
         output = super().forward(*args, **kwargs)
-
-        # Extract input tensor to run through gate and up projections
-        # in order to hook their outputs
         input_tensor = (
             args[0] if len(args) > 0 else kwargs.get("input", kwargs.get("hidden_states"))
         )
         if input_tensor is not None:
             gated_output = self.gate(input_tensor)
             self.up(gated_output)
-
         return output

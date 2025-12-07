@@ -28,9 +28,9 @@ import torch.nn as nn
 import torch.utils.hooks as hooks
 from torch import Tensor
 
-# Import BaseHookConversion from the new location
-from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion import (
-    BaseHookConversion,
+# Import BaseTensorConversion from the new location
+from transformer_lens.conversion_utils.conversion_steps.base_tensor_conversion import (
+    BaseTensorConversion,
 )
 from transformer_lens.utils import Slice, SliceInput
 
@@ -53,6 +53,33 @@ class LensHandle:
 NamesFilter = Optional[Union[Callable[[str], bool], Sequence[str], str]]
 
 
+class _ScaledGradientTensor:
+    """Wrapper around gradient tensors that applies backward_scale to sum operations.
+
+    This works around a PyTorch bug/behavior where multiplying gradient tensors
+    element-wise in backward hooks gives incorrect sums.
+    """
+
+    def __init__(self, tensor: Tensor, scale: float):
+        self._tensor = tensor
+        self._scale = scale
+
+    def sum(self, *args, **kwargs):
+        """Override sum to apply scaling to the result, not the tensor."""
+        result = self._tensor.sum(*args, **kwargs)
+        if isinstance(result, Tensor) and result.numel() == 1:
+            # Scalar result - apply scale
+            return result * self._scale
+        return result
+
+    def __getattr__(self, name):
+        """Delegate all other attributes to the wrapped tensor."""
+        return getattr(self._tensor, name)
+
+    def __repr__(self):
+        return f"ScaledGradientTensor({self._tensor}, scale={self._scale})"
+
+
 @runtime_checkable
 class _HookFunctionProtocol(Protocol):
     """Protocol for hook functions."""
@@ -65,6 +92,54 @@ HookFunction = _HookFunctionProtocol  # Callable[..., _HookFunctionProtocol]
 
 DeviceType = Optional[torch.device]
 _grad_t = Union[tuple[Tensor, ...], Tensor]
+
+
+class _AliasedHookPoint:
+    """
+    A lightweight wrapper that represents a HookPoint with an aliased name.
+
+    This is used when a hook is registered with multiple names (e.g., in compatibility mode
+    where both canonical and legacy names should trigger the hook). Instead of modifying
+    the original HookPoint's name, we create this wrapper that delegates to the original
+    HookPoint but presents a different name to the user's hook function.
+    """
+
+    def __init__(self, alias_name: str, target: "HookPoint"):
+        """
+        Create an aliased view of a HookPoint.
+
+        Args:
+            alias_name: The name to present to the hook function
+            target: The original HookPoint to delegate to
+        """
+        self._alias_name = alias_name
+        self._target = target
+
+    @property
+    def name(self) -> Optional[str]:
+        """Return the alias name."""
+        return self._alias_name
+
+    @property
+    def ctx(self) -> dict:
+        """Delegate to the target's context."""
+        return self._target.ctx
+
+    @property
+    def hook_conversion(self):
+        """Delegate to the target's hook conversion."""
+        return self._target.hook_conversion
+
+    def layer(self) -> int:
+        """
+        Extract layer index from the alias name.
+
+        Returns the layer index for hook names like 'blocks.0.attn.hook_pattern' -> 0
+        """
+        if self._alias_name is None:
+            raise ValueError("Name cannot be None")
+        split_name = self._alias_name.split(".")
+        return int(split_name[1])
 
 
 class HookPoint(nn.Module):
@@ -86,7 +161,11 @@ class HookPoint(nn.Module):
         self.name: Optional[str] = None
 
         # Hook conversion for input and output transformations
-        self.hook_conversion: Optional[BaseHookConversion] = None
+        self.hook_conversion: Optional[BaseTensorConversion] = None
+
+        # Backward gradient scale factor (for compatibility between architectures)
+        # This scales the SUM of gradients, not element-wise (to avoid PyTorch bugs)
+        self.backward_scale: float = 1.0
 
     def add_perma_hook(self, hook: HookFunction, dir: Literal["fwd", "bwd"] = "fwd") -> None:
         self.add_hook(hook, dir=dir, is_permanent=True)
@@ -98,12 +177,16 @@ class HookPoint(nn.Module):
         is_permanent: bool = False,
         level: Optional[int] = None,
         prepend: bool = False,
+        alias_names: Optional[list[str]] = None,
     ) -> None:
         """
         Hook format is fn(activation, hook_name)
         Change it into PyTorch hook format (this includes input and output,
         which are the same for a HookPoint)
         If prepend is True, add this hook before all other hooks
+        If alias_names is provided, the hook will be called once for each alias name,
+        receiving a temporary HookPoint-like object with that name instead of self
+        (useful for compatibility mode aliases)
         """
 
         def full_hook(
@@ -116,12 +199,31 @@ class HookPoint(nn.Module):
             ):  # For a backwards hook, module_output is a tuple of (grad,) - I don't know why.
                 module_output = module_output[0]
 
+                # Apply backward scaling if needed (wrap tensor to scale sum operations)
+                if self.backward_scale != 1.0:
+                    module_output = _ScaledGradientTensor(module_output, self.backward_scale)
+
             # Apply input conversion if hook_conversion exists
             if self.hook_conversion is not None:
                 module_output = self.hook_conversion.convert(module_output)
 
-            # Apply the hook
-            hook_result = hook(module_output, hook=self)
+            # Apply the hook for each name (or just once with canonical name)
+            if alias_names is not None:
+                # Call the hook once for each alias name
+                # Create a simple wrapper that acts like a HookPoint but with a different name
+                hook_result = None
+                for alias_name in alias_names:
+                    # Create a view of this HookPoint with the alias name
+                    hook_with_alias = _AliasedHookPoint(alias_name, self)
+                    # Apply the hook
+                    hook_result = hook(module_output, hook=hook_with_alias)  # type: ignore[arg-type]
+
+                    # If the hook modified the output, use that for subsequent calls
+                    if hook_result is not None:
+                        module_output = hook_result
+            else:
+                # Call the hook once with the canonical name (self)
+                hook_result = hook(module_output, hook=self)
 
             # Apply output reversion if hook_conversion exists and hook returned a value
             if hook_result is not None and self.hook_conversion is not None:
@@ -223,13 +325,13 @@ class HookPoint(nn.Module):
 
     def enable_reshape(
         self,
-        hook_conversion: Optional[BaseHookConversion] = None,
+        hook_conversion: Optional[BaseTensorConversion] = None,
     ) -> None:
         """
-        Enable reshape functionality for this hook point using a BaseHookConversion.
+        Enable reshape functionality for this hook point using a BaseTensorConversion.
 
         Args:
-            hook_conversion: BaseHookConversion instance to handle input/output transformations.
+            hook_conversion: BaseTensorConversion instance to handle input/output transformations.
                            The convert() method will be used for input transformation,
                            and the revert() method will be used for output transformation.
         """

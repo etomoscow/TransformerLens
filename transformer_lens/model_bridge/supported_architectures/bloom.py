@@ -4,17 +4,17 @@ from typing import Any
 
 import torch
 
-from transformer_lens.conversion_utils.conversion_steps import (
-    HookConversionSet,
-    RearrangeHookConversion,
+from transformer_lens.conversion_utils.conversion_steps import RearrangeTensorConversion
+from transformer_lens.conversion_utils.param_processing_conversion import (
+    ParamProcessingConversion,
 )
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
-    BlockBridge,
+    BloomAttentionBridge,
+    BloomBlockBridge,
+    BloomMLPBridge,
     EmbeddingBridge,
-    JointQKVAttentionBridge,
     LinearBridge,
-    MLPBridge,
     NormalizationBridge,
     UnembeddingBridge,
 )
@@ -27,67 +27,57 @@ class BloomArchitectureAdapter(ArchitectureAdapter):
         """Initialize the Bloom architecture adapter."""
         super().__init__(cfg)
 
+        # Set config variables for weight processing
+        self.cfg.normalization_type = "LN"
+        self.cfg.positional_embedding_type = "alibi"
+        self.cfg.final_rms = False
+        self.cfg.gated_mlp = False
+        self.cfg.attn_only = False
+
         self.cfg.default_prepend_bos = False
-        self.conversion_rules = HookConversionSet(
-            {
-                "embed.e": "transformer.word_embeddings.weight",
-                "blocks.{i}.ln1.w": "transformer.h.{i}.input_layernorm.weight",
-                "blocks.{i}.ln1.b": "transformer.h.{i}.input_layernorm.bias",
-                "blocks.{i}.attn.q": (
-                    "transformer.h.{i}.self_attention.query_key_value.weight",
-                    RearrangeHookConversion(
-                        "(three n h) m -> three n m h",
-                        three=3,
-                        n=self.cfg.n_heads,
-                    ),
+        self.weight_processing_conversions = {
+            "blocks.{i}.attn.q": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    "(three n h) m -> three n m h",
+                    three=3,
+                    n=self.cfg.n_heads,
                 ),
-                "blocks.{i}.attn.k": (
-                    "transformer.h.{i}.self_attention.query_key_value.weight",
-                    RearrangeHookConversion(
-                        "(three n h) m -> three n m h",
-                        three=3,
-                        n=self.cfg.n_heads,
-                    ),
+                source_key="transformer.h.{i}.self_attention.query_key_value.weight",
+            ),
+            "blocks.{i}.attn.k": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    "(three n h) m -> three n m h",
+                    three=3,
+                    n=self.cfg.n_heads,
                 ),
-                "blocks.{i}.attn.v": (
-                    "transformer.h.{i}.self_attention.query_key_value.weight",
-                    RearrangeHookConversion(
-                        "(three n h) m -> three n m h",
-                        three=3,
-                        n=self.cfg.n_heads,
-                    ),
+                source_key="transformer.h.{i}.self_attention.query_key_value.weight",
+            ),
+            "blocks.{i}.attn.v": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion(
+                    "(three n h) m -> three n m h",
+                    three=3,
+                    n=self.cfg.n_heads,
                 ),
-                "blocks.{i}.attn.o": (
-                    "transformer.h.{i}.self_attention.dense.weight",
-                    RearrangeHookConversion("m (n h) -> n h m", n=self.cfg.n_heads),
-                ),
-                "blocks.{i}.attn.b_Q": "transformer.h.{i}.self_attention.query_key_value.bias",
-                "blocks.{i}.attn.b_K": "transformer.h.{i}.self_attention.query_key_value.bias",
-                "blocks.{i}.attn.b_V": "transformer.h.{i}.self_attention.query_key_value.bias",
-                "blocks.{i}.attn.b_O": "transformer.h.{i}.self_attention.dense.bias",
-                "blocks.{i}.ln2.w": "transformer.h.{i}.post_attention_layernorm.weight",
-                "blocks.{i}.ln2.b": "transformer.h.{i}.post_attention_layernorm.bias",
-                "blocks.{i}.mlp.in": "transformer.h.{i}.mlp.dense_h_to_4h.weight",
-                "blocks.{i}.mlp.b_in": "transformer.h.{i}.mlp.dense_h_to_4h.bias",
-                "blocks.{i}.mlp.out": "transformer.h.{i}.mlp.dense_4h_to_h.weight",
-                "blocks.{i}.mlp.b_out": "transformer.h.{i}.mlp.dense_4h_to_h.bias",
-                "ln_final.w": "transformer.ln_f.weight",
-                "ln_final.b": "transformer.ln_f.bias",
-                "unembed.u": "lm_head.weight",
-            }
-        )
+                source_key="transformer.h.{i}.self_attention.query_key_value.weight",
+            ),
+            "blocks.{i}.attn.o": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("m (n h) -> n h m", n=self.cfg.n_heads),
+                source_key="transformer.h.{i}.self_attention.dense.weight",
+            ),
+        }
 
         self.component_mapping = {
             "embed": EmbeddingBridge(name="transformer.word_embeddings"),
             "embed_ln": NormalizationBridge(
                 name="transformer.word_embeddings_layernorm", config=self.cfg
             ),
-            "blocks": BlockBridge(
+            "blocks": BloomBlockBridge(
                 name="transformer.h",
+                config=self.cfg,
                 submodules={
                     "ln1": NormalizationBridge(name="input_layernorm", config=self.cfg),
                     "ln2": NormalizationBridge(name="post_attention_layernorm", config=self.cfg),
-                    "attn": JointQKVAttentionBridge(
+                    "attn": BloomAttentionBridge(
                         name="self_attention",
                         config=self.cfg,
                         split_qkv_matrix=self.split_qkv_matrix,
@@ -96,7 +86,7 @@ class BloomArchitectureAdapter(ArchitectureAdapter):
                             "o": LinearBridge(name="dense"),
                         },
                     ),
-                    "mlp": MLPBridge(
+                    "mlp": BloomMLPBridge(
                         name="mlp",
                         submodules={
                             "in": LinearBridge(name="dense_h_to_4h"),

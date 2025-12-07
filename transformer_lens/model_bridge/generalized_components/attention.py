@@ -2,16 +2,16 @@
 
 This module contains the bridge component for attention layers.
 """
+from typing import Any, Dict, Optional
 
-from typing import Any, Dict, Optional, Tuple
-
+import einops
 import torch
 
 from transformer_lens.conversion_utils.conversion_steps.attention_auto_conversion import (
     AttentionAutoConversion,
 )
-from transformer_lens.conversion_utils.conversion_steps.base_hook_conversion import (
-    BaseHookConversion,
+from transformer_lens.conversion_utils.conversion_steps.base_tensor_conversion import (
+    BaseTensorConversion,
 )
 from transformer_lens.hook_points import HookPoint
 from transformer_lens.model_bridge.generalized_components.base import (
@@ -33,7 +33,6 @@ class AttentionBridge(GeneralizedComponent):
         "hook_v": "v.hook_out",
         "hook_z": "o.hook_in",
     }
-
     property_aliases = {
         "W_Q": "q.weight",
         "W_K": "k.weight",
@@ -50,8 +49,12 @@ class AttentionBridge(GeneralizedComponent):
         name: str,
         config: Any,
         submodules: Optional[Dict[str, GeneralizedComponent]] = None,
-        conversion_rule: Optional[BaseHookConversion] = None,
-        pattern_conversion_rule: Optional[BaseHookConversion] = None,
+        conversion_rule: Optional[BaseTensorConversion] = None,
+        pattern_conversion_rule: Optional[BaseTensorConversion] = None,
+        maintain_native_attention: bool = False,
+        requires_position_embeddings: bool = False,
+        requires_attention_mask: bool = False,
+        attention_mask_4d: bool = False,
     ):
         """Initialize the attention bridge.
 
@@ -62,373 +65,431 @@ class AttentionBridge(GeneralizedComponent):
             conversion_rule: Optional conversion rule. If None, AttentionAutoConversion will be used
             pattern_conversion_rule: Optional conversion rule for attention patterns. If None,
                                    uses AttentionPatternConversion to ensure [n_heads, pos, pos] shape
+            maintain_native_attention: If True, preserve the original HF attention implementation
+                                      without wrapping. Use for models with custom attention
+                                      (e.g., attention sinks, specialized RoPE). Defaults to False.
+            requires_position_embeddings: If True, this attention requires position_embeddings argument
+                                        (e.g., Gemma-3 with dual RoPE). Defaults to False.
+            requires_attention_mask: If True, this attention requires attention_mask argument
+                                    (e.g., GPTNeoX/Pythia). Defaults to False.
+            attention_mask_4d: If True, generate 4D attention_mask [batch, 1, tgt_len, src_len]
+                             instead of 2D [batch, seq_len]. Required for OPT. Defaults to False.
         """
-        # Set up conversion rule - use AttentionAutoConversion if None
         if conversion_rule is None:
             conversion_rule = AttentionAutoConversion(config)
-
         super().__init__(
             name, config=config, submodules=submodules or {}, conversion_rule=conversion_rule
         )
-
-        # Create only the hook points that are actually used for attention processing
         self.hook_attn_scores = HookPoint()
         self.hook_pattern = HookPoint()
         self.hook_hidden_states = HookPoint()
-
-        # Apply conversion rule to attention-specific hooks
+        if (
+            hasattr(config, "positional_embedding_type")
+            and config.positional_embedding_type == "rotary"
+        ):
+            self.hook_rot_k = HookPoint()
+            self.hook_rot_q = HookPoint()
         self.hook_hidden_states.hook_conversion = conversion_rule
-
-        # Set up pattern conversion rule if provided
         if pattern_conversion_rule is not None:
             self.hook_pattern.hook_conversion = pattern_conversion_rule
-
-        # Store intermediate values for pattern creation
         self._attn_scores = None
         self._pattern = None
+        self._hf_forward_wrapped = False
+        self.maintain_native_attention = maintain_native_attention
+        self.requires_position_embeddings = requires_position_embeddings
+        self.requires_attention_mask = requires_attention_mask
+        self.attention_mask_4d = attention_mask_4d
 
-    def _process_output(self, output: Any) -> Any:
-        """Process the output from the original component.
+    def setup_hook_compatibility(self) -> None:
+        """Setup hook compatibility transformations to match HookedTransformer behavior.
 
-        This method intercepts the output to create attention patterns
-        the same way as the old implementation and applies hook_out.
+        This sets up hook conversions that ensure Bridge hooks have the same shapes
+        as HookedTransformer hooks. This includes reshaping Q/K/V/Z hooks from
+        [batch, seq, d_model] to [batch, seq, n_heads, d_head] format.
 
-        Args:
-            output: Raw output from the original component
-
-        Returns:
-            Processed output with hooks applied
+        This is called during Bridge.__init__ and should always be run.
+        Note: This method is idempotent - can be called multiple times safely.
         """
-        # Extract attention scores from the output
-        attn_pattern = self._extract_attention_pattern(output)
+        if self._hf_forward_wrapped:
+            return
+        if hasattr(self.config, "n_heads"):
+            self._setup_qkv_hook_reshaping()
+        self._hf_forward_wrapped = True
 
-        if attn_pattern is not None:
-            if not isinstance(attn_pattern, torch.Tensor):
-                raise TypeError(f"Expected 'pattern' to be a Tensor, got {type(attn_pattern)}")
-
-            # For now, hook the pattern as scores as well so the CI passes,
-            # until we figured out how to properly hook the scores before softmax is applied
-            attn_pattern = self.hook_attn_scores(attn_pattern)
-
-            # Create attention pattern the same way as old implementation
-            attn_pattern = self.hook_pattern(attn_pattern)
-
-            # Store the pattern for potential use in result calculation
-            self._pattern = attn_pattern
-
-            # Apply the pattern to the output if needed
-            output = self._apply_pattern_to_output(output, attn_pattern)
-        else:
-            # If no attention pattern found, still apply hooks to the output
-            if isinstance(output, tuple):
-                output = self._process_tuple_output(output)
-            elif isinstance(output, dict):
-                output = self._process_dict_output(output)
-            else:
-                output = self._process_single_output(output)
-
-        # Always apply hook_out to the main output
-        output = self._apply_hook_out_to_output(output)
-
-        return output
-
-    def _extract_attention_pattern(self, output: Any) -> Optional[torch.Tensor]:
-        """Extract attention pattern from the output.
-
-        Args:
-            output: Output from the original component
-
-        Returns:
-            Attention pattern tensor or None if not found
-        """
-        if isinstance(output, tuple):
-            # Look for attention pattern in tuple output
-            for element in output:
-                if isinstance(element, torch.Tensor) and element.dim() == 4:
-                    # Assume 4D tensor is attention pattern [batch, heads, query_pos, key_pos]
-                    return element
-        elif isinstance(output, dict):
-            # Look for attention pattern in dict output
-            for key in ["attentions", "attention_weights", "attention_scores", "attn_weights"]:
-                if key in output and isinstance(output[key], torch.Tensor):
-                    return output[key]
-
-        return None
-
-    def _apply_pattern_to_output(self, output: Any, pattern: torch.Tensor) -> Any:
-        """Apply the attention pattern to the output.
-
-        This method simulates how the old implementation uses the pattern
-        to calculate the final output.
-
-        Args:
-            output: Original output from the component
-            pattern: Attention pattern tensor
-
-        Returns:
-            Modified output with pattern applied
-        """
-        if isinstance(output, tuple):
-            return self._apply_pattern_to_tuple_output(output, pattern)
-        elif isinstance(output, dict):
-            return self._apply_pattern_to_dict_output(output, pattern)
-        else:
-            return self._apply_pattern_to_single_output(output, pattern)
-
-    def _apply_pattern_to_tuple_output(
-        self, output: Tuple[Any, ...], pattern: torch.Tensor
-    ) -> Tuple[Any, ...]:
-        """Apply pattern to tuple output.
-
-        Args:
-            output: Tuple output from attention
-            pattern: Attention pattern tensor
-
-        Returns:
-            Processed tuple with pattern applied
-        """
-        processed_output = []
-
-        for i, element in enumerate(output):
-            if i == 0:  # First element is typically hidden states
-                if element is not None:
-                    element = self._apply_hook_preserving_structure(
-                        element, self.hook_hidden_states
-                    )
-                    # Apply the pattern to the hidden states
-                    element = self._apply_pattern_to_hidden_states(element, pattern)
-            elif i == 1 or i == 2:  # Attention weights indices
-                if isinstance(element, torch.Tensor):
-                    # Replace with our computed pattern
-                    element = pattern
-            processed_output.append(element)
-
-        return tuple(processed_output)
-
-    def _apply_pattern_to_dict_output(
-        self, output: Dict[str, Any], pattern: torch.Tensor
+    def get_random_inputs(
+        self,
+        batch_size: int = 2,
+        seq_len: int = 8,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
     ) -> Dict[str, Any]:
-        """Apply pattern to dictionary output.
+        """Get random inputs for testing this attention component.
+
+        Generates appropriate inputs based on the attention's requirements
+        (position_embeddings, attention_mask, etc.).
 
         Args:
-            output: Dictionary output from attention
-            pattern: Attention pattern tensor
+            batch_size: Batch size for the test inputs
+            seq_len: Sequence length for the test inputs
+            device: Device to create tensors on (defaults to CPU)
+            dtype: Dtype for generated tensors (defaults to float32)
 
         Returns:
-            Processed dictionary with pattern applied
+            Dictionary of keyword arguments to pass to forward()
         """
-        processed_output = {}
+        if device is None:
+            device = torch.device("cpu")
+        if dtype is None:
+            dtype = torch.float32
+        d_model = self.config.d_model if self.config and hasattr(self.config, "d_model") else 768
+        inputs: Dict[str, Any] = {
+            "hidden_states": torch.randn(batch_size, seq_len, d_model, device=device, dtype=dtype)
+        }
+        if self.requires_position_embeddings:
+            if self.config:
+                if hasattr(self.config, "d_head"):
+                    d_head = self.config.d_head
+                elif hasattr(self.config, "head_dim"):
+                    d_head = self.config.head_dim
+                else:
+                    d_head = 64
+            else:
+                d_head = 64
+            rotary_pct = getattr(self.config, "rotary_pct", 1.0) if self.config else 1.0
+            rotary_ndims = int(rotary_pct * d_head)
+            cos = torch.ones(1, seq_len, rotary_ndims, device=device, dtype=dtype)
+            sin = torch.zeros(1, seq_len, rotary_ndims, device=device, dtype=dtype)
+            inputs["position_embeddings"] = (cos, sin)
+        if self.requires_attention_mask:
+            if self.attention_mask_4d:
+                # Generate 4D attention mask [batch, 1, tgt_len, src_len] for models like OPT
+                inputs["attention_mask"] = torch.ones(
+                    batch_size, 1, seq_len, seq_len, device=device
+                )
+            else:
+                # Generate 2D attention mask [batch, seq_len] for most models
+                inputs["attention_mask"] = torch.ones(batch_size, seq_len, device=device)
+        return inputs
 
-        for key, value in output.items():
-            if key in ["last_hidden_state", "hidden_states"] and value is not None:
-                value = self._apply_hook_preserving_structure(value, self.hook_hidden_states)
-                # Apply the pattern to the hidden states
-                value = self._apply_pattern_to_hidden_states(value, pattern)
-            elif key in ["attentions", "attention_weights"] and value is not None:
-                # Replace with our computed pattern
-                value = pattern
-            processed_output[key] = value
+    def _setup_qkv_hook_reshaping(self) -> None:
+        """Setup hook reshaping for Q/K/V/Z to match HookedTransformer shapes.
 
-        return processed_output
+        Reshapes hooks from [batch, seq, d_model] to [batch, seq, n_heads, d_head] format.
+        For models with Grouped Query Attention (GQA), K and V use n_kv_heads instead of n_heads.
 
-    def _apply_pattern_to_single_output(
-        self, output: torch.Tensor, pattern: torch.Tensor
-    ) -> torch.Tensor:
-        """Apply pattern to single tensor output.
-
-        Args:
-            output: Single tensor output from attention
-            pattern: Attention pattern tensor
-
-        Returns:
-            Processed tensor with pattern applied
+        Sets up conversions for:
+        - q.hook_out (aliased as hook_q)
+        - k.hook_out (aliased as hook_k) - uses n_kv_heads if GQA
+        - v.hook_out (aliased as hook_v) - uses n_kv_heads if GQA
+        - o.hook_in (aliased as hook_z)
         """
-        # Apply hooks for single tensor output
-        output = self._apply_hook_preserving_structure(output, self.hook_hidden_states)
-        # Apply the pattern to the output
-        output = self._apply_pattern_to_hidden_states(output, pattern)
-        return output
 
-    def _apply_pattern_to_hidden_states(
-        self, hidden_states: torch.Tensor, pattern: torch.Tensor
-    ) -> torch.Tensor:
-        """Apply attention pattern to hidden states.
+        class ReshapeForAttentionHeads(BaseTensorConversion):
+            """Reshape tensors to split attention heads for Q/K/V/Z compatibility."""
 
-        This simulates the old implementation's calculate_z_scores method.
+            def __init__(self, n_heads: int, d_head: int):
+                super().__init__()
+                self.n_heads = n_heads
+                self.d_head = d_head
 
-        Args:
-            hidden_states: Hidden states tensor
-            pattern: Attention pattern tensor
+            def handle_conversion(self, input_value, *full_context):
+                """Convert from [batch, seq, d_model] to [batch, seq, n_heads, d_head]."""
+                if len(input_value.shape) == 3:
+                    b, s, d = input_value.shape
+                    if d == self.n_heads * self.d_head:
+                        return input_value.view(b, s, self.n_heads, self.d_head)
+                return input_value
 
-        Returns:
-            Modified hidden states with pattern applied
-        """
-        # This is a simplified version - in the real implementation,
-        # we would need to extract V from the original component and apply
-        # the pattern properly. For now, we just apply the pattern as a hook.
-        return self.hook_hidden_states(hidden_states)
+            def revert(self, input_value, *full_context):
+                """Revert from [batch, seq, n_heads, d_head] to [batch, seq, d_model]."""
+                if len(input_value.shape) == 4:
+                    b, s, n_h, d_h = input_value.shape
+                    if n_h == self.n_heads and d_h == self.d_head:
+                        return input_value.view(b, s, n_h * d_h)
+                return input_value
 
-    def _process_tuple_output(self, output: Tuple[Any, ...]) -> Tuple[Any, ...]:
-        """Process tuple output from attention layer.
+        if self.config is None:
+            raise RuntimeError(f"Config not set for {self.name}")
 
-        Args:
-            output: Tuple output from attention
-
-        Returns:
-            Processed tuple with hooks applied
-        """
-        processed_output = []
-
-        for i, element in enumerate(output):
-            if i == 0:  # First element is typically hidden states
-                if element is not None:
-                    element = self._apply_hook_preserving_structure(
-                        element, self.hook_hidden_states
-                    )
-            elif i == 1:
-                # When use_cache=False, attention weights may be at index 1
-                if isinstance(element, torch.Tensor):
-                    element = self._apply_hook_preserving_structure(element, self.hook_pattern)
-                # else: assume KV cache and skip
-            elif i == 2:  # With cache enabled, attention weights are typically at index 2
-                if isinstance(element, torch.Tensor):
-                    element = self._apply_hook_preserving_structure(element, self.hook_pattern)
-            processed_output.append(element)
-
-        return tuple(processed_output)
-
-    def _process_dict_output(self, output: Dict[str, Any]) -> Dict[str, Any]:
-        """Process dictionary output from attention layer.
-
-        Args:
-            output: Dictionary output from attention
-
-        Returns:
-            Processed dictionary with hooks applied
-        """
-        processed_output = {}
-
-        for key, value in output.items():
-            if key in ["last_hidden_state", "hidden_states"] and value is not None:
-                value = self._apply_hook_preserving_structure(value, self.hook_hidden_states)
-            elif key in ["attentions", "attention_weights"] and value is not None:
-                value = self._apply_hook_preserving_structure(value, self.hook_pattern)
-            processed_output[key] = value
-
-        return processed_output
-
-    def _process_single_output(self, output: torch.Tensor) -> torch.Tensor:
-        """Process single tensor output from attention layer.
-
-        Args:
-            output: Single tensor output from attention
-
-        Returns:
-            Processed tensor with hooks applied
-        """
-        # Apply hooks for single tensor output
-        output = self._apply_hook_preserving_structure(output, self.hook_hidden_states)
-        return output
-
-    def _apply_hook_preserving_structure(self, element: Any, hook_fn) -> Any:
-        """Apply a hook while preserving the original structure.
-
-        Args:
-            element: The element to process (tensor, tuple, etc.)
-            hook_fn: The hook function to apply to tensors
-
-        Returns:
-            The processed element with the same structure as input
-        """
-        if isinstance(element, torch.Tensor):
-            return hook_fn(element)
-        elif isinstance(element, tuple) and len(element) > 0:
-            # For tuple outputs, process the first element if it's a tensor
-            processed_elements = list(element)
-            if isinstance(element[0], torch.Tensor):
-                processed_elements[0] = hook_fn(element[0])
-            return tuple(processed_elements)
+        # Get n_heads (try n_heads first, then n_head)
+        if hasattr(self.config, "n_heads"):
+            n_heads = self.config.n_heads
+        elif hasattr(self.config, "n_head"):
+            n_heads = self.config.n_head
         else:
-            return element
+            # Can't setup reshaping without knowing number of heads
+            return
 
-    def _apply_hook_out_to_output(self, output: Any) -> Any:
-        """Apply hook_out to the main output tensor.
-
-        Args:
-            output: The output to process (can be tensor, tuple, or dict)
-
-        Returns:
-            The output with hook_out applied to the main tensor
-        """
-        if isinstance(output, torch.Tensor):
-            return self.hook_out(output)
-        elif isinstance(output, tuple) and len(output) > 0:
-            # Apply hook_out to the first element (typically hidden states)
-            processed_tuple = list(output)
-            if isinstance(output[0], torch.Tensor):
-                processed_tuple[0] = self.hook_out(output[0])
-            return tuple(processed_tuple)
-        elif isinstance(output, dict):
-            # Apply hook_out to the main hidden states in dictionary
-            processed_dict = output.copy()
-            for key in ["last_hidden_state", "hidden_states"]:
-                if key in processed_dict and isinstance(processed_dict[key], torch.Tensor):
-                    processed_dict[key] = self.hook_out(processed_dict[key])
-                    break  # Only apply to the first found key
-            return processed_dict
+        # Get d_head (try d_head first, then compute from d_model or n_embd)
+        if hasattr(self.config, "d_head"):
+            d_head = self.config.d_head
+        elif hasattr(self.config, "d_model"):
+            d_head = self.config.d_model // n_heads
+        elif hasattr(self.config, "n_embd"):
+            d_head = self.config.n_embd // n_heads
         else:
-            return output
+            # Can't setup reshaping without knowing head dimension
+            return
+        n_kv_heads = n_heads
+        if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads is not None:
+            n_kv_heads = self.config.n_key_value_heads
+        if hasattr(self, "q") and self.q is not None and hasattr(self.q, "hook_out"):
+            q_reshape = ReshapeForAttentionHeads(n_heads, d_head)
+            self.q.hook_out.hook_conversion = q_reshape
+        if hasattr(self, "k") and self.k is not None and hasattr(self.k, "hook_out"):
+            k_reshape = ReshapeForAttentionHeads(n_kv_heads, d_head)
+            self.k.hook_out.hook_conversion = k_reshape
+        if hasattr(self, "v") and self.v is not None and hasattr(self.v, "hook_out"):
+            v_reshape = ReshapeForAttentionHeads(n_kv_heads, d_head)
+            self.v.hook_out.hook_conversion = v_reshape
+        if hasattr(self, "o") and self.o is not None and hasattr(self.o, "hook_in"):
+            z_reshape = ReshapeForAttentionHeads(n_heads, d_head)
+            self.o.hook_in.hook_conversion = z_reshape
+
+        class TransposeRotaryHeads(BaseTensorConversion):
+            """Transpose rotary hook tensors from HF format to HookedTransformer format."""
+
+            def handle_conversion(self, input_value, *full_context):
+                """Convert from [batch, n_heads, seq, d_head] to [batch, seq, n_heads, d_head]."""
+                if len(input_value.shape) == 4:
+                    return input_value.transpose(1, 2)
+                return input_value
+
+            def revert(self, input_value, *full_context):
+                """Revert from [batch, seq, n_heads, d_head] to [batch, n_heads, seq, d_head]."""
+                if len(input_value.shape) == 4:
+                    return input_value.transpose(1, 2)
+                return input_value
+
+        if hasattr(self, "hook_rot_q"):
+            self.hook_rot_q.hook_conversion = TransposeRotaryHeads()
+        if hasattr(self, "hook_rot_k"):
+            self.hook_rot_k.hook_conversion = TransposeRotaryHeads()
+
+    def _setup_hook_z_reshape(self) -> None:
+        """Backward compatibility alias for _setup_qkv_hook_reshaping."""
+        self._setup_qkv_hook_reshaping()
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
-        """Forward pass through the attention layer.
+        """Simplified forward pass - minimal wrapping around original component.
 
-        This method forwards all arguments to the original component and applies hooks
-        to the output.
+        This does minimal wrapping: hook_in → delegate to HF → hook_out.
+        This ensures we match HuggingFace's exact output without complex intermediate processing.
 
         Args:
             *args: Input arguments to pass to the original component
             **kwargs: Input keyword arguments to pass to the original component
 
         Returns:
-            The output from the original component, with hooks applied
+            The output from the original component, with only input/output hooks applied
         """
         if self.original_component is None:
             raise RuntimeError(
                 f"Original component not set for {self.name}. Call set_original_component() first."
             )
-
-        # Apply input hook
+        target_dtype = None
+        try:
+            target_dtype = next(self.original_component.parameters()).dtype
+        except StopIteration:
+            pass
         if "query_input" in kwargs:
-            kwargs["query_input"] = self.hook_in(kwargs["query_input"])
+            hooked = self.hook_in(kwargs["query_input"])
+            if (
+                target_dtype is not None
+                and isinstance(hooked, torch.Tensor)
+                and hooked.is_floating_point()
+            ):
+                hooked = hooked.to(dtype=target_dtype)
+            kwargs["query_input"] = hooked
         elif "hidden_states" in kwargs:
-            kwargs["hidden_states"] = self.hook_in(kwargs["hidden_states"])
+            hooked = self.hook_in(kwargs["hidden_states"])
+            if (
+                target_dtype is not None
+                and isinstance(hooked, torch.Tensor)
+                and hooked.is_floating_point()
+            ):
+                hooked = hooked.to(dtype=target_dtype)
+            kwargs["hidden_states"] = hooked
         elif len(args) > 0 and isinstance(args[0], torch.Tensor):
-            args = (self.hook_in(args[0]),) + args[1:]
-
-        # Forward through original component
+            hooked = self.hook_in(args[0])
+            if (
+                target_dtype is not None
+                and isinstance(hooked, torch.Tensor)
+                and hooked.is_floating_point()
+            ):
+                hooked = hooked.to(dtype=target_dtype)
+            args = (hooked,) + args[1:]
+            kwargs["hidden_states"] = args[0]
+            args = args[1:]
         output = self.original_component(*args, **kwargs)
+        if isinstance(output, tuple) and len(output) >= 2:
+            # output[0] is attention output
+            # output[1] may be attention weights (pattern) or position_bias (T5)
+            # Additional elements may include position_bias, attention weights, etc.
+            attn_output = self.hook_out(output[0])
+            second_element = output[1]
 
-        # Process output
-        output = self._process_output(output)
+            # Fire hook_pattern if the second element is attention weights (4D tensor)
+            # For T5, second element is position_bias which should be passed through
+            if isinstance(second_element, torch.Tensor) and second_element.dim() == 4:
+                # This looks like attention weights [batch, heads, seq, seq]
+                second_element = self.hook_pattern(second_element)
+                # Also store for potential hook_attn_scores (before softmax)
+                # Note: Most HF implementations return post-softmax weights
+                self.hook_attn_scores(second_element)
 
+            # Preserve all output elements (important for T5 position_bias and other models)
+            output = (attn_output, second_element) + output[2:]
+        elif isinstance(output, tuple) and len(output) == 1:
+            output = (self.hook_out(output[0]),)
+        else:
+            output = self.hook_out(output)
         return output
 
-    def get_attention_weights(self) -> Optional[torch.Tensor]:
-        """Get cached attention weights if available.
+    @property
+    def W_Q(self) -> torch.Tensor:
+        """Get W_Q in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
 
-        Returns:
-            Attention weights tensor or None if not cached
-        """
-        return getattr(self, "_cached_attention_weights", None)
+        weight = (
+            self.q.weight
+        )  # 2D: [d_model, n_heads*d_head] for Conv1D or [n_heads*d_head, d_model] for Linear
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+            # Detect format based on weight shape
+            # Linear format: [(n_heads*d_head), d_model]
+            # Conv1D format: [d_model, (n_heads*d_head)]
+            if weight.shape[0] % n_heads == 0:
+                # Linear format - first dimension is (n_heads*d_head)
+                return einops.rearrange(
+                    weight, "(n_heads d_head) d_model -> n_heads d_model d_head", n_heads=n_heads
+                )
+            else:
+                # Conv1D format - second dimension is (n_heads*d_head)
+                return einops.rearrange(
+                    weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+                )
+        return weight
 
-    def get_attention_patterns(self) -> Optional[torch.Tensor]:
-        """Get cached attention patterns if available.
+    @property
+    def W_K(self) -> torch.Tensor:
+        """Get W_K in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
 
-        Returns:
-            Attention patterns tensor or None if not cached
-        """
-        return getattr(self, "_cached_attention_patterns", None)
+        weight = self.k.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = (
+                self.config.n_key_value_heads
+                if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads
+                else (
+                    self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+                )
+            )
+            # Detect format based on weight shape
+            # Linear format: [(n_heads*d_head), d_model]
+            # Conv1D format: [d_model, (n_heads*d_head)]
+            if weight.shape[0] % n_heads == 0:
+                # Linear format - first dimension is (n_heads*d_head)
+                return einops.rearrange(
+                    weight, "(n_heads d_head) d_model -> n_heads d_model d_head", n_heads=n_heads
+                )
+            else:
+                # Conv1D format - second dimension is (n_heads*d_head)
+                return einops.rearrange(
+                    weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+                )
+        return weight
 
-    def __repr__(self) -> str:
-        """String representation of the AttentionBridge."""
-        return f"AttentionBridge(name={self.name})"
+    @property
+    def W_V(self) -> torch.Tensor:
+        """Get W_V in 3D format [n_heads, d_model, d_head] from 2D linear bridge weight."""
+
+        weight = self.v.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = (
+                self.config.n_key_value_heads
+                if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads
+                else (
+                    self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+                )
+            )
+            # Detect format based on weight shape
+            # Linear format: [(n_heads*d_head), d_model]
+            # Conv1D format: [d_model, (n_heads*d_head)]
+            if weight.shape[0] % n_heads == 0:
+                # Linear format - first dimension is (n_heads*d_head)
+                return einops.rearrange(
+                    weight, "(n_heads d_head) d_model -> n_heads d_model d_head", n_heads=n_heads
+                )
+            else:
+                # Conv1D format - second dimension is (n_heads*d_head)
+                return einops.rearrange(
+                    weight, "d_model (n_heads d_head) -> n_heads d_model d_head", n_heads=n_heads
+                )
+        return weight
+
+    @property
+    def W_O(self) -> torch.Tensor:
+        """Get W_O in 3D format [n_heads, d_head, d_model] from 2D linear bridge weight."""
+
+        weight = self.o.weight
+        if weight.ndim == 2 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+            if weight.shape[0] == n_heads * (
+                weight.shape[1] // n_heads
+                if weight.shape[1] % n_heads == 0
+                else weight.shape[0] // n_heads
+            ):
+                return einops.rearrange(
+                    weight, "(n_heads d_head) d_model -> n_heads d_head d_model", n_heads=n_heads
+                )
+            else:
+                return einops.rearrange(
+                    weight.T, "(n_heads d_head) d_model -> n_heads d_head d_model", n_heads=n_heads
+                )
+        return weight
+
+    @property
+    def b_Q(self) -> Optional[torch.Tensor]:
+        """Get b_Q in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+
+        bias = self.q.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_K(self) -> Optional[torch.Tensor]:
+        """Get b_K in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+
+        bias = self.k.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = (
+                self.config.n_key_value_heads
+                if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads
+                else (
+                    self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+                )
+            )
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_V(self) -> Optional[torch.Tensor]:
+        """Get b_V in 2D format [n_heads, d_head] from 1D linear bridge bias."""
+
+        bias = self.v.bias
+        if bias is not None and bias.ndim == 1 and self.config is not None:
+            n_heads = (
+                self.config.n_key_value_heads
+                if hasattr(self.config, "n_key_value_heads") and self.config.n_key_value_heads
+                else (
+                    self.config.n_heads if hasattr(self.config, "n_heads") else self.config.n_head
+                )
+            )
+            return einops.rearrange(bias, "(n_heads d_head) -> n_heads d_head", n_heads=n_heads)
+        return bias
+
+    @property
+    def b_O(self) -> Optional[torch.Tensor]:
+        """Get b_O bias from linear bridge."""
+        return self.o.bias

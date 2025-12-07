@@ -2,17 +2,19 @@
 
 from typing import Any
 
-import torch
-
+from transformer_lens.conversion_utils.conversion_steps import RearrangeTensorConversion
+from transformer_lens.conversion_utils.param_processing_conversion import (
+    ParamProcessingConversion,
+)
 from transformer_lens.model_bridge.architecture_adapter import ArchitectureAdapter
 from transformer_lens.model_bridge.generalized_components import (
-    AttentionBridge,
     BlockBridge,
     EmbeddingBridge,
-    JointGateUpMLPBridge,
     LinearBridge,
-    MLPBridge,
-    NormalizationBridge,
+    MoEBridge,
+    PositionEmbeddingsAttentionBridge,
+    RMSNormalizationBridge,
+    RotaryEmbeddingBridge,
     UnembeddingBridge,
 )
 
@@ -27,17 +29,46 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
         self.cfg.gated_mlp = True
 
         self.cfg.uses_rms_norm = True
+        # GPT-OSS uses 'variance_epsilon' instead of 'eps' for RMSNorm
+        self.cfg.eps_attr = "variance_epsilon"
+        # GPT-OSS uses rotary position embeddings, not learned embeddings
+        self.cfg.positional_embedding_type = "rotary"
+        # GPT-OSS attention returns (output, attn_weights), not a 3-tuple
+        # Note: attention_output_format is not a standard config attribute, handled in architecture code
+
+        # Conversion rules for weight processing/folding
+        # GPT-OSS uses MoE with batched experts, so we need special handling
+        self.weight_processing_conversions = {
+            "blocks.{i}.attn.q.weight": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+            ),
+            "blocks.{i}.attn.k.weight": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+            ),
+            "blocks.{i}.attn.v.weight": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("(n h) m -> n m h", n=self.cfg.n_heads),
+            ),
+            "blocks.{i}.attn.o.weight": ParamProcessingConversion(
+                tensor_conversion=RearrangeTensorConversion("m (n h) -> n h m", n=self.cfg.n_heads),
+            ),
+        }
 
         self.component_mapping = {
             "embed": EmbeddingBridge(name="model.embed_tokens"),
-            "rotary_emb": EmbeddingBridge(name="model.rotary_emb"),
+            "rotary_emb": RotaryEmbeddingBridge(name="model.rotary_emb", config=self.cfg),
             "blocks": BlockBridge(
                 name="model.layers",
                 submodules={
-                    "ln1": NormalizationBridge(name="input_layernorm", config=self.cfg),
-                    "attn": AttentionBridge(
+                    "ln1": RMSNormalizationBridge(
+                        name="input_layernorm",
+                        config=self.cfg,
+                        use_native_layernorm_autograd=True,  # Use HF's RMSNorm for correct dtype handling
+                    ),
+                    "attn": PositionEmbeddingsAttentionBridge(
                         name="self_attn",
                         config=self.cfg,
+                        requires_position_embeddings=True,  # GPT-OSS requires position_embeddings (rotary)
+                        requires_attention_mask=True,  # GPT-OSS requires attention_mask
                         submodules={
                             "q": LinearBridge(name="q_proj"),
                             "k": LinearBridge(name="k_proj"),
@@ -45,53 +76,48 @@ class GPTOSSArchitectureAdapter(ArchitectureAdapter):
                             "o": LinearBridge(name="o_proj"),
                         },
                     ),
-                    "ln2": NormalizationBridge(name="post_attention_layernorm", config=self.cfg),
-                    "mlp": MLPBridge(
-                        name="mlp",
-                        submodules={
-                            "router": LinearBridge(name="router"),
-                            "experts": BlockBridge(
-                                name="experts",
-                                submodules={
-                                    "gate_up": JointGateUpMLPBridge(
-                                        name="gate_up_proj",
-                                        gate_up_config={
-                                            "split_gate_up_matrix": self.split_gate_up_matrix
-                                        },
-                                    ),
-                                    "down": LinearBridge(name="down_proj"),
-                                },
-                            ),
-                        },
+                    "ln2": RMSNormalizationBridge(
+                        name="post_attention_layernorm",
+                        config=self.cfg,
+                        use_native_layernorm_autograd=True,  # Use HF's RMSNorm for correct dtype handling
                     ),
+                    # GPT-OSS uses batched MoE experts with router scores
+                    # MoEBridge handles the (hidden_states, router_scores) tuple returns
+                    "mlp": MoEBridge(name="mlp", config=self.cfg),
                 },
             ),
-            "ln_final": NormalizationBridge(name="model.norm", config=self.cfg),
+            "ln_final": RMSNormalizationBridge(
+                name="model.norm",
+                config=self.cfg,
+                use_native_layernorm_autograd=True,  # Use HF's RMSNorm for correct dtype handling
+            ),
             "unembed": UnembeddingBridge(name="lm_head"),
         }
 
-    def split_gate_up_matrix(
-        self, original_mlp_component: Any
-    ) -> tuple[torch.nn.Linear, torch.nn.Linear]:
-        gate_up_weight = original_mlp_component.gate_up_proj
-        gate_up_bias = original_mlp_component.gate_up_proj_bias
+    def setup_hook_compatibility(self, bridge_model: Any) -> None:
+        """Setup hook compatibility transformations for GPT-OSS models.
 
-        # In GPT-OSS, all the gate projection weights lie at even indices,
-        # all the up projection weights lie at odd indices
-        gate_weight = gate_up_weight[..., ::2]
-        up_weight = gate_up_weight[..., 1::2]
+        This configures rotary embedding references for attention layers, which is
+        needed for models using RoPE (Rotary Position Embeddings).
 
-        gate_bias = gate_up_bias[..., ::2]
-        up_bias = gate_up_bias[..., 1::2]
+        This is called during Bridge.__init__ and should always be run.
 
-        gate_projection = torch.nn.Linear(gate_weight.shape[0], gate_weight.shape[1], bias=True)
+        Args:
+            bridge_model: The TransformerBridge instance
+        """
+        # Get the rotary_emb component from the actual bridge model
+        if bridge_model is None or not hasattr(bridge_model, "rotary_emb"):
+            return
 
-        gate_projection.weight = torch.nn.Parameter(gate_weight)
-        gate_projection.bias = torch.nn.Parameter(gate_bias)
+        # Get the actual HF rotary_emb from the bridge's rotary_emb component
+        rotary_emb = bridge_model.rotary_emb.original_component
 
-        up_projection = torch.nn.Linear(up_weight.shape[0], up_weight.shape[1])
+        # Set rotary_emb on all attention bridge instances
+        if hasattr(bridge_model, "blocks"):
+            for block in bridge_model.blocks:
+                if hasattr(block, "attn"):
+                    block.attn.set_rotary_emb(rotary_emb)
 
-        up_projection.weight = torch.nn.Parameter(up_weight)
-        up_projection.bias = torch.nn.Parameter(up_bias)
-
-        return gate_projection, up_projection
+    def setup_no_processing_hooks(self, bridge_model: Any) -> None:
+        """Backward compatibility alias for setup_hook_compatibility."""
+        self.setup_hook_compatibility(bridge_model)

@@ -36,7 +36,7 @@ on:
         required: false
     secrets:
       HF_TOKEN:
-        required: false 
+        required: false
 
 permissions:
   actions: write
@@ -47,6 +47,7 @@ jobs:
     name: Compatibility Checks
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version:
           - "3.10"
@@ -54,30 +55,44 @@ jobs:
           - "3.12"
     steps:
       - uses: actions/checkout@v3
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: "poetry"
+          activate-environment: true
+          enable-cache: true
       - name: Cache Models used with Tests
         uses: actions/cache@v3
         with:
           path: |
             ~/.cache/huggingface/hub/models--gpt2
+            ~/.cache/huggingface/hub/models--distilgpt2
+            ~/.cache/huggingface/hub/models--EleutherAI--pythia-70m
+            ~/.cache/huggingface/hub/models--EleutherAI--gpt-neo-125M
+            ~/.cache/huggingface/hub/models--google--gemma-2-2b-it
+            ~/.cache/huggingface/hub/models--bigscience--bloom-560m
+            ~/.cache/huggingface/hub/models--Qwen--Qwen2-0.5B
+            ~/.cache/huggingface/hub/models--bert-base-cased
             ~/.cache/huggingface/hub/models--NeelNanda--Attn_Only*
             ~/.cache/huggingface/hub/models--roneneldan--TinyStories-1M*
-          key: ${{ runner.os }}-huggingface-models
+            ~/.cache/huggingface/hub/models--NeelNanda--SoLU*
+            ~/.cache/huggingface/hub/models--ArthurConmy--redwood_attn_2l
+            ~/.cache/huggingface/hub/models--stas--tiny-random-llama-2
+            ~/.cache/huggingface/hub/models--microsoft--DialoGPT-medium
+          key: ${{ runner.os }}-huggingface-models-v4
+          restore-keys: |
+            ${{ runner.os }}-huggingface-models-v2
+            ${{ runner.os }}-huggingface-models-v1
+            ${{ runner.os }}-huggingface-models
       - name: Install dependencies
         run: |
-          poetry check --lock
-          poetry install --with dev
+          uv lock --check
+          uv sync
       - name: Authenticate HuggingFace CLI
         if: env.HF_TOKEN != ''
         run: |
-          pip install huggingface_hub
-          huggingface-cli login --token "$HF_TOKEN"
+          uv pip install huggingface_hub
+          uv run huggingface-cli login --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Unit Test
@@ -87,43 +102,109 @@ jobs:
       - name: Acceptance Test
         run: make acceptance-test
       - name: Build check
-        run: poetry build
+        run: uv build
 
-  code-checks:
-    name: Code Checks
+  format-check:
+    name: Format Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v3
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: "poetry"
+          activate-environment: true
+          enable-cache: true
+      - name: Install dependencies
+        run: |
+          uv lock --check
+          uv sync
+      - name: Check format
+        run: make check-format
+
+  type-check:
+    name: Type Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          activate-environment: true
+          enable-cache: true
+      - name: Install dependencies
+        run: |
+          uv lock --check
+          uv sync
+      - name: Type check
+        run: uv run mypy .
+
+  docstring-test:
+    name: Docstring Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          activate-environment: true
+          enable-cache: true
+      - name: Install dependencies
+        run: |
+          uv lock --check
+          uv sync
+      - name: Docstring test
+        run: make docstring-test
+
+  coverage-test:
+    name: Full Code Coverage Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          activate-environment: true
+          enable-cache: true
       - name: Cache Models used with Tests
         uses: actions/cache@v3
         with:
           path: |
             ~/.cache/huggingface/hub/models--gpt2
+            ~/.cache/huggingface/hub/models--distilgpt2
+            ~/.cache/huggingface/hub/models--EleutherAI--pythia-70m
+            ~/.cache/huggingface/hub/models--EleutherAI--gpt-neo-125M
+            ~/.cache/huggingface/hub/models--google--gemma-2-2b-it
+            ~/.cache/huggingface/hub/models--bigscience--bloom-560m
+            ~/.cache/huggingface/hub/models--Qwen--Qwen2-0.5B
+            ~/.cache/huggingface/hub/models--bert-base-cased
             ~/.cache/huggingface/hub/models--NeelNanda--Attn_Only*
             ~/.cache/huggingface/hub/models--roneneldan--TinyStories-1M*
-          key: ${{ runner.os }}-huggingface-models
+            ~/.cache/huggingface/hub/models--NeelNanda--SoLU*
+            ~/.cache/huggingface/hub/models--ArthurConmy--redwood_attn_2l
+            ~/.cache/huggingface/hub/models--stas--tiny-random-llama-2
+            ~/.cache/huggingface/hub/models--microsoft--DialoGPT-medium
+          key: ${{ runner.os }}-huggingface-models-v4
+          restore-keys: |
+            ${{ runner.os }}-huggingface-models-v2
+            ${{ runner.os }}-huggingface-models-v1
+            ${{ runner.os }}-huggingface-models
       - name: Install dependencies
         run: |
-          poetry check --lock
-          poetry install --with dev
-      - name: Check format
-        run: make check-format
-      - name: Docstring test
-        run: make docstring-test
-      - name: Type check
-        run: poetry run mypy .
+          uv lock --check
+          uv sync
       - name: Authenticate HuggingFace CLI
         if: env.HF_TOKEN != ''
         run: |
-          pip install huggingface_hub
-          huggingface-cli login --token "$HF_TOKEN"
+          uv pip install huggingface_hub
+          uv run huggingface-cli login --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Test Suite with Coverage Report
@@ -131,7 +212,7 @@ jobs:
         env:
           HF_TOKEN:  ${{ secrets.HF_TOKEN }}
       - name: Build check
-        run: poetry build
+        run: uv build
       - name: Upload Coverage Report Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -142,12 +223,12 @@ jobs:
     name: Notebook Checks
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         notebook:
           # - "Activation_Patching_in_TL_Demo"
           # - "Attribution_Patching_Demo"
           - "ARENA_Content"
-          - "Colab_Compatibility"
           - "BERT"
           - "Exploratory_Analysis_Demo"
           # - "Grokking_Demo"
@@ -162,13 +243,12 @@ jobs:
           # - "T5"
     steps:
       - uses: actions/checkout@v3
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
-          cache: "poetry"
+          activate-environment: true
+          enable-cache: true
       - name: Re-use HuggingFace models cache
         uses: actions/cache/restore@v3
         with:
@@ -176,8 +256,8 @@ jobs:
           key: ${{ runner.os }}-huggingface-models
       - name: Install dependencies
         run: |
-          poetry check --lock
-          poetry install --with dev,jupyter
+          uv lock --check
+          uv sync
       - name: Install pandoc
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
@@ -185,7 +265,7 @@ jobs:
           version: 1.0
       - name: Check Notebook Output Consistency
         # Note: currently only checks notebooks we have specifically setup for this
-        run: poetry run pytest --nbval-sanitize-with demos/doc_sanitize.cfg demos/${{ matrix.notebook }}.ipynb
+        run: pytest --nbval-sanitize-with demos/doc_sanitize.cfg demos/${{ matrix.notebook }}.ipynb
 
 
   build-docs:
@@ -194,23 +274,24 @@ jobs:
     name: 'Build Docs'
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') || contains(github.head_ref, 'docs')
-    needs: code-checks
+    needs: coverage-test
     steps:
       - uses: actions/checkout@v4
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
-          cache: "poetry"
+          activate-environment: true
+          enable-cache: true
       - name: Install pandoc
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
           packages: pandoc
           version: 1.0
       - name: Install dependencies
-        run: poetry install --with docs
+        run: |
+          uv lock --check
+          uv sync
       - name: Download Test Coverage Artifact
         uses: actions/download-artifact@v4
         with:
@@ -219,12 +300,12 @@ jobs:
       - name: Authenticate HuggingFace CLI
         if: env.HF_TOKEN != ''
         run: |
-          pip install huggingface_hub
-          huggingface-cli login --token "$HF_TOKEN"
+          uv pip install huggingface_hub
+          uv run huggingface-cli login --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Build Docs
-        run: poetry run build-docs
+        run: make build-docs
         env:
           HF_TOKEN:  ${{ secrets.HF_TOKEN }}
       - name: Upload Docs Artifact
