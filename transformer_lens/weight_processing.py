@@ -283,6 +283,21 @@ class ProcessWeights:
         ln1_b_key = ProcessWeights._get_param_key(f"blocks.{layer}.ln1.b", adapter)
         ln1_w_key = ProcessWeights._get_param_key(f"blocks.{layer}.ln1.w", adapter)
 
+        # For GQA models, Q, K and V weights may use underscore prefix (_W_Q, _W_K, _W_V)
+        # Check if standard keys exist, otherwise update to use underscore-prefixed versions
+        if W_Q_key not in state_dict:
+            W_Q_key = W_Q_key.replace(".W_Q", "._W_Q")
+        if W_K_key not in state_dict:
+            W_K_key = W_K_key.replace(".W_K", "._W_K")
+        if W_V_key not in state_dict:
+            W_V_key = W_V_key.replace(".W_V", "._W_V")
+        if b_Q_key not in state_dict:
+            b_Q_key = b_Q_key.replace(".b_Q", "._b_Q")
+        if b_K_key not in state_dict:
+            b_K_key = b_K_key.replace(".b_K", "._b_K")
+        if b_V_key not in state_dict:
+            b_V_key = b_V_key.replace(".b_V", "._b_V")
+
         wq_tensor: Optional[torch.Tensor] = state_dict.get(W_Q_key)
         wk_tensor: Optional[torch.Tensor] = state_dict.get(W_K_key)
         wv_tensor: Optional[torch.Tensor] = state_dict.get(W_V_key)
@@ -662,6 +677,12 @@ class ProcessWeights:
         unembed_W_U_key = ProcessWeights._get_param_key("unembed.W_U", adapter)
         ln_final_b_key = ProcessWeights._get_param_key("ln_final.b", adapter)
         ln_final_w_key = ProcessWeights._get_param_key("ln_final.w", adapter)
+
+        # Skip layer norm folding if ln_final doesn't exist
+        # (e.g., encoder-decoder models like T5 have encoder_ln_final/decoder_ln_final instead)
+        if ln_final_w_key not in state_dict:
+            return state_dict
+
         has_unembed_bias = unembed_b_U_key in state_dict
         unembed_weight = ProcessWeights.convert_tensor_to_tl_format(
             unembed_W_U_key, state_dict, state_dict.get(unembed_W_U_key), cfg, adapter, None
