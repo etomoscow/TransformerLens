@@ -1,0 +1,70 @@
+{
+  "generated_at": "2025-12-30",
+  "total_unsupported": 16,
+  "gaps": [
+    {
+      "architecture_id": "BertModel",
+      "total_models": 100
+    },
+    {
+      "architecture_id": "RobertaModel",
+      "total_models": 100
+    },
+    {
+      "architecture_id": "DistilBertModel",
+      "total_models": 100
+    },
+    {
+      "architecture_id": "T5ForConditionalGeneration",
+      "total_models": 100
+    },
+    {
+      "architecture_id": "ElectraModel",
+      "total_models": 92
+    },
+    {
+      "architecture_id": "DebertaModel",
+      "total_models": 57
+    },
+    {
+      "architecture_id": "AlbertModel",
+      "total_models": 56
+    },
+    {
+      "architecture_id": "MPNetModel",
+      "total_models": 45
+    },
+    {
+      "architecture_id": "BartForConditionalGeneration",
+      "total_models": 26
+    },
+    {
+      "architecture_id": "XLNetLMHeadModel",
+      "total_models": 17
+    },
+    {
+      "architecture_id": "CLIPModel",
+      "total_models": 11
+    },
+    {
+      "architecture_id": "MT5ForConditionalGeneration",
+      "total_models": 6
+    },
+    {
+      "architecture_id": "DebertaV2Model",
+      "total_models": 2
+    },
+    {
+      "architecture_id": "PegasusForConditionalGeneration",
+      "total_models": 2
+    },
+    {
+      "architecture_id": "WhisperForConditionalGeneration",
+      "total_models": 2
+    },
+    {
+      "architecture_id": "ViTModel",
+      "total_models": 1
+    }
+  ]
+}
