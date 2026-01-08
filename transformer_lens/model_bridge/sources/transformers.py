@@ -301,4 +301,110 @@ def setup_tokenizer(tokenizer, default_padding_side=None):
     return tokenizer
 
 
+def list_supported_models(
+    architecture: str | None = None,
+    verified_only: bool = False,
+) -> list[str]:
+    """List all models supported by TransformerLens.
+
+    This function provides convenient access to the model registry API
+    for discovering which HuggingFace models can be loaded.
+
+    Args:
+        architecture: Filter by architecture ID (e.g., "GPT2LMHeadModel").
+            If None, returns all supported models.
+        verified_only: If True, only return models that have been verified
+            to work with TransformerLens.
+
+    Returns:
+        List of model IDs (e.g., ["gpt2", "gpt2-medium", ...])
+
+    Example:
+        >>> from transformer_lens.model_bridge.sources.transformers import list_supported_models
+        >>> models = list_supported_models()
+        >>> gpt2_models = list_supported_models(architecture="GPT2LMHeadModel")
+    """
+    try:
+        from transformer_lens.tools.model_registry import api
+
+        models = api.get_supported_models(architecture=architecture, verified_only=verified_only)
+        return [m.model_id for m in models]
+    except ImportError:
+        return []
+    except Exception:
+        return []
+
+
+def check_model_support(model_id: str) -> dict:
+    """Check if a model is supported and get detailed support info.
+
+    This function provides detailed information about a model's compatibility
+    with TransformerLens, including architecture type and verification status.
+
+    Args:
+        model_id: The HuggingFace model ID to check (e.g., "gpt2")
+
+    Returns:
+        Dictionary with support information:
+        - is_supported: bool - Whether the model is supported
+        - architecture_id: str | None - The architecture type if supported
+        - verified: bool - Whether the model has been verified to work
+        - suggestion: str | None - Suggested alternative if not supported
+
+    Example:
+        >>> from transformer_lens.model_bridge.sources.transformers import check_model_support
+        >>> info = check_model_support("gpt2")
+        >>> info["is_supported"]
+        True
+        >>> info["architecture_id"]
+        'GPT2LMHeadModel'
+    """
+    try:
+        from transformer_lens.tools.model_registry import api
+
+        is_supported = api.is_model_supported(model_id)
+
+        if is_supported:
+            model_info = api.get_model_info(model_id)
+            return {
+                "is_supported": True,
+                "architecture_id": model_info.architecture_id,
+                "verified": model_info.verified,
+                "verified_date": (
+                    model_info.verified_date.isoformat() if model_info.verified_date else None
+                ),
+                "suggestion": None,
+            }
+        else:
+            suggestion = api.suggest_similar_model(model_id)
+            return {
+                "is_supported": False,
+                "architecture_id": None,
+                "verified": False,
+                "verified_date": None,
+                "suggestion": suggestion,
+            }
+    except ImportError:
+        return {
+            "is_supported": None,
+            "architecture_id": None,
+            "verified": False,
+            "verified_date": None,
+            "suggestion": None,
+            "error": "Model registry not available",
+        }
+    except Exception as e:
+        return {
+            "is_supported": None,
+            "architecture_id": None,
+            "verified": False,
+            "verified_date": None,
+            "suggestion": None,
+            "error": str(e),
+        }
+
+
+# Attach functions to TransformerBridge as static methods
 setattr(TransformerBridge, "boot_transformers", staticmethod(boot))
+setattr(TransformerBridge, "list_supported_models", staticmethod(list_supported_models))
+setattr(TransformerBridge, "check_model_support", staticmethod(check_model_support))

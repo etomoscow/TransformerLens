@@ -8,7 +8,9 @@ from typing import Any, Dict, Optional
 import torch
 
 from transformer_lens.hook_points import HookPoint
-from transformer_lens.model_bridge.generalized_components.base import GeneralizedComponent
+from transformer_lens.model_bridge.generalized_components.base import (
+    GeneralizedComponent,
+)
 
 
 class VisionProjectionBridge(GeneralizedComponent):

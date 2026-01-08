@@ -25,8 +25,8 @@ from transformer_lens.model_bridge.generalized_components import (
     LinearBridge,
     RMSNormalizationBridge,
     RotaryEmbeddingBridge,
-    UnembeddingBridge,
     SiglipVisionEncoderBridge,
+    UnembeddingBridge,
     VisionProjectionBridge,
 )
 from transformer_lens.model_bridge.generalized_components.position_embeddings_attention import (
@@ -75,9 +75,7 @@ class Gemma3MultimodalArchitectureAdapter(ArchitectureAdapter):
         self.weight_processing_conversions = {
             # Q/K/V weight conversions for language model
             "blocks.{i}.attn.q.weight": ParamProcessingConversion(
-                tensor_conversion=RearrangeTensorConversion(
-                    "(n h) m -> n m h", n=self.cfg.n_heads
-                ),
+                tensor_conversion=RearrangeTensorConversion("(n h) m -> n m h", n=self.cfg.n_heads),
             ),
             "blocks.{i}.attn.k.weight": ParamProcessingConversion(
                 tensor_conversion=RearrangeTensorConversion(
@@ -92,9 +90,7 @@ class Gemma3MultimodalArchitectureAdapter(ArchitectureAdapter):
                 ),
             ),
             "blocks.{i}.attn.o.weight": ParamProcessingConversion(
-                tensor_conversion=RearrangeTensorConversion(
-                    "m (n h) -> n h m", n=self.cfg.n_heads
-                ),
+                tensor_conversion=RearrangeTensorConversion("m (n h) -> n h m", n=self.cfg.n_heads),
             ),
             # RMSNorm weight conversions - Gemma adds 1.0 to weights
             "blocks.{i}.ln1.weight": ParamProcessingConversion(

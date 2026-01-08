@@ -14,6 +14,15 @@ import time
 from collections import Counter
 from datetime import date
 from pathlib import Path
+from typing import Optional, TypedDict
+
+
+class ArchitectureEntry(TypedDict):
+    """Type for architecture entry dictionaries."""
+
+    architecture_id: str
+    total_models: int
+    example_models: list[str]
 
 # Architectures currently supported by TransformerLens
 # (from transformer_lens/factories/architecture_adapter_factory.py)
@@ -43,7 +52,7 @@ SUPPORTED_ARCHITECTURES = {
 
 def discover_architectures(
     num_models: int = 5000,
-    output_dir: Path = None,
+    output_dir: Optional[Path] = None,
 ) -> tuple[dict, dict]:
     """Discover all architectures by scanning HuggingFace models.
 
@@ -60,8 +69,8 @@ def discover_architectures(
         raise ImportError("huggingface_hub required: pip install huggingface_hub")
 
     api = HfApi()
-    arch_counts = Counter()
-    arch_models = {}  # Track example models per architecture
+    arch_counts: Counter[str] = Counter()
+    arch_models: dict[str, list[str]] = {}  # Track example models per architecture
     checked = 0
     errors = 0
 
@@ -77,7 +86,7 @@ def discover_architectures(
             info = api.model_info(model.id)
             if info.config and isinstance(info.config, dict):
                 archs = info.config.get("architectures", [])
-                for arch in (archs or []):
+                for arch in archs or []:
                     arch_counts[arch] += 1
                     if arch not in arch_models:
                         arch_models[arch] = []
@@ -88,7 +97,9 @@ def discover_architectures(
             continue
 
         if checked % 500 == 0:
-            print(f"  Checked {checked}/{num_models} models, found {len(arch_counts)} architectures...")
+            print(
+                f"  Checked {checked}/{num_models} models, found {len(arch_counts)} architectures..."
+            )
 
         time.sleep(0.03)  # Rate limit
 
@@ -96,11 +107,11 @@ def discover_architectures(
     print(f"Discovered {len(arch_counts)} unique architecture classes\n")
 
     # Categorize architectures
-    supported = {}
-    unsupported = {}
+    supported: dict[str, ArchitectureEntry] = {}
+    unsupported: dict[str, ArchitectureEntry] = {}
 
     for arch, count in arch_counts.most_common():
-        entry = {
+        entry: ArchitectureEntry = {
             "architecture_id": arch,
             "total_models": count,
             "example_models": arch_models.get(arch, []),
@@ -141,13 +152,15 @@ def discover_architectures(
         supported_models = []
         for arch, data in supported.items():
             for model_id in data["example_models"]:
-                supported_models.append({
-                    "architecture_id": arch,
-                    "model_id": model_id,
-                    "verified": False,
-                    "verified_date": None,
-                    "metadata": None,
-                })
+                supported_models.append(
+                    {
+                        "architecture_id": arch,
+                        "model_id": model_id,
+                        "verified": False,
+                        "verified_date": None,
+                        "metadata": None,
+                    }
+                )
 
         supported_report = {
             "generated_at": date.today().isoformat(),
@@ -185,13 +198,15 @@ def main():
         description="Discover all HuggingFace architectures and classify support status"
     )
     parser.add_argument(
-        "-n", "--num-models",
+        "-n",
+        "--num-models",
         type=int,
         default=3000,
         help="Number of models to scan (default: 3000)",
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         type=Path,
         default=None,
         help="Output directory for JSON files",

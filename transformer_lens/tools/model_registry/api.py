@@ -28,11 +28,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Optional
 
-from .exceptions import (
-    ArchitectureNotSupportedError,
-    DataNotLoadedError,
-    ModelNotFoundError,
-)
+from .exceptions import DataNotLoadedError, ModelNotFoundError
 from .schemas import (
     ArchitectureGap,
     ArchitectureGapsReport,
@@ -100,7 +96,9 @@ def _get_supported_models_report() -> SupportedModelsReport:
         if cache_key not in _cache:
             data = _load_json("supported_models.json")
             _cache[cache_key] = SupportedModelsReport.from_dict(data)
-        return _cache[cache_key]
+        result = _cache[cache_key]
+        assert isinstance(result, SupportedModelsReport)
+        return result
 
 
 def _get_architecture_gaps_report() -> ArchitectureGapsReport:
@@ -117,7 +115,9 @@ def _get_architecture_gaps_report() -> ArchitectureGapsReport:
         if cache_key not in _cache:
             data = _load_json("architecture_gaps.json")
             _cache[cache_key] = ArchitectureGapsReport.from_dict(data)
-        return _cache[cache_key]
+        result = _cache[cache_key]
+        assert isinstance(result, ArchitectureGapsReport)
+        return result
 
 
 def _get_verification_history() -> VerificationHistory:
@@ -134,7 +134,9 @@ def _get_verification_history() -> VerificationHistory:
         if cache_key not in _cache:
             data = _load_json("verification_history.json")
             _cache[cache_key] = VerificationHistory.from_dict(data)
-        return _cache[cache_key]
+        result = _cache[cache_key]
+        assert isinstance(result, VerificationHistory)
+        return result
 
 
 def clear_cache() -> None:

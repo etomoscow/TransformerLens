@@ -12,15 +12,6 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from .schemas import (
-    ArchitectureGap,
-    ArchitectureGapsReport,
-    ModelEntry,
-    ModelMetadata,
-    SupportedModelsReport,
-)
-from .verification import VerificationHistory, VerificationRecord
-
 logger = logging.getLogger(__name__)
 
 
@@ -137,9 +128,7 @@ def _validate_bool(value: Any, path: str, required: bool = True) -> list[Validat
     return errors
 
 
-def _validate_date_string(
-    value: Any, path: str, required: bool = True
-) -> list[ValidationError]:
+def _validate_date_string(value: Any, path: str, required: bool = True) -> list[ValidationError]:
     """Validate that a value is a valid ISO date string.
 
     Args:
@@ -155,7 +144,9 @@ def _validate_date_string(
         if required:
             errors.append(ValidationError(path, "required field is missing or null"))
     elif not isinstance(value, str):
-        errors.append(ValidationError(path, f"expected date string, got {type(value).__name__}", value))
+        errors.append(
+            ValidationError(path, f"expected date string, got {type(value).__name__}", value)
+        )
     else:
         try:
             date.fromisoformat(value)
@@ -193,9 +184,7 @@ def _validate_datetime_string(
     return errors
 
 
-def _validate_list(
-    value: Any, path: str, required: bool = True
-) -> list[ValidationError]:
+def _validate_list(value: Any, path: str, required: bool = True) -> list[ValidationError]:
     """Validate that a value is a list.
 
     Args:
@@ -229,7 +218,9 @@ def _validate_model_metadata(data: dict, path: str) -> list[ValidationError]:
 
     # downloads (optional, defaults to 0)
     if "downloads" in data:
-        errors.extend(_validate_int(data["downloads"], f"{path}.downloads", required=False, min_value=0))
+        errors.extend(
+            _validate_int(data["downloads"], f"{path}.downloads", required=False, min_value=0)
+        )
 
     # likes (optional, defaults to 0)
     if "likes" in data:
@@ -237,7 +228,11 @@ def _validate_model_metadata(data: dict, path: str) -> list[ValidationError]:
 
     # last_modified (optional datetime)
     if "last_modified" in data and data["last_modified"] is not None:
-        errors.extend(_validate_datetime_string(data["last_modified"], f"{path}.last_modified", required=False))
+        errors.extend(
+            _validate_datetime_string(
+                data["last_modified"], f"{path}.last_modified", required=False
+            )
+        )
 
     # tags (optional list of strings)
     if "tags" in data:
@@ -250,7 +245,11 @@ def _validate_model_metadata(data: dict, path: str) -> list[ValidationError]:
 
     # parameter_count (optional int)
     if "parameter_count" in data and data["parameter_count"] is not None:
-        errors.extend(_validate_int(data["parameter_count"], f"{path}.parameter_count", required=False, min_value=0))
+        errors.extend(
+            _validate_int(
+                data["parameter_count"], f"{path}.parameter_count", required=False, min_value=0
+            )
+        )
 
     return errors
 
@@ -271,7 +270,9 @@ def _validate_model_entry(data: dict, path: str) -> list[ValidationError]:
         return [ValidationError(path, f"expected object, got {type(data).__name__}", data)]
 
     # architecture_id (required string)
-    errors.extend(_validate_string(data.get("architecture_id"), f"{path}.architecture_id", min_length=1))
+    errors.extend(
+        _validate_string(data.get("architecture_id"), f"{path}.architecture_id", min_length=1)
+    )
 
     # model_id (required string)
     errors.extend(_validate_string(data.get("model_id"), f"{path}.model_id", min_length=1))
@@ -282,7 +283,9 @@ def _validate_model_entry(data: dict, path: str) -> list[ValidationError]:
 
     # verified_date (optional date string)
     if "verified_date" in data and data["verified_date"] is not None:
-        errors.extend(_validate_date_string(data["verified_date"], f"{path}.verified_date", required=False))
+        errors.extend(
+            _validate_date_string(data["verified_date"], f"{path}.verified_date", required=False)
+        )
 
     # metadata (optional ModelMetadata)
     if "metadata" in data and data["metadata"] is not None:
@@ -316,7 +319,9 @@ def _validate_architecture_gap(data: dict, path: str) -> list[ValidationError]:
         return [ValidationError(path, f"expected object, got {type(data).__name__}", data)]
 
     # architecture_id (required string)
-    errors.extend(_validate_string(data.get("architecture_id"), f"{path}.architecture_id", min_length=1))
+    errors.extend(
+        _validate_string(data.get("architecture_id"), f"{path}.architecture_id", min_length=1)
+    )
 
     # total_models (required int >= 0)
     errors.extend(_validate_int(data.get("total_models"), f"{path}.total_models", min_value=0))
@@ -344,7 +349,9 @@ def _validate_verification_record(data: dict, path: str) -> list[ValidationError
 
     # architecture_id (optional string, defaults to "Unknown")
     if "architecture_id" in data and data["architecture_id"] is not None:
-        errors.extend(_validate_string(data["architecture_id"], f"{path}.architecture_id", required=False))
+        errors.extend(
+            _validate_string(data["architecture_id"], f"{path}.architecture_id", required=False)
+        )
 
     # verified_date (required date string)
     errors.extend(_validate_date_string(data.get("verified_date"), f"{path}.verified_date"))
@@ -355,7 +362,11 @@ def _validate_verification_record(data: dict, path: str) -> list[ValidationError
 
     # transformerlens_version (optional string)
     if "transformerlens_version" in data and data["transformerlens_version"] is not None:
-        errors.extend(_validate_string(data["transformerlens_version"], f"{path}.transformerlens_version", required=False))
+        errors.extend(
+            _validate_string(
+                data["transformerlens_version"], f"{path}.transformerlens_version", required=False
+            )
+        )
 
     # notes (optional string)
     if "notes" in data and data["notes"] is not None:
@@ -367,7 +378,11 @@ def _validate_verification_record(data: dict, path: str) -> list[ValidationError
 
     # invalidation_reason (optional string)
     if "invalidation_reason" in data and data["invalidation_reason"] is not None:
-        errors.extend(_validate_string(data["invalidation_reason"], f"{path}.invalidation_reason", required=False))
+        errors.extend(
+            _validate_string(
+                data["invalidation_reason"], f"{path}.invalidation_reason", required=False
+            )
+        )
 
     return errors
 
@@ -386,7 +401,9 @@ def validate_supported_models_report(data: dict) -> ValidationResult:
     if not isinstance(data, dict):
         return ValidationResult(
             valid=False,
-            errors=[ValidationError("", f"expected object at root, got {type(data).__name__}", data)],
+            errors=[
+                ValidationError("", f"expected object at root, got {type(data).__name__}", data)
+            ],
             schema_type="SupportedModelsReport",
         )
 
@@ -394,7 +411,9 @@ def validate_supported_models_report(data: dict) -> ValidationResult:
     errors.extend(_validate_date_string(data.get("generated_at"), "generated_at"))
 
     # total_architectures (required int >= 0)
-    errors.extend(_validate_int(data.get("total_architectures"), "total_architectures", min_value=0))
+    errors.extend(
+        _validate_int(data.get("total_architectures"), "total_architectures", min_value=0)
+    )
 
     # total_models (required int >= 0)
     errors.extend(_validate_int(data.get("total_models"), "total_models", min_value=0))
@@ -430,7 +449,9 @@ def validate_architecture_gaps_report(data: dict) -> ValidationResult:
     if not isinstance(data, dict):
         return ValidationResult(
             valid=False,
-            errors=[ValidationError("", f"expected object at root, got {type(data).__name__}", data)],
+            errors=[
+                ValidationError("", f"expected object at root, got {type(data).__name__}", data)
+            ],
             schema_type="ArchitectureGapsReport",
         )
 
@@ -468,13 +489,17 @@ def validate_verification_history(data: dict) -> ValidationResult:
     if not isinstance(data, dict):
         return ValidationResult(
             valid=False,
-            errors=[ValidationError("", f"expected object at root, got {type(data).__name__}", data)],
+            errors=[
+                ValidationError("", f"expected object at root, got {type(data).__name__}", data)
+            ],
             schema_type="VerificationHistory",
         )
 
     # last_updated (optional datetime string)
     if "last_updated" in data and data["last_updated"] is not None:
-        errors.extend(_validate_datetime_string(data["last_updated"], "last_updated", required=False))
+        errors.extend(
+            _validate_datetime_string(data["last_updated"], "last_updated", required=False)
+        )
 
     # records (required list of VerificationRecord)
     records = data.get("records")

@@ -1355,6 +1355,94 @@ def run_benchmark_suite(
     return results
 
 
+def update_model_registry(model_name: str, results: List[BenchmarkResult]) -> bool:
+    """Update the model registry with benchmark results.
+
+    Args:
+        model_name: The model that was benchmarked
+        results: List of benchmark results
+
+    Returns:
+        True if registry was updated successfully
+    """
+    import json
+    from datetime import datetime
+    from pathlib import Path
+
+    registry_path = (
+        Path(__file__).parent.parent / "tools" / "model_registry" / "data" / "supported_models.json"
+    )
+
+    if not registry_path.exists():
+        print(f"Registry not found at {registry_path}")
+        return False
+
+    # Calculate phase scores (percentage of passed tests per phase)
+    phase_results: Dict[int, List[bool]] = {1: [], 2: [], 3: []}
+    for result in results:
+        if result.phase in phase_results and result.severity != BenchmarkSeverity.SKIPPED:
+            phase_results[result.phase].append(result.passed)
+
+    phase_scores = {}
+    for phase, passed_list in phase_results.items():
+        if passed_list:
+            phase_scores[phase] = round(sum(passed_list) / len(passed_list) * 100, 1)
+        else:
+            phase_scores[phase] = None
+
+    # Load registry
+    with open(registry_path) as f:
+        registry = json.load(f)
+
+    # Find and update the model entry
+    updated = False
+    for entry in registry.get("models", []):
+        if entry["model_id"] == model_name:
+            entry["verified"] = True
+            entry["verified_at"] = datetime.now().isoformat()
+            entry["phase1_score"] = phase_scores.get(1)
+            entry["phase2_score"] = phase_scores.get(2)
+            entry["phase3_score"] = phase_scores.get(3)
+            updated = True
+            break
+
+    if not updated:
+        # Model not in registry - add it
+        # Try to determine architecture from results or model name
+        architecture_id = "Unknown"
+        try:
+            from transformers import AutoConfig
+
+            config = AutoConfig.from_pretrained(model_name)
+            archs = getattr(config, "architectures", []) or []
+            if archs:
+                architecture_id = archs[0]
+        except Exception:
+            pass
+
+        registry.setdefault("models", []).append(
+            {
+                "model_id": model_name,
+                "architecture_id": architecture_id,
+                "verified": True,
+                "verified_at": datetime.now().isoformat(),
+                "phase1_score": phase_scores.get(1),
+                "phase2_score": phase_scores.get(2),
+                "phase3_score": phase_scores.get(3),
+            }
+        )
+        updated = True
+
+    # Write back
+    with open(registry_path, "w") as f:
+        json.dump(registry, f, indent=2)
+
+    print(
+        f"Updated registry for {model_name}: P1={phase_scores.get(1)}%, P2={phase_scores.get(2)}%, P3={phase_scores.get(3)}%"
+    )
+    return updated
+
+
 def main():
     """Run benchmarks from command line."""
     import argparse
@@ -1392,10 +1480,15 @@ def main():
         action="store_true",
         help="Suppress verbose output",
     )
+    parser.add_argument(
+        "--update-registry",
+        action="store_true",
+        help="Update model registry with benchmark results (default: false)",
+    )
 
     args = parser.parse_args()
 
-    run_benchmark_suite(
+    results = run_benchmark_suite(
         model_name=args.model,
         device=args.device,
         use_hf_reference=not args.no_hf_reference,
@@ -1403,6 +1496,9 @@ def main():
         enable_compatibility_mode=not args.no_compat,
         verbose=not args.quiet,
     )
+
+    if args.update_registry:
+        update_model_registry(args.model, results)
 
 
 if __name__ == "__main__":

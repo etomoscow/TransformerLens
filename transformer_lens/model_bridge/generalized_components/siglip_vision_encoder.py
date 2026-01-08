@@ -8,9 +8,12 @@ from typing import Any, Dict, Optional
 import torch
 
 from transformer_lens.hook_points import HookPoint
-from transformer_lens.model_bridge.generalized_components.base import GeneralizedComponent
-from transformer_lens.model_bridge.generalized_components.normalization import NormalizationBridge
-from transformer_lens.model_bridge.generalized_components.linear import LinearBridge
+from transformer_lens.model_bridge.generalized_components.base import (
+    GeneralizedComponent,
+)
+from transformer_lens.model_bridge.generalized_components.normalization import (
+    NormalizationBridge,
+)
 
 
 class SiglipVisionEncoderLayerBridge(GeneralizedComponent):
@@ -107,7 +110,9 @@ class SiglipVisionEncoderBridge(GeneralizedComponent):
         default_submodules = {
             "embeddings": GeneralizedComponent(name="vision_model.embeddings"),
             "encoder_layers": SiglipVisionEncoderLayerBridge(name="vision_model.encoder.layers"),
-            "post_layernorm": NormalizationBridge(name="vision_model.post_layernorm", config=config),
+            "post_layernorm": NormalizationBridge(
+                name="vision_model.post_layernorm", config=config
+            ),
         }
 
         if submodules:
