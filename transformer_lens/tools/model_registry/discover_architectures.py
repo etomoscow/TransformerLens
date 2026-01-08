@@ -24,6 +24,7 @@ class ArchitectureEntry(TypedDict):
     total_models: int
     example_models: list[str]
 
+
 # Architectures currently supported by TransformerLens
 # (from transformer_lens/factories/architecture_adapter_factory.py)
 SUPPORTED_ARCHITECTURES = {
