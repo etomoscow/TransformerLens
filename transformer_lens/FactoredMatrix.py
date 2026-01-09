@@ -10,7 +10,7 @@ from functools import lru_cache
 from typing import List, Tuple, Union, overload
 
 import torch
-from jaxtyping import Complex, Float, Int
+from jaxtyping import Complex, Float
 
 import transformer_lens.utils as utils
 
