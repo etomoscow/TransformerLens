@@ -526,6 +526,7 @@ class ActivationCache:
 
         # Convert tokens to tensor for shape checking, but pass original to tokens_to_residual_directions
         tokens_for_shape_check = tokens
+
         if isinstance(tokens, str):
             tokens_for_shape_check = torch.as_tensor(self.model.to_single_token(tokens))
         elif isinstance(tokens, int):
@@ -536,6 +537,7 @@ class ActivationCache:
         if incorrect_tokens is not None:
             # Convert incorrect_tokens to tensor for shape checking, but pass original to tokens_to_residual_directions
             incorrect_tokens_for_shape_check = incorrect_tokens
+
             if isinstance(incorrect_tokens, str):
                 incorrect_tokens_for_shape_check = torch.as_tensor(self.model.to_single_token(incorrect_tokens))
             elif isinstance(incorrect_tokens, int):
