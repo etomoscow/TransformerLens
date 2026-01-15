@@ -113,8 +113,7 @@ class BertNextSentencePrediction:
         return_type: Union[Literal["logits"], Literal["predictions"]],
         token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Union[Float[torch.Tensor, "batch 2"], str]:
-        ...
+    ) -> Union[Float[torch.Tensor, "batch 2"], str]: ...
 
     @overload
     def forward(
@@ -126,8 +125,7 @@ class BertNextSentencePrediction:
         return_type: Literal[None],
         token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Optional[Union[Float[torch.Tensor, "batch 2"], str]]:
-        ...
+    ) -> Optional[Union[Float[torch.Tensor, "batch 2"], str]]: ...
 
     def forward(
         self,
@@ -219,14 +217,16 @@ class BertNextSentencePrediction:
     @overload
     def run_with_cache(
         self, *model_args, return_cache_object: Literal[True] = True, **kwargs
-    ) -> Tuple[Float[torch.Tensor, "batch 2"], ActivationCache,]:
-        ...
+    ) -> Tuple[
+        Float[torch.Tensor, "batch 2"],
+        ActivationCache,
+    ]: ...
 
     @overload
-    def run_with_cache(
-        self, *model_args, return_cache_object: Literal[False], **kwargs
-    ) -> Tuple[Float[torch.Tensor, "batch 2"], Dict[str, torch.Tensor],]:
-        ...
+    def run_with_cache(self, *model_args, return_cache_object: Literal[False], **kwargs) -> Tuple[
+        Float[torch.Tensor, "batch 2"],
+        Dict[str, torch.Tensor],
+    ]: ...
 
     def run_with_cache(
         self,
@@ -234,7 +234,10 @@ class BertNextSentencePrediction:
         return_cache_object: bool = True,
         remove_batch_dim: bool = False,
         **kwargs,
-    ) -> Tuple[Float[torch.Tensor, "batch 2"], Union[ActivationCache, Dict[str, torch.Tensor]],]:
+    ) -> Tuple[
+        Float[torch.Tensor, "batch 2"],
+        Union[ActivationCache, Dict[str, torch.Tensor]],
+    ]:
         """
         Wrapper around run_with_cache in HookedRootModule. If return_cache_object is True,
         this will return an ActivationCache object, with a bunch of useful HookedTransformer specific methods,

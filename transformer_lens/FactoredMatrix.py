@@ -48,15 +48,13 @@ class FactoredMatrix:
             Float[torch.Tensor, "... rdim new_rdim"],
             "FactoredMatrix",
         ],
-    ) -> "FactoredMatrix":
-        ...
+    ) -> "FactoredMatrix": ...
 
     @overload
     def __matmul__(  # type: ignore
         self,
         other: Float[torch.Tensor, "rdim"],
-    ) -> Float[torch.Tensor, "... ldim"]:
-        ...
+    ) -> Float[torch.Tensor, "... ldim"]: ...
 
     def __matmul__(
         self,
@@ -89,15 +87,13 @@ class FactoredMatrix:
             Float[torch.Tensor, "... new_rdim ldim"],
             "FactoredMatrix",
         ],
-    ) -> "FactoredMatrix":
-        ...
+    ) -> "FactoredMatrix": ...
 
     @overload
     def __rmatmul__(  # type: ignore
         self,
         other: Float[torch.Tensor, "ldim"],
-    ) -> Float[torch.Tensor, "... rdim"]:
-        ...
+    ) -> Float[torch.Tensor, "... rdim"]: ...
 
     def __rmatmul__(  # type: ignore
         self,

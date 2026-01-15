@@ -42,8 +42,7 @@ NamesFilter = Optional[Union[Callable[[str], bool], Sequence[str], str]]
 class _HookFunctionProtocol(Protocol):
     """Protocol for hook functions."""
 
-    def __call__(self, tensor: Tensor, *, hook: "HookPoint") -> Union[Any, None]:
-        ...
+    def __call__(self, tensor: Tensor, *, hook: "HookPoint") -> Union[Any, None]: ...
 
 
 HookFunction = _HookFunctionProtocol  # Callable[..., _HookFunctionProtocol]

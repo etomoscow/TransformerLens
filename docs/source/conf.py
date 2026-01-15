@@ -2,6 +2,7 @@
 
 https://www.sphinx-doc.org/en/master/usage/configuration.html
 """
+
 # pylint: disable=invalid-name
 from pathlib import Path
 from typing import Any, Optional

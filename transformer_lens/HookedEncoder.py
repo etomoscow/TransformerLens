@@ -200,8 +200,7 @@ class HookedEncoder(HookedRootModule):
         return_type: Union[Literal["logits"], Literal["predictions"]],
         token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Union[Float[torch.Tensor, "batch pos d_vocab"], str, List[str]]:
-        ...
+    ) -> Union[Float[torch.Tensor, "batch pos d_vocab"], str, List[str]]: ...
 
     @overload
     def forward(
@@ -214,8 +213,7 @@ class HookedEncoder(HookedRootModule):
         return_type: Literal[None],
         token_type_ids: Optional[Int[torch.Tensor, "batch pos"]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Optional[Union[Float[torch.Tensor, "batch pos d_vocab"], str, List[str]]]:
-        ...
+    ) -> Optional[Union[Float[torch.Tensor, "batch pos d_vocab"], str, List[str]]]: ...
 
     def forward(
         self,
@@ -311,14 +309,12 @@ class HookedEncoder(HookedRootModule):
     @overload
     def run_with_cache(
         self, *model_args: Any, return_cache_object: Literal[True] = True, **kwargs: Any
-    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], ActivationCache]:
-        ...
+    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], ActivationCache]: ...
 
     @overload
     def run_with_cache(
         self, *model_args: Any, return_cache_object: Literal[False], **kwargs: Any
-    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], Dict[str, torch.Tensor]]:
-        ...
+    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], Dict[str, torch.Tensor]]: ...
 
     def run_with_cache(
         self,

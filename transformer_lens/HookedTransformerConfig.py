@@ -253,9 +253,9 @@ class HookedTransformerConfig:
     n_key_value_heads: Optional[int] = None
     post_embedding_ln: bool = False
     rotary_base: int = 10000
-    rotary_base_local: Optional[
-        int
-    ] = None  # For models with different RoPE bases per attention type (e.g., Gemma 3)
+    rotary_base_local: Optional[int] = (
+        None  # For models with different RoPE bases per attention type (e.g., Gemma 3)
+    )
     trust_remote_code: bool = False
     rotary_adjacent_pairs: bool = False
     load_in_4bit: bool = False

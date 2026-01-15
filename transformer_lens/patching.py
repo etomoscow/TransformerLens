@@ -102,8 +102,7 @@ def generic_activation_patch(
     index_axis_names: Optional[Sequence[AxisNames]] = None,
     index_df: Optional[pd.DataFrame] = None,
     return_index_df: Literal[False] = False,
-) -> torch.Tensor:
-    ...
+) -> torch.Tensor: ...
 
 
 @overload
@@ -119,8 +118,7 @@ def generic_activation_patch(
     index_axis_names: Optional[Sequence[AxisNames]],
     index_df: Optional[pd.DataFrame],
     return_index_df: Literal[True],
-) -> Tuple[torch.Tensor, pd.DataFrame]:
-    ...
+) -> Tuple[torch.Tensor, pd.DataFrame]: ...
 
 
 def generic_activation_patch(

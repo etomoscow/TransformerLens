@@ -43,12 +43,12 @@ class HookedTransformerKeyValueCacheEntry:
         new_keys: Float[torch.Tensor, "batch new_tokens n_heads d_head"],
         new_values: Float[torch.Tensor, "batch new_tokens n_heads d_head"],
     ):
-        updated_keys: Float[
-            torch.Tensor, "batch pos_so_far_plus_new_tokens n_heads d_head"
-        ] = torch.cat([self.past_keys, new_keys], dim=1)
-        updated_values: Float[
-            torch.Tensor, "batch pos_so_far_plus_new_tokens n_heads d_head"
-        ] = torch.cat([self.past_values, new_values], dim=1)
+        updated_keys: Float[torch.Tensor, "batch pos_so_far_plus_new_tokens n_heads d_head"] = (
+            torch.cat([self.past_keys, new_keys], dim=1)
+        )
+        updated_values: Float[torch.Tensor, "batch pos_so_far_plus_new_tokens n_heads d_head"] = (
+            torch.cat([self.past_values, new_values], dim=1)
+        )
         if not self.frozen:
             self.past_keys = updated_keys
             self.past_values = updated_values
