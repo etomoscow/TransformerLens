@@ -524,26 +524,28 @@ class ActivationCache:
         if not isinstance(batch_slice, Slice):
             batch_slice = Slice(batch_slice)
 
+        # Convert tokens to tensor for shape checking, but pass original to tokens_to_residual_directions
+        tokens_for_shape_check = tokens
         if isinstance(tokens, str):
-            tokens = torch.as_tensor(self.model.to_single_token(tokens))
-
+            tokens_for_shape_check = torch.as_tensor(self.model.to_single_token(tokens))
         elif isinstance(tokens, int):
-            tokens = torch.as_tensor(tokens)
+            tokens_for_shape_check = torch.as_tensor(tokens)
 
         logit_directions = self.model.tokens_to_residual_directions(tokens)
 
         if incorrect_tokens is not None:
+            # Convert incorrect_tokens to tensor for shape checking, but pass original to tokens_to_residual_directions
+            incorrect_tokens_for_shape_check = incorrect_tokens
             if isinstance(incorrect_tokens, str):
-                incorrect_tokens = torch.as_tensor(self.model.to_single_token(incorrect_tokens))
-
+                incorrect_tokens_for_shape_check = torch.as_tensor(self.model.to_single_token(incorrect_tokens))
             elif isinstance(incorrect_tokens, int):
-                incorrect_tokens = torch.as_tensor(incorrect_tokens)
+                incorrect_tokens_for_shape_check = torch.as_tensor(incorrect_tokens)
 
-            if tokens.shape != incorrect_tokens.shape:
+            if tokens_for_shape_check.shape != incorrect_tokens_for_shape_check.shape:
                 raise ValueError(
                     f"tokens and incorrect_tokens must have the same shape! \
-                        (tokens.shape={tokens.shape}, \
-                        incorrect_tokens.shape={incorrect_tokens.shape})"
+                        (tokens.shape={tokens_for_shape_check.shape}, \
+                        incorrect_tokens.shape={incorrect_tokens_for_shape_check.shape})"
                 )
 
             # If incorrect_tokens was provided, take the logit difference

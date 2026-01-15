@@ -6,12 +6,15 @@ devices.
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 from torch import nn
 
 import transformer_lens
+
+if TYPE_CHECKING:
+    from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 
 AvailableDeviceMemory = list[tuple[int, int]]
 """
@@ -83,7 +86,7 @@ def get_best_available_cuda_device(max_devices: Optional[int] = None) -> torch.d
     return torch.device("cuda", sorted_devices[0][0])
 
 
-def get_best_available_device(cfg: "transformer_lens.HookedTransformerConfig") -> torch.device:
+def get_best_available_device(cfg: "HookedTransformerConfig") -> torch.device:
     """Gets the best available device to be used based on the passed in arguments
 
     Args:
@@ -103,7 +106,7 @@ def get_best_available_device(cfg: "transformer_lens.HookedTransformerConfig") -
 
 def get_device_for_block_index(
     index: int,
-    cfg: "transformer_lens.HookedTransformerConfig",
+    cfg: "HookedTransformerConfig",
     device: Optional[Union[torch.device, str]] = None,
 ):
     """
