@@ -164,7 +164,8 @@ class HookedEncoderDecoder(HookedRootModule):
         decoder_input: Optional[Int[torch.Tensor, "batch decoder_pos"]] = None,
         return_type: Literal["logits"] = "logits",
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Float[torch.Tensor, "batch pos d_vocab"]: ...
+    ) -> Float[torch.Tensor, "batch pos d_vocab"]:
+        ...
 
     @overload
     def forward(
@@ -173,7 +174,8 @@ class HookedEncoderDecoder(HookedRootModule):
         decoder_input: Optional[Int[torch.Tensor, "batch decoder_pos"]] = None,
         return_type: Optional[Literal[None]] = None,
         one_zero_attention_mask: Optional[Int[torch.Tensor, "batch pos"]] = None,
-    ) -> Optional[Float[torch.Tensor, "batch pos d_vocab"]]: ...
+    ) -> Optional[Float[torch.Tensor, "batch pos d_vocab"]]:
+        ...
 
     def forward(
         self,
@@ -487,12 +489,14 @@ class HookedEncoderDecoder(HookedRootModule):
     @overload
     def run_with_cache(
         self, *model_args: Any, return_cache_object: Literal[True] = True, **kwargs: Any
-    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], ActivationCache]: ...
+    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], ActivationCache]:
+        ...
 
     @overload
     def run_with_cache(
         self, *model_args: Any, return_cache_object: Literal[False] = False, **kwargs: Any
-    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], Dict[str, torch.Tensor]]: ...
+    ) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], Dict[str, torch.Tensor]]:
+        ...
 
     def run_with_cache(
         self,

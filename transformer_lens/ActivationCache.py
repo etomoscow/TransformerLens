@@ -539,9 +539,7 @@ class ActivationCache:
             incorrect_tokens_for_shape_check = incorrect_tokens
 
             if isinstance(incorrect_tokens, str):
-                incorrect_tokens_for_shape_check = torch.as_tensor(
-                    self.model.to_single_token(incorrect_tokens)
-                )
+                incorrect_tokens_for_shape_check = torch.as_tensor(self.model.to_single_token(incorrect_tokens))
             elif isinstance(incorrect_tokens, int):
                 incorrect_tokens_for_shape_check = torch.as_tensor(incorrect_tokens)
 
