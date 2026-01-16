@@ -171,21 +171,6 @@ class AbstractAttention(ABC, nn.Module):
             # will be overwritten by the child T5Attention class
             self.has_relative_attention_bias = False
 
-        if (
-            self.cfg.original_architecture == "OlmoeForCausalLM"
-            or self.cfg.original_architecture == "Olmo2ForCausalLM"
-        ):
-            self.q_norm: Optional[RMSNorm] = RMSNorm(self.cfg, self.cfg.d_model)
-            if self.cfg.original_architecture == "Olmo2ForCausalLM":
-                k_norm_dim = self.cfg.d_model
-            else:
-                assert self.cfg.n_key_value_heads is not None
-                k_norm_dim = self.cfg.d_head * self.cfg.n_key_value_heads
-            self.k_norm: Optional[RMSNorm] = RMSNorm(self.cfg, k_norm_dim)
-        else:
-            self.q_norm = None
-            self.k_norm = None
-
     @property
     def OV(self) -> FactoredMatrix:
         """
