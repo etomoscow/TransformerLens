@@ -528,7 +528,9 @@ class ActivationCache:
         tokens_for_shape_check = tokens
 
         if isinstance(tokens_for_shape_check, str):
-            tokens_for_shape_check = torch.as_tensor(self.model.to_single_token(tokens_for_shape_check))
+            tokens_for_shape_check = torch.as_tensor(
+                self.model.to_single_token(tokens_for_shape_check)
+            )
         elif isinstance(tokens_for_shape_check, int):
             tokens_for_shape_check = torch.as_tensor(tokens_for_shape_check)
 
