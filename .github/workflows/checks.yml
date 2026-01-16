@@ -218,7 +218,7 @@ jobs:
         if: env.HF_TOKEN != ''
         run: |
           pip install huggingface_hub
-          huggingface-cli login --token "$HF_TOKEN"
+          python -m huggingface_hub.cli --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Build Docs
