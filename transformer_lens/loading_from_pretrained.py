@@ -2522,6 +2522,12 @@ def get_pretrained_state_dict(
             state_dict = convert_olmo2_weights(hf_model, cfg)
         elif cfg.original_architecture == "OlmoeForCausalLM":
             state_dict = convert_olmoe_weights(hf_model, cfg)
+        elif cfg.original_architecture == "OlmoForCausalLM":
+            state_dict = convert_olmo_weights(hf_model, cfg)
+        elif cfg.original_architecture == "Olmo2ForCausalLM":
+            state_dict = convert_olmo2_weights(hf_model, cfg)
+        elif cfg.original_architecture == "OlmoeForCausalLM":
+            state_dict = convert_olmoe_weights(hf_model, cfg)
         else:
             raise ValueError(
                 f"Loading weights from the architecture is not currently supported: {cfg.original_architecture}, generated from model name {cfg.model_name}. Feel free to open an issue on GitHub to request this feature."
