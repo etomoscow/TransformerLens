@@ -159,7 +159,7 @@ class HookedTransformer(HookedRootModule):
                 # should be False
                 if "phi" in self.cfg.tokenizer_name.lower():
                     use_fast = False
-                huggingface_token = os.environ.get("HF_TOKEN", None)
+                huggingface_token = os.environ.get("HF_TOKEN", "")
                 add_bos_token = self.cfg.original_architecture not in [
                     "OlmoForCausalLM",
                     "OlmoeForCausalLM",
