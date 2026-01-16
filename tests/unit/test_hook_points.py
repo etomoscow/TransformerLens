@@ -1,11 +1,6 @@
 from unittest import mock
 
-import torch.utils.hooks as hooks
-
 from transformer_lens.hook_points import HookPoint
-
-# Get the actual RemovableHandle class for use in mocks
-_RemovableHandle = hooks.RemovableHandle
 
 
 def setup_hook_point_and_hook():
@@ -51,15 +46,8 @@ def test_add_hook_with_level(mock_handle):
 
 @mock.patch("torch.utils.hooks.RemovableHandle")
 def test_add_hook_prepend(mock_handle):
-    # Create two separate mock instances using spec (not autospec)
-    # Using the actual RemovableHandle class ensures proper typing for jaxtyping
-    mock_handle1 = mock.Mock(spec=_RemovableHandle)
-    mock_handle1.id = 1
-    mock_handle2 = mock.Mock(spec=_RemovableHandle)
-    mock_handle2.id = 2
-    
-    # Configure the patched mock to return our pre-created instances
-    mock_handle.side_effect = [mock_handle1, mock_handle2]
+    mock_handle.id = 0
+    mock_handle.next_id = 1
 
     hook_point, _ = setup_hook_point_and_hook()
 
