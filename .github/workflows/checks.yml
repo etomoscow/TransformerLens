@@ -73,8 +73,8 @@ jobs:
       - name: Authenticate HuggingFace CLI
         if: env.HF_TOKEN != ''
         run: |
-          pip install huggingface_hub[cli]
-          python -m huggingface_hub login --token "$HF_TOKEN"
+          pip install -U huggingface_hub[cli]
+          huggingface-cli login --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Unit Test
@@ -217,8 +217,8 @@ jobs:
       - name: Authenticate HuggingFace CLI
         if: env.HF_TOKEN != ''
         run: |
-          pip install huggingface_hub[cli]
-          python -m huggingface_hub login --token "$HF_TOKEN"
+          pip install -U huggingface_hub[cli]
+          huggingface-cli login --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Build Docs
