@@ -2,7 +2,6 @@ import math
 
 import pytest
 import torch
-from beartype.roar import BeartypeCallHintParamViolation
 
 from transformer_lens import HookedTransformer
 from transformer_lens.head_detector import (
