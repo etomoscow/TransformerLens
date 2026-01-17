@@ -13,7 +13,6 @@ import re
 import shutil
 from copy import deepcopy
 from typing import Any, List, Optional, Tuple, Union, cast
-from typing_extensions import Literal
 
 import einops
 import numpy as np
@@ -28,6 +27,7 @@ from jaxtyping import Float, Int
 from rich import print as rprint
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from typing_extensions import Literal
 
 from transformer_lens.FactoredMatrix import FactoredMatrix
 

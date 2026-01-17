@@ -52,8 +52,8 @@ from transformer_lens.components import (
     TransformerBlock,
     Unembed,
 )
-from transformer_lens.components.mlps.mlp import MLP
 from transformer_lens.components.mlps.gated_mlp import GatedMLP
+from transformer_lens.components.mlps.mlp import MLP
 from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookedRootModule, HookPoint
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
