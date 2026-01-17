@@ -1,7 +1,6 @@
+import jaxtyping
 import pytest
 import torch
-from beartype.roar import BeartypeCallHintParamViolation
-import jaxtyping
 
 from transformer_lens import HookedTransformer, SVDInterpreter
 
