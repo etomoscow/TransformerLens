@@ -48,7 +48,7 @@ class HookedEncoder(HookedRootModule):
         - There is no preprocessing (e.g. LayerNorm folding) when loading a pretrained model
     """
 
-    blocks: nn.ModuleList[BertBlock]  # type: ignore[assignment]
+    blocks: nn.ModuleList[BertBlock]  # type: ignore[type-arg]
 
     def _get_blocks(self) -> list[BertBlock]:
         """Helper to get blocks with proper typing."""

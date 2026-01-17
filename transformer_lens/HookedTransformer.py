@@ -113,7 +113,7 @@ class HookedTransformer(HookedRootModule):
 
     ln_final: nn.Module
     tokenizer: Optional[PreTrainedTokenizerBase]
-    blocks: nn.ModuleList[TransformerBlock]  # type: ignore[assignment]
+    blocks: nn.ModuleList[TransformerBlock]  # type: ignore[type-arg]
 
     def __init__(
         self,
