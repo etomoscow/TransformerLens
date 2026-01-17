@@ -13,6 +13,23 @@ import re
 import shutil
 from copy import deepcopy
 from typing import Any, List, Optional, Tuple, Union, cast
+from typing_extensions import Literal
+
+# Type alias for valid nonlinearity values accepted by nn.init.calculate_gain
+NonlinearityType = Literal[
+    "linear",
+    "conv1d",
+    "conv2d",
+    "conv3d",
+    "conv_transpose1d",
+    "conv_transpose2d",
+    "conv_transpose3d",
+    "sigmoid",
+    "tanh",
+    "relu",
+    "leaky_relu",
+    "selu",
+]
 
 import einops
 import numpy as np
@@ -261,7 +278,7 @@ def init_xavier_normal_(param: torch.Tensor, gain: float = 1.0) -> torch.Tensor:
 def init_kaiming_uniform_(
     param: torch.Tensor,
     a: float = 0,
-    nonlinearity: str = "relu",
+    nonlinearity: NonlinearityType = "relu",
     gain: float = 1.0,
     mode: str = "fan_in",
 ) -> torch.Tensor:
@@ -283,7 +300,7 @@ def init_kaiming_uniform_(
 def init_kaiming_normal_(
     param: torch.Tensor,
     a: float = 0,
-    nonlinearity: str = "relu",
+    nonlinearity: NonlinearityType = "relu",
     gain: float = 1.0,
     mode: str = "fan_in",
 ) -> torch.Tensor:
