@@ -88,8 +88,8 @@ class AbstractAttention(ABC, nn.Module):
             self.k_norm = RMSNorm(self.cfg, length=self.cfg.d_head)
 
         elif (
-                self.cfg.original_architecture == "OlmoeForCausalLM"
-                or self.cfg.original_architecture == "Olmo2ForCausalLM"
+            self.cfg.original_architecture == "OlmoeForCausalLM"
+            or self.cfg.original_architecture == "Olmo2ForCausalLM"
         ):
             self.q_norm: Optional[RMSNorm] = RMSNorm(self.cfg, self.cfg.d_model)
             if self.cfg.original_architecture == "Olmo2ForCausalLM":
