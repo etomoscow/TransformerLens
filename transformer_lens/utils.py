@@ -15,22 +15,6 @@ from copy import deepcopy
 from typing import Any, List, Optional, Tuple, Union, cast
 from typing_extensions import Literal
 
-# Type alias for valid nonlinearity values accepted by nn.init.calculate_gain
-NonlinearityType = Literal[
-    "linear",
-    "conv1d",
-    "conv2d",
-    "conv3d",
-    "conv_transpose1d",
-    "conv_transpose2d",
-    "conv_transpose3d",
-    "sigmoid",
-    "tanh",
-    "relu",
-    "leaky_relu",
-    "selu",
-]
-
 import einops
 import numpy as np
 import torch
@@ -49,6 +33,22 @@ from transformer_lens.FactoredMatrix import FactoredMatrix
 
 CACHE_DIR = constants.HUGGINGFACE_HUB_CACHE
 USE_DEFAULT_VALUE = None
+
+# Type alias for valid nonlinearity values accepted by nn.init.calculate_gain
+NonlinearityType = Literal[
+    "linear",
+    "conv1d",
+    "conv2d",
+    "conv3d",
+    "conv_transpose1d",
+    "conv_transpose2d",
+    "conv_transpose3d",
+    "sigmoid",
+    "tanh",
+    "relu",
+    "leaky_relu",
+    "selu",
+]
 
 
 def select_compatible_kwargs(
