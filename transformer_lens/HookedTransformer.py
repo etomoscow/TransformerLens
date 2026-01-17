@@ -113,7 +113,7 @@ class HookedTransformer(HookedRootModule):
 
     ln_final: nn.Module
     tokenizer: Optional[PreTrainedTokenizerBase]
-    blocks: nn.ModuleList[TransformerBlock]  # type: ignore[type-arg]
+    blocks: nn.ModuleList[TransformerBlock]  # type: ignore[assignment]
 
     def __init__(
         self,
@@ -2076,7 +2076,7 @@ class HookedTransformer(HookedRootModule):
             # but it's the easiest way to do it.
             self.cfg.normalization_type = "LNPre"
             self.ln_final = LayerNormPre(self.cfg)
-            for layer in self.blocks:
+            for layer in self._get_blocks():
                 layer.ln1 = LayerNormPre(self.cfg)
                 layer.ln2 = LayerNormPre(self.cfg)
                 if self.cfg.is_layer_norm_activation():
@@ -2085,7 +2085,7 @@ class HookedTransformer(HookedRootModule):
             # We do the same for RMSNorm if used
             self.cfg.normalization_type = "RMSPre"
             self.ln_final = RMSNormPre(self.cfg)
-            for layer in self.blocks:
+            for layer in self._get_blocks():
                 layer.ln1 = RMSNormPre(self.cfg)
                 layer.ln2 = RMSNormPre(self.cfg)
                 if self.cfg.is_layer_norm_activation():
@@ -2418,31 +2418,35 @@ class HookedTransformer(HookedRootModule):
     # we want to do analysis on weights across all layers. If GPU memory is a bottleneck, don't use
     # these properties!
 
+    def _get_blocks(self) -> list[TransformerBlock]:
+        """Helper to get blocks with proper typing."""
+        return [cast(TransformerBlock, block) for block in self.blocks]
+
     @property
     def W_K(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stack the key weights across all layers."""
-        return torch.stack([block.attn.W_K for block in self.blocks], dim=0)
+        return torch.stack([block.attn.W_K for block in self._get_blocks()], dim=0)
 
     @property
     def W_Q(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stack the query weights across all layers."""
-        return torch.stack([block.attn.W_Q for block in self.blocks], dim=0)
+        return torch.stack([block.attn.W_Q for block in self._get_blocks()], dim=0)
 
     @property
     def W_V(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stack the value weights across all layers."""
-        return torch.stack([block.attn.W_V for block in self.blocks], dim=0)
+        return torch.stack([block.attn.W_V for block in self._get_blocks()], dim=0)
 
     @property
     def W_O(self) -> Float[torch.Tensor, "n_layers n_heads d_head d_model"]:
         """Stack the attn output weights across all layers."""
-        return torch.stack([block.attn.W_O for block in self.blocks], dim=0)
+        return torch.stack([block.attn.W_O for block in self._get_blocks()], dim=0)
 
     @property
     def W_in(self) -> Float[torch.Tensor, "n_layers d_model d_mlp"]:
         """Stack the MLP input weights across all layers."""
         return torch.stack(
-            [cast(Union[MLP, GatedMLP], block.mlp).W_in for block in self.blocks], dim=0
+            [cast(Union[MLP, GatedMLP], block.mlp).W_in for block in self._get_blocks()], dim=0
         )
 
     @property
@@ -2452,7 +2456,9 @@ class HookedTransformer(HookedRootModule):
         Only works for models with gated MLPs.
         """
         if self.cfg.gated_mlp:
-            return torch.stack([cast(GatedMLP, block.mlp).W_gate for block in self.blocks], dim=0)
+            return torch.stack(
+                [cast(GatedMLP, block.mlp).W_gate for block in self._get_blocks()], dim=0
+            )
         else:
             return None
 
@@ -2460,41 +2466,41 @@ class HookedTransformer(HookedRootModule):
     def W_out(self) -> Float[torch.Tensor, "n_layers d_mlp d_model"]:
         """Stack the MLP output weights across all layers."""
         return torch.stack(
-            [cast(Union[MLP, GatedMLP], block.mlp).W_out for block in self.blocks], dim=0
+            [cast(Union[MLP, GatedMLP], block.mlp).W_out for block in self._get_blocks()], dim=0
         )
 
     @property
     def b_K(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stack the key biases across all layers."""
-        return torch.stack([block.attn.b_K for block in self.blocks], dim=0)
+        return torch.stack([block.attn.b_K for block in self._get_blocks()], dim=0)
 
     @property
     def b_Q(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stack the query biases across all layers."""
-        return torch.stack([block.attn.b_Q for block in self.blocks], dim=0)
+        return torch.stack([block.attn.b_Q for block in self._get_blocks()], dim=0)
 
     @property
     def b_V(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stack the value biases across all layers."""
-        return torch.stack([block.attn.b_V for block in self.blocks], dim=0)
+        return torch.stack([block.attn.b_V for block in self._get_blocks()], dim=0)
 
     @property
     def b_O(self) -> Float[torch.Tensor, "n_layers d_model"]:
         """Stack the attn output biases across all layers."""
-        return torch.stack([block.attn.b_O for block in self.blocks], dim=0)
+        return torch.stack([block.attn.b_O for block in self._get_blocks()], dim=0)
 
     @property
     def b_in(self) -> Float[torch.Tensor, "n_layers d_mlp"]:
         """Stack the MLP input biases across all layers."""
         return torch.stack(
-            [cast(Union[MLP, GatedMLP], block.mlp).b_in for block in self.blocks], dim=0
+            [cast(Union[MLP, GatedMLP], block.mlp).b_in for block in self._get_blocks()], dim=0
         )
 
     @property
     def b_out(self) -> Float[torch.Tensor, "n_layers d_model"]:
         """Stack the MLP output biases across all layers."""
         return torch.stack(
-            [cast(Union[MLP, GatedMLP], block.mlp).b_out for block in self.blocks], dim=0
+            [cast(Union[MLP, GatedMLP], block.mlp).b_out for block in self._get_blocks()], dim=0
         )
 
     @property
