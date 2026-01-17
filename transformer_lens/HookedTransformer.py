@@ -53,6 +53,8 @@ from transformer_lens.components import (
     TransformerBlock,
     Unembed,
 )
+from transformer_lens.components.mlps.mlp import MLP
+from transformer_lens.components.mlps.gated_mlp import GatedMLP
 from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookedRootModule, HookPoint
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
@@ -112,6 +114,7 @@ class HookedTransformer(HookedRootModule):
 
     ln_final: nn.Module
     tokenizer: Optional[PreTrainedTokenizerBase]
+    blocks: nn.ModuleList[TransformerBlock]  # type: ignore[type-arg]
 
     def __init__(
         self,
@@ -2075,7 +2078,6 @@ class HookedTransformer(HookedRootModule):
             self.cfg.normalization_type = "LNPre"
             self.ln_final = LayerNormPre(self.cfg)
             for layer in self.blocks:
-                layer = cast(TransformerBlock, layer)
                 layer.ln1 = LayerNormPre(self.cfg)
                 layer.ln2 = LayerNormPre(self.cfg)
                 if self.cfg.is_layer_norm_activation():
@@ -2085,7 +2087,6 @@ class HookedTransformer(HookedRootModule):
             self.cfg.normalization_type = "RMSPre"
             self.ln_final = RMSNormPre(self.cfg)
             for layer in self.blocks:
-                layer = cast(TransformerBlock, layer)
                 layer.ln1 = RMSNormPre(self.cfg)
                 layer.ln2 = RMSNormPre(self.cfg)
                 if self.cfg.is_layer_norm_activation():
@@ -2421,36 +2422,28 @@ class HookedTransformer(HookedRootModule):
     @property
     def W_K(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stack the key weights across all layers."""
-        return torch.stack(
-            [cast(TransformerBlock, block).attn.W_K for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.W_K for block in self.blocks], dim=0)
 
     @property
     def W_Q(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stack the query weights across all layers."""
-        return torch.stack(
-            [cast(TransformerBlock, block).attn.W_Q for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.W_Q for block in self.blocks], dim=0)
 
     @property
     def W_V(self) -> Float[torch.Tensor, "n_layers n_heads d_model d_head"]:
         """Stack the value weights across all layers."""
-        return torch.stack(
-            [cast(TransformerBlock, block).attn.W_V for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.W_V for block in self.blocks], dim=0)
 
     @property
     def W_O(self) -> Float[torch.Tensor, "n_layers n_heads d_head d_model"]:
         """Stack the attn output weights across all layers."""
-        return torch.stack(
-            [cast(TransformerBlock, block).attn.W_O for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.W_O for block in self.blocks], dim=0)
 
     @property
     def W_in(self) -> Float[torch.Tensor, "n_layers d_model d_mlp"]:
         """Stack the MLP input weights across all layers."""
         return torch.stack(
-            [cast(TransformerBlock, block).mlp.W_in for block in self.blocks], dim=0
+            [cast(Union[MLP, GatedMLP], block.mlp).W_in for block in self.blocks], dim=0
         )
 
     @property
@@ -2461,7 +2454,7 @@ class HookedTransformer(HookedRootModule):
         """
         if self.cfg.gated_mlp:
             return torch.stack(
-                [cast(TransformerBlock, block).mlp.W_gate for block in self.blocks], dim=0
+                [cast(GatedMLP, block.mlp).W_gate for block in self.blocks], dim=0
             )
         else:
             return None
@@ -2470,49 +2463,41 @@ class HookedTransformer(HookedRootModule):
     def W_out(self) -> Float[torch.Tensor, "n_layers d_mlp d_model"]:
         """Stack the MLP output weights across all layers."""
         return torch.stack(
-            [cast(TransformerBlock, block).mlp.W_out for block in self.blocks], dim=0
+            [cast(Union[MLP, GatedMLP], block.mlp).W_out for block in self.blocks], dim=0
         )
 
     @property
     def b_K(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stack the key biases across all layers."""
-        return torch.stack(
-            [cast(TransformerBlock, block).attn.b_K for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.b_K for block in self.blocks], dim=0)
 
     @property
     def b_Q(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stack the query biases across all layers."""
-        return torch.stack(
-            [cast(TransformerBlock, block).attn.b_Q for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.b_Q for block in self.blocks], dim=0)
 
     @property
     def b_V(self) -> Float[torch.Tensor, "n_layers n_heads d_head"]:
         """Stack the value biases across all layers."""
-        return torch.stack(
-            [cast(TransformerBlock, block).attn.b_V for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.b_V for block in self.blocks], dim=0)
 
     @property
     def b_O(self) -> Float[torch.Tensor, "n_layers d_model"]:
         """Stack the attn output biases across all layers."""
-        return torch.stack(
-            [cast(TransformerBlock, block).attn.b_O for block in self.blocks], dim=0
-        )
+        return torch.stack([block.attn.b_O for block in self.blocks], dim=0)
 
     @property
     def b_in(self) -> Float[torch.Tensor, "n_layers d_mlp"]:
         """Stack the MLP input biases across all layers."""
         return torch.stack(
-            [cast(TransformerBlock, block).mlp.b_in for block in self.blocks], dim=0
+            [cast(Union[MLP, GatedMLP], block.mlp).b_in for block in self.blocks], dim=0
         )
 
     @property
     def b_out(self) -> Float[torch.Tensor, "n_layers d_model"]:
         """Stack the MLP output biases across all layers."""
         return torch.stack(
-            [cast(TransformerBlock, block).mlp.b_out for block in self.blocks], dim=0
+            [cast(Union[MLP, GatedMLP], block.mlp).b_out for block in self.blocks], dim=0
         )
 
     @property
