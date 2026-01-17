@@ -5,7 +5,7 @@ from transformers.models.olmo2.modeling_olmo2 import Olmo2DecoderLayer, Olmo2For
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 
 
-def convert_olmo2_weights(olmo2: Olmo2ForCausalLM, cfg: HookedTransformerConfig):
+def convert_olmo2_weights(olmo2, cfg: HookedTransformerConfig):
     state_dict = {}
 
     assert cfg.d_mlp is not None
