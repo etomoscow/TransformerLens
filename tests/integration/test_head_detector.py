@@ -350,8 +350,10 @@ def test_detect_head_with_cache(error_measure: ErrorMeasure, expected: torch.Ten
 
 
 def test_detect_head_with_invalid_head_name():
-    with pytest.raises(BeartypeCallHintParamViolation) as e:
+    with pytest.raises(Exception) as e:
         detect_head(model, test_regular_sequence, "test")
+    assert "TypeCheckError" in type(e.value).__name__
+    assert "type-check" in str(e.value).lower() or "vector_type" in str(e.value)
 
 
 def test_detect_head_with_zero_sequence_length():
