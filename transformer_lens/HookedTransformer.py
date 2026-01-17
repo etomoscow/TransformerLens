@@ -679,7 +679,8 @@ class HookedTransformer(HookedRootModule):
     @overload
     def run_with_cache(
         self, *model_args, return_cache_object: Literal[True] = True, **kwargs
-    ) -> Tuple[Output, ActivationCache]: ...
+    ) -> Tuple[Output, ActivationCache]:
+        ...
 
     @overload
     def run_with_cache(
