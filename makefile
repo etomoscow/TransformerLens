@@ -1,5 +1,9 @@
 RUN := uv run
 
+# Rerun args for flaky tests (httpx timeouts during HF Hub downloads)
+# Remove this line when no longer needed
+RERUN_ARGS := --reruns 2 --reruns-delay 5
+
 dep:
 	uv sync
 
@@ -14,19 +18,19 @@ check-format:
 	$(RUN) black --check .
 
 unit-test:
-	$(RUN) pytest tests/unit
+	$(RUN) pytest tests/unit $(RERUN_ARGS)
 
 integration-test:
-	$(RUN) pytest tests/integration
+	$(RUN) pytest tests/integration $(RERUN_ARGS)
 
 acceptance-test:
-	$(RUN) pytest tests/acceptance
+	$(RUN) pytest tests/acceptance $(RERUN_ARGS)
 
 benchmark-test:
-	$(RUN) pytest tests/benchmarks
+	$(RUN) pytest tests/benchmarks $(RERUN_ARGS)
 
 coverage-report-test:
-	$(RUN) pytest --cov=transformer_lens/ --cov-report=html --cov-branch tests/integration tests/benchmarks tests/unit tests/acceptance
+	$(RUN) pytest --cov=transformer_lens/ --cov-report=html --cov-branch tests/integration tests/benchmarks tests/unit tests/acceptance $(RERUN_ARGS)
 
 docstring-test:
 	$(RUN) pytest transformer_lens/
