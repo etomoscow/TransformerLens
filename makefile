@@ -33,7 +33,7 @@ coverage-report-test:
 	$(RUN) pytest --cov=transformer_lens/ --cov-report=html --cov-branch tests/integration tests/benchmarks tests/unit tests/acceptance $(RERUN_ARGS)
 
 docstring-test:
-	$(RUN) pytest transformer_lens/
+	$(RUN) pytest transformer_lens/ $(RERUN_ARGS)
 
 notebook-test:
 	$(RUN) pytest --nbval-sanitize-with demos/doc_sanitize.cfg demos/BERT.ipynb $(RERUN_ARGS)
