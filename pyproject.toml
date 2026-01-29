@@ -45,6 +45,7 @@
             "pytest>=7.2.0",
             "pytest-cov>=4.0.0",
             "pytest-doctestplus>=1.0.0",
+            "pytest-rerunfailures>=12.0",
             "pytest-xdist>=3.8.0",
         ]
         jupyter = [
@@ -102,6 +103,7 @@
             pytest=">=7.2.0"
             pytest-cov=">=4.0.0"
             pytest-doctestplus="^1.0.0"
+            pytest-rerunfailures=">=12.0"
             pytest-xdist="^3.8.0"  # For parallel test execution
 
         [tool.poetry.group.jupyter.dependencies]
@@ -112,23 +114,24 @@
     default-groups=["dev", "jupyter", "docs"]
 
 [tool.pytest]
-    [tool.pytest.ini_options]
-        addopts=[
-            "--doctest-modules",
-            "--doctest-plus",
-            "--jaxtyping-packages=transformer_lens,beartype.beartype",
-            "--nbval",
-            "-W ignore::beartype.roar.BeartypeDecorHintPep585DeprecationWarning",
-        ]
-        testpaths = ["tests", "transformer_lens"]  # Only test these directories
-        doctest_optionflags="NORMALIZE_WHITESPACE ELLIPSIS FLOAT_CMP"
-        filterwarnings=[
-            "ignore:pkg_resources is deprecated as an API:DeprecationWarning",
-            # Ignore numpy.distutils deprecation warning caused by pandas
-            # More info: https://numpy.org/doc/stable/reference/distutils.html#module-numpy.distutils
-            "ignore:distutils Version classes are deprecated:DeprecationWarning",
-        ]
-        pythonpath=["."]
+
+[tool.pytest.ini_options]
+    addopts=[
+        "--doctest-modules",
+        "--doctest-plus",
+        "--jaxtyping-packages=transformer_lens,beartype.beartype",
+        "--nbval",
+        "-W ignore::beartype.roar.BeartypeDecorHintPep585DeprecationWarning",
+    ]
+    testpaths = ["tests", "transformer_lens"]  # Only test these directories
+    doctest_optionflags="NORMALIZE_WHITESPACE ELLIPSIS FLOAT_CMP"
+    filterwarnings=[
+        "ignore:pkg_resources is deprecated as an API:DeprecationWarning",
+        # Ignore numpy.distutils deprecation warning caused by pandas
+        # More info: https://numpy.org/doc/stable/reference/distutils.html#module-numpy.distutils
+        "ignore:distutils Version classes are deprecated:DeprecationWarning",
+    ]
+    pythonpath=["."]
 
 [tool.isort]
     extend_skip=[".venv/", "__init__.py"]
