@@ -111,8 +111,6 @@
             ipywidgets="^8.1.1"
             jupyterlab=">=3.5.0"
 
-[tool.uv]
-    default-groups=["dev", "jupyter", "docs"]
         [tool.poetry.group.docs.dependencies]
             furo={version=">=2023.3.27,<2024.0.0"}
             myst-parser={version=">=2.0.0,<3.0.0"}
@@ -126,7 +124,9 @@
             tabulate={version=">=0.9.0"}
             tiktoken = "^0.7.0"
             muutils = "^0.6.15"
->>>>>>> origin/main
+
+[tool.uv]
+    default-groups=["dev", "jupyter", "docs"]
 
 [tool.pytest]
     [tool.pytest.ini_options]
