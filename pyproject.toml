@@ -36,6 +36,7 @@
         dev = [
             "black>=23.3.0",
             "circuitsvis>=1.38.1",
+            "ipython>=8.0.0",
             "isort==5.8.0",
             "jupyter>=1.0.0",
             "mypy>=1.10.0",
@@ -97,6 +98,7 @@
             black="^23.3.0"
             circuitsvis=">=1.38.1"
             gradio=">=4.0.0"
+            ipython=">=8.0.0"
             isort="5.8.0"
             jupyter=">=1.0.0"
             mypy=">=1.10.0"
