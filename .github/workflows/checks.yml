@@ -90,9 +90,7 @@ jobs:
           uv sync
       - name: Authenticate HuggingFace CLI
         if: env.HF_TOKEN != ''
-        run: |
-          uv pip install huggingface_hub
-          uv run huggingface-cli login --token "$HF_TOKEN"
+        run: huggingface-cli login --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Unit Test
@@ -202,9 +200,7 @@ jobs:
           uv sync
       - name: Authenticate HuggingFace CLI
         if: env.HF_TOKEN != ''
-        run: |
-          uv pip install huggingface_hub
-          uv run huggingface-cli login --token "$HF_TOKEN"
+        run: huggingface-cli login --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Test Suite with Coverage Report
@@ -299,9 +295,7 @@ jobs:
           path: docs/source/_static/coverage
       - name: Authenticate HuggingFace CLI
         if: env.HF_TOKEN != ''
-        run: |
-          uv pip install huggingface_hub
-          uv run huggingface-cli login --token "$HF_TOKEN"
+        run: huggingface-cli login --token "$HF_TOKEN"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Build Docs
