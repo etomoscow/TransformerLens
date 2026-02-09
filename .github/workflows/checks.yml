@@ -38,10 +38,6 @@ on:
       HF_TOKEN:
         required: false
 
-
-env:
-  HF_HUB_DOWNLOAD_TIMEOUT: 120
-
 permissions:
   actions: write
   contents: write
@@ -215,7 +211,6 @@ jobs:
         run: make coverage-report-test
         env:
           HF_TOKEN:  ${{ secrets.HF_TOKEN }}
-          HF_HUB_DOWNLOAD_TIMEOUT: 120
       - name: Build check
         run: uv build
       - name: Upload Coverage Report Artifact
