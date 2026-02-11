@@ -15,12 +15,12 @@ OFFICIAL_MODEL_NAMES: list[str] = [
     "codellama/CodeLlama-7b-hf",
     "codellama/CodeLlama-7b-Instruct-hf",
     "codellama/CodeLlama-7b-Python-hf",
-    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     "distilgpt2",
     "EleutherAI/gpt-j-6B",
     "EleutherAI/gpt-neo-1.3B",
@@ -260,21 +260,17 @@ MODEL_ALIASES: dict[str, list[str]] = {
         "codellama/CodeLlama-7b-Instruct-hf",
     ],
     "codellama/CodeLlama-7b-Python-hf": ["CodeLlama-7b-python", "codellama/CodeLlama-7b-Python-hf"],
-    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B": [
-        "deepseek-r1-distill-llama-8b",
-        "deepseek-r1-distill-llama-8b-chat",
-    ],
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": [
         "deepseek-r1-distill-llama-70b",
         "deepseek-r1-distill-llama-70b-chat",
     ],
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B": [
+        "deepseek-r1-distill-llama-8b",
+        "deepseek-r1-distill-llama-8b-chat",
+    ],
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": [
         "deepseek-r1-distill-qwen-1.5b",
         "deepseek-r1-distill-qwen-1.5b-chat",
-    ],
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B": [
-        "deepseek-r1-distill-qwen-7b",
-        "deepseek-r1-distill-qwen-7b-chat",
     ],
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B": [
         "deepseek-r1-distill-qwen-14b",
@@ -283,6 +279,10 @@ MODEL_ALIASES: dict[str, list[str]] = {
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B": [
         "deepseek-r1-distill-qwen-32b",
         "deepseek-r1-distill-qwen-32b-chat",
+    ],
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B": [
+        "deepseek-r1-distill-qwen-7b",
+        "deepseek-r1-distill-qwen-7b-chat",
     ],
     "distilgpt2": ["distillgpt2", "distill-gpt2", "distil-gpt2", "gpt2-xs"],
     "EleutherAI/gpt-j-6B": ["gpt-j-6B", "gpt-j", "gptj"],
