@@ -86,6 +86,12 @@ def map_default_transformer_lens_config(hf_config):
         tl_config.n_ctx = hf_config.max_position_embeddings
     elif hasattr(hf_config, "max_length"):
         tl_config.n_ctx = hf_config.max_length
+    elif hasattr(hf_config, "seq_length"):
+        tl_config.n_ctx = hf_config.seq_length
+    else:
+        # Models like Bloom use ALiBi (no positional embeddings) and have no
+        # context length field. Default to 2048 as a reasonable fallback.
+        tl_config.n_ctx = 2048
     if hasattr(hf_config, "n_inner"):
         tl_config.d_mlp = hf_config.n_inner
     elif hasattr(hf_config, "intermediate_size"):
@@ -237,6 +243,11 @@ def boot(
         device = get_device()
     adapter.cfg.device = str(device)
     model_class = get_hf_model_class_for_architecture(architecture)
+    # Ensure pad_token_id exists on HF config. Transformers v5 raises AttributeError
+    # for missing config attributes (instead of returning None), which crashes models
+    # like Phi-1 that access config.pad_token_id during __init__.
+    if not hasattr(hf_config, "pad_token_id") or "pad_token_id" not in hf_config.__dict__:
+        hf_config.pad_token_id = getattr(hf_config, "eos_token_id", None)
     model_kwargs = {"config": hf_config, "torch_dtype": dtype}
     if hasattr(adapter.cfg, "attn_implementation") and adapter.cfg.attn_implementation is not None:
         model_kwargs["attn_implementation"] = adapter.cfg.attn_implementation
