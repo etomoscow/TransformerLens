@@ -110,6 +110,8 @@ def map_default_transformer_lens_config(hf_config):
         tl_config.experts_per_token = hf_config.num_experts_per_tok
     if hasattr(hf_config, "sliding_window") and hf_config.sliding_window is not None:
         tl_config.sliding_window = hf_config.sliding_window
+    if getattr(hf_config, "use_parallel_residual", False):
+        tl_config.parallel_attn_mlp = True
     tl_config.default_prepend_bos = True
     return tl_config
 
@@ -152,6 +154,7 @@ def determine_architecture_from_hf_config(hf_config):
             "qwen": "QwenForCausalLM",
             "qwen2": "Qwen2ForCausalLM",
             "qwen3": "Qwen3ForCausalLM",
+            "stablelm": "StableLmForCausalLM",
             "t5": "T5ForConditionalGeneration",
         }
         if model_type in model_type_mappings:
