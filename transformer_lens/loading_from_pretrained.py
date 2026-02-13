@@ -1450,10 +1450,19 @@ def convert_hf_model_config(model_name: str, **kwargs: Any) -> dict[str, Any]:
             "positional_embedding_type": "rotary",
             "rotary_base": getattr(hf_config, "rope_theta", 500000.0),
             "gated_mlp": True,
-            "use_qk_norm": True,
-            "use_normalization_before_and_after": True,
             "tie_word_embeddings": hf_config.tie_word_embeddings,
         }
+        # OLMo 3 uses YARN RoPE scaling
+        rope_scaling = getattr(hf_config, "rope_scaling", None)
+        if rope_scaling and rope_scaling.get("rope_type") == "yarn":
+            cfg_dict["use_yarn_rope"] = True
+            cfg_dict["yarn_factor"] = rope_scaling.get("factor", 8.0)
+            cfg_dict["yarn_attention_factor"] = rope_scaling.get("attention_factor", 1.0)
+            cfg_dict["yarn_beta_fast"] = rope_scaling.get("beta_fast", 32.0)
+            cfg_dict["yarn_beta_slow"] = rope_scaling.get("beta_slow", 1.0)
+            cfg_dict["yarn_original_max_position_embeddings"] = rope_scaling.get(
+                "original_max_position_embeddings", 4096
+            )
         layer_types = getattr(hf_config, "layer_types", None)
         if layer_types:
             cfg_dict["attn_types"] = [
