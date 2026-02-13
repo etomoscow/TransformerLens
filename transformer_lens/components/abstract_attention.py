@@ -89,6 +89,18 @@ class AbstractAttention(ABC, nn.Module):
         if self.cfg.use_qk_norm:
             self.q_norm = RMSNorm(self.cfg, length=self.cfg.d_head)
             self.k_norm = RMSNorm(self.cfg, length=self.cfg.d_head)
+
+        elif (
+            self.cfg.original_architecture == "OlmoeForCausalLM"
+            or self.cfg.original_architecture == "Olmo2ForCausalLM"
+        ):
+            self.q_norm: Optional[RMSNorm] = RMSNorm(self.cfg, self.cfg.d_model)
+            if self.cfg.original_architecture == "Olmo2ForCausalLM":
+                k_norm_dim = self.cfg.d_model
+            else:
+                assert self.cfg.n_key_value_heads is not None
+                k_norm_dim = self.cfg.d_head * self.cfg.n_key_value_heads
+            self.k_norm: Optional[RMSNorm] = RMSNorm(self.cfg, k_norm_dim)
         else:
             self.q_norm = None
             self.k_norm = None
@@ -217,6 +229,34 @@ class AbstractAttention(ABC, nn.Module):
 
         q, k, v = self.calculate_qkv_matrices(query_input, key_input, value_input)
 
+        # OLMoE uses QK-norm.
+        if (
+            self.cfg.original_architecture == "OlmoeForCausalLM"
+            or self.cfg.original_architecture == "Olmo2ForCausalLM"
+        ):
+            assert self.q_norm is not None
+            assert self.k_norm is not None
+            q = einops.rearrange(
+                self.q_norm(
+                    einops.rearrange(
+                        q,
+                        "batch pos head_index d_head -> batch pos (head_index d_head)",
+                    )
+                ),
+                "batch kv_pos (head_index d_head) -> batch kv_pos head_index d_head",
+                head_index=q.shape[2],
+            )
+            k = einops.rearrange(
+                self.k_norm(
+                    einops.rearrange(
+                        k,
+                        "batch pos head_index d_head -> batch pos (head_index d_head)",
+                    )
+                ),
+                "batch kv_pos (head_index d_head) -> batch kv_pos head_index d_head",
+                head_index=k.shape[2],
+            )
+
         if past_kv_cache_entry is not None:
             # Appends the new keys and values to the cached values, and automatically updates the cache
             kv_cache_pos_offset = past_kv_cache_entry.past_keys.size(1)
@@ -271,7 +311,8 @@ class AbstractAttention(ABC, nn.Module):
                         device=attn_scores.device,
                     )
 
-            attn_scores += position_bias
+            if position_bias is not None:  # Add None check
+                attn_scores += position_bias
         if self.cfg.attention_dir == "causal":
             # If causal attention, we mask it to only attend backwards. If bidirectional, we don't mask.
             attn_scores = self.apply_causal_mask(
@@ -732,7 +773,7 @@ class AbstractAttention(ABC, nn.Module):
     @staticmethod
     def create_alibi_multipliers(
         n_heads: int, device: Optional[Union[str, torch.device]] = None
-    ) -> Float[torch.Tensor, "head_idx"]:
+    ) -> Float[torch.Tensor, "n_heads"]:
         """Create the ALiBi Scalar Multipliers for each Head.
 
         For n heads, the set of multipliers (m) is the geometric sequence that starts at 2^(-8/n), and

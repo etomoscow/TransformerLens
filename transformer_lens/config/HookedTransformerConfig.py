@@ -199,6 +199,7 @@ class HookedTransformerConfig(TransformerLensConfig):
             attention layers. Used by models with hybrid local/global attention (e.g., Gemma 3)
             which use different RoPE bases for local (10k) and global (1M) attention. Defaults
             to None, which means the standard rotary_base is used for all layers.
+        norm_topk_prob (bool): Whether to normalize the top-k probabilities in the MoE layer.
     """
 
     model_name: str = "custom"
@@ -259,6 +260,7 @@ class HookedTransformerConfig(TransformerLensConfig):
     NTK_by_parts_high_freq_factor: float = 4.0
     NTK_by_parts_factor: float = 8.0
     NTK_original_ctx_len: int = 8192
+    norm_topk_prob: bool = False
 
     def __post_init__(self):
         # Call parent's post_init first

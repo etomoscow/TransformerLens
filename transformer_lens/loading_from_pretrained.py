@@ -38,6 +38,9 @@ from transformer_lens.pretrained.weight_conversions import (
     convert_neel_solu_old_weights,
     convert_neo_weights,
     convert_neox_weights,
+    convert_olmo2_weights,
+    convert_olmo_weights,
+    convert_olmoe_weights,
     convert_opt_weights,
     convert_phi3_weights,
     convert_phi_weights,
@@ -1231,6 +1234,231 @@ def convert_hf_model_config(model_name: str, **kwargs: Any) -> dict[str, Any]:
                 "local",
             ],
         }
+    elif official_model_name.startswith("google/gemma-2b"):
+        # Architecture for Gemma 2b and Gemma 2b Instruct models
+        cfg_dict = {
+            "d_model": 2048,
+            "d_head": 256,
+            "n_heads": 8,
+            "d_mlp": 16384,
+            "n_layers": 18,
+            "n_ctx": 8192,
+            "eps": 1e-06,
+            "d_vocab": 256000,
+            "act_fn": "gelu_new",
+            "initializer_range": 0.02,
+            "normalization_type": "RMS",
+            "rotary_base": 10000,
+            "rotary_dim": 256,
+            "positional_embedding_type": "rotary",
+            "use_attn_scale": True,
+            "n_key_value_heads": 1,
+            "gated_mlp": True,
+            "final_rms": True,
+        }
+    elif official_model_name.startswith("google/gemma-7b"):
+        # Architecture for Gemma 7b and Gemma 7b Instruct models
+        cfg_dict = {
+            "d_model": 3072,
+            "d_head": 256,
+            "n_heads": 16,
+            "d_mlp": 24576,
+            "n_layers": 28,
+            "n_ctx": 8192,
+            "eps": 1e-06,
+            "d_vocab": 256000,
+            "act_fn": "gelu_new",
+            "initializer_range": 0.02,
+            "normalization_type": "RMS",
+            "rotary_base": 10000.0,
+            "rotary_dim": 256,
+            "positional_embedding_type": "rotary",
+            "use_attn_scale": True,
+            "n_key_value_heads": 16,
+            "gated_mlp": True,
+            "final_rms": True,
+        }
+    elif official_model_name.startswith("google/gemma-2-2b"):
+        # Architecture for Gemma-2 2b and Gemma-2 2b Instruct models
+        cfg_dict = {
+            "d_model": 2304,
+            "d_head": 256,
+            "n_heads": 8,
+            "d_mlp": 9216,
+            "n_layers": 26,
+            "n_ctx": 8192,
+            "eps": 1e-06,
+            "d_vocab": 256000,
+            "act_fn": "gelu_pytorch_tanh",
+            "initializer_range": 0.02,
+            "normalization_type": "RMS",
+            "rotary_base": 10000.0,
+            "positional_embedding_type": "rotary",
+            "use_attn_scale": True,
+            "n_key_value_heads": 4,
+            "window_size": 4096,
+            "use_local_attn": True,
+            "attn_types": ["global", "local"] * 21,  # Alternate global and local attn
+            "attn_scores_soft_cap": 50.0,
+            "output_logits_soft_cap": 30.0,
+            "gated_mlp": True,
+            "final_rms": True,
+            "use_normalization_before_and_after": True,
+        }
+    elif official_model_name.startswith("google/gemma-2-9b"):
+        # Architecture for Gemma-2 9b and Gemma-2 9b Instruct models
+        cfg_dict = {
+            "d_model": 3584,
+            "d_head": 256,
+            "n_heads": 16,
+            "d_mlp": 14336,
+            "n_layers": 42,
+            "n_ctx": 8192,
+            "eps": 1e-06,
+            "d_vocab": 256000,
+            "act_fn": "gelu_pytorch_tanh",
+            "initializer_range": 0.02,
+            "normalization_type": "RMS",
+            "rotary_base": 10000.0,
+            "positional_embedding_type": "rotary",
+            "use_attn_scale": True,
+            "n_key_value_heads": 8,
+            "window_size": 4096,
+            "use_local_attn": True,
+            "attn_types": ["global", "local"] * 21,  # Alternate global and local attn
+            "attn_scores_soft_cap": 50.0,
+            "output_logits_soft_cap": 30.0,
+            "gated_mlp": True,
+            "final_rms": True,
+            "use_normalization_before_and_after": True,
+        }
+    elif official_model_name.startswith("google/gemma-2-27b"):
+        # Architecture for Gemma-2 27b and Gemma-2 27b Instruct models
+        cfg_dict = {
+            "d_model": 4608,
+            "d_head": 128,
+            "n_heads": 32,
+            "d_mlp": 36864,
+            "n_layers": 46,
+            "n_ctx": 8192,
+            "eps": 1e-06,
+            "d_vocab": 256000,
+            "act_fn": "gelu_pytorch_tanh",
+            "initializer_range": 0.02,
+            "normalization_type": "RMS",
+            "rotary_base": 10000.0,
+            "positional_embedding_type": "rotary",
+            "use_attn_scale": True,
+            "attn_scale": 12.0,
+            "n_key_value_heads": 16,
+            "window_size": 4096,
+            "use_local_attn": True,
+            "attn_types": ["global", "local"] * 23,  # Alternate global and local attn
+            "attn_scores_soft_cap": 50.0,
+            "output_logits_soft_cap": 30.0,
+            "gated_mlp": True,
+            "final_rms": True,
+            "use_normalization_before_and_after": True,
+        }
+    elif official_model_name.startswith("allenai/OLMo-1B") and official_model_name.endswith("hf"):
+        cfg_dict = {
+            "d_model": 2048,
+            "d_head": 128,
+            "n_heads": 16,
+            "d_mlp": 8192,
+            "n_layers": 16,
+            "n_ctx": 2048,
+            "eps": 1e-05,
+            "d_vocab": 50304,
+            "act_fn": "silu",
+            "initializer_range": 0.02,
+            "normalization_type": "LN",
+            "rotary_base": 10000.0,
+            "attn_types": ["global"] * 16,
+            "positional_embedding_type": "rotary",
+            "gated_mlp": True,
+        }
+    elif official_model_name.startswith("allenai/OLMo-7B") and official_model_name.endswith("hf"):
+        cfg_dict = {
+            "d_model": 4096,
+            "d_head": 128,
+            "n_heads": 32,
+            "d_mlp": 11008,
+            "n_layers": 32,
+            "n_ctx": 2048,
+            "eps": 1e-05,
+            "d_vocab": 50304,
+            "act_fn": "silu",
+            "initializer_range": 0.02,
+            "normalization_type": "LN",
+            "rotary_base": 10000.0,
+            "attn_types": ["global"] * 32,
+            "positional_embedding_type": "rotary",
+            "gated_mlp": True,
+        }
+    elif official_model_name.startswith("allenai/OLMo-2-0425-1B"):
+        cfg_dict = {
+            "d_model": 2048,
+            "d_head": 128,
+            "n_heads": 16,
+            "d_mlp": 8192,
+            "n_layers": 16,
+            "n_ctx": 4096,
+            "eps": 1e-06,
+            "d_vocab": 100352,
+            "act_fn": "silu",
+            "initializer_range": 0.02,
+            "normalization_type": "RMS",
+            "rotary_base": 500000.0,
+            "attn_types": ["global"] * 16,
+            "positional_embedding_type": "rotary",
+            "gated_mlp": True,
+        }
+    elif official_model_name.startswith("allenai/OLMo-2-1124-7B"):
+        cfg_dict = {
+            "d_model": 4096,
+            "d_head": 128,
+            "n_heads": 32,
+            "d_mlp": 11008,
+            "n_layers": 32,
+            "n_ctx": 4096,
+            "eps": 1e-06,
+            "d_vocab": 100352,
+            "act_fn": "silu",
+            "initializer_range": 0.02,
+            "normalization_type": "RMS",
+            "rotary_base": 500000.0,
+            "attn_types": ["global"] * 32,
+            "positional_embedding_type": "rotary",
+            "gated_mlp": True,
+        }
+    elif architecture == "OlmoeForCausalLM":
+        cfg_dict = {
+            "d_model": hf_config.hidden_size,
+            "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
+            "n_heads": hf_config.num_attention_heads,
+            "d_mlp": hf_config.intermediate_size,
+            "n_layers": hf_config.num_hidden_layers,
+            "n_ctx": hf_config.max_position_embeddings,
+            "eps": hf_config.rms_norm_eps,
+            "d_vocab": hf_config.vocab_size,
+            "act_fn": hf_config.hidden_act,
+            "num_experts": hf_config.num_experts,
+            "experts_per_token": hf_config.num_experts_per_tok,
+            "norm_topk_prob": hf_config.norm_topk_prob,
+            "n_key_value_heads": hf_config.num_key_value_heads,
+            "rotary_base": getattr(
+                hf_config,
+                "rope_theta",
+                hf_config.rope_parameters.get("rope_theta", 10000.0),
+            ),
+            "tie_word_embeddings": hf_config.tie_word_embeddings,
+            "initializer_range": hf_config.initializer_range,
+            "positional_embedding_type": "rotary",
+            "rotary_dim": hf_config.hidden_size // hf_config.num_attention_heads,
+            "gated_mlp": True,
+            "normalization_type": "RMS",
+        }
     elif architecture == "T5ForConditionalGeneration":
         cfg_dict = {
             "d_model": hf_config.d_model,
@@ -1387,6 +1615,15 @@ def get_pretrained_model_config(
     ):
         logging.warning(
             "You tried to specify fold_ln=True for a shortformer model, but this can't be done! Setting fold_ln=False instead."
+        )
+        fold_ln = False
+
+    # OLMo 2 uses post-norm (norm after attention/MLP, not before), so folding
+    # the norm weights into adjacent linear layers is not mathematically valid.
+    if cfg_dict.get("original_architecture") == "Olmo2ForCausalLM" and fold_ln:
+        logging.warning(
+            "fold_ln=True is incompatible with OLMo 2's post-norm architecture. "
+            "Setting fold_ln=False."
         )
         fold_ln = False
 
@@ -1668,6 +1905,12 @@ def get_pretrained_state_dict(
             state_dict = convert_gemma_weights(hf_model, cfg)
         elif cfg.original_architecture == "Gemma3ForConditionalGeneration":
             state_dict = convert_gemma_weights(hf_model, cfg)
+        elif cfg.original_architecture == "OlmoForCausalLM":
+            state_dict = convert_olmo_weights(hf_model, cfg)
+        elif cfg.original_architecture == "Olmo2ForCausalLM":
+            state_dict = convert_olmo2_weights(hf_model, cfg)
+        elif cfg.original_architecture == "OlmoeForCausalLM":
+            state_dict = convert_olmoe_weights(hf_model, cfg)
         else:
             raise ValueError(
                 f"Loading weights from the architecture is not currently supported: {cfg.original_architecture}, generated from model name {cfg.model_name}. Feel free to open an issue on GitHub to request this feature."
