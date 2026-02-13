@@ -29,9 +29,9 @@ from transformer_lens.components import (
     Unembed,
 )
 from transformer_lens.components.mlps.gated_mlp import GatedMLP
+from transformer_lens.config.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookedRootModule, HookPoint
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.utilities import devices
 
 T = TypeVar("T", bound="HookedEncoder")
@@ -424,7 +424,8 @@ class HookedEncoder(HookedRootModule):
         model.load_state_dict(state_dict, strict=False)
 
         if move_to_device:
-            model.to(cfg.device)
+            if cfg.device is not None:
+                model.to(cfg.device)
 
         print(f"Loaded pretrained model {model_name} into HookedEncoder")
 

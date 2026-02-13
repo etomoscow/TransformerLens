@@ -15,7 +15,7 @@ from typing import cast
 import einops
 import torch
 
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
+from transformer_lens.config.HookedTransformerConfig import HookedTransformerConfig
 
 
 def convert_olmo3_weights(olmo3, cfg: HookedTransformerConfig):
