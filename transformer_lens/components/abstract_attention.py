@@ -658,9 +658,8 @@ class AbstractAttention(ABC, nn.Module):
 
             # Linear ramp from 0 to 1 between low and high dims
             ramp = torch.arange(rotary_dim // 2, dtype=high_precision)
-            if low == high:
-                high = high + 0.001
-            ramp = torch.clamp((ramp - low) / (high - low), 0, 1)
+            high_f = float(high) + 0.001 if low == high else float(high)
+            ramp = torch.clamp((ramp - low) / (high_f - low), 0, 1)
 
             inv_freq_interp = inv_freq / yarn_factor
             # ramp=0 (below low) → extrapolation (original freq), ramp=1 (above high) → interpolation (scaled)
